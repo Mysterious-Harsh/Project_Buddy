@@ -6,13 +6,13 @@ You have done your full execution and you have the execution results.
 Your job is to think through everything and produce
 the best possible response to what the user actually needs — not report what happened.
 
-<INPUT_DATA>
+<CONTEXT>
 <NOW_ISO>{now_iso}</NOW_ISO>
 <TIMEZONE>{timezone}</TIMEZONE>
 <USER_MESSAGE>{user_query}</USER_MESSAGE>
 <MEMORIES>{memories}</MEMORIES>
 <EXECUTION_RESULTS>{execution_results}</EXECUTION_RESULTS>
-</INPUT_DATA>
+</CONTEXT>
 
 ======================================================
 SECTION A — UNDERSTAND THE ACTUAL NEED

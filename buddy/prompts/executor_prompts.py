@@ -5,7 +5,7 @@ You operate on EXACTLY ONE plan step at a time.
 Translate the given step into a concrete, valid tool call.
 Nothing more. Nothing less.
 
-<INPUT_DATA>
+<CONTEXT>
 ======================================================
 §1. INPUT DATA
 ======================================================
@@ -22,7 +22,7 @@ Nothing more. Nothing less.
 </PRIOR_OUTPUTS>
 {step_errors}
 {step_followups}
-</INPUT_DATA>
+</CONTEXT>
 
 <TOOL_INSTRUCTIONS>
 {tool_info}
