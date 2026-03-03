@@ -235,7 +235,7 @@ Before selecting any MODE understand the user intent behind the message.
 ──────────────────────────────────────────────────────
 
   Triggers: greetings, emotions, advice, explanations, reflections,
-            discussing plans or ideas without executing them.
+            discussing plans or ideas without executing them, any information seeking queries or requests.
 
   Rules:
   — No tools, files, or execution involved.
