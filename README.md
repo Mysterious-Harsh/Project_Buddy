@@ -305,7 +305,7 @@ Muting is not just pausing — the mic is physically released back to the OS and
 | --- | -------------------------- | ------------------------------------------------------- |
 | 🧠  | **Multi-tier memory**      | Flash → Short → Long, persisted across sessions         |
 | 🌙  | **Sleep consolidation**    | Auto-runs on idle, cancels instantly on wake            |
-| ⚡  | **ACT mode**               | Real OS-level action execution with retry logic         |
+| ⚡️  | **ACT mode**               | Real OS-level action execution with retry logic         |
 | 🔒  | **Fully offline**          | Local LLM via llama.cpp — zero cloud calls              |
 | 🎤  | **Always-listening voice** | No wake word — continuous dual-VAD STT pipeline         |
 | 🔍  | **Semantic retrieval**     | Vector embeddings + reranking for memory search         |
@@ -332,7 +332,7 @@ pip install -r requirements.txt
 cp config/buddy.example.toml ~/.buddy/config/buddy.toml
 
 # Launch
-python main.py
+python -m buddy.main
 ```
 
 > **Requirements:** Python 3.10+, a GGUF model file, ~8GB RAM minimum (depends on model)
