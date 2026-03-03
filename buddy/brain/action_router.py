@@ -377,6 +377,8 @@ class ActionRouter:
                 if attempt > self._max_step_attempts:
                     break
                 if attempt > 0:
+                    if on_token:
+                        on_token("Oo.. Got some error let me solve it 🫣", False)
                     tool_prompt = tool_info.get("error_prompt", tool_prompt)
 
                 logger.info(
