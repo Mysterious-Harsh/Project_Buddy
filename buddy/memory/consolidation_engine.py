@@ -138,6 +138,9 @@ _MIN_CYCLES_FOR_LONG: int = 2
 class SleepBudget:
     # Scan limits
     max_candidates: int = 300
+    consolidation_cooldown_sec: float = (
+        86400.0  # seconds a memory rests after being processed
+    )
     top_k_neighbors: int = 20
     tau_dup: float = 0.80  # cosine similarity threshold for near-duplicates
 
@@ -543,8 +546,16 @@ def _compute_strength(
 # =============================================================================
 
 
-def _load_candidates(sqlite_store: Any, *, limit: int) -> List[MemoryEntry]:
-    cands = sqlite_store.list_candidates_for_consolidation(limit=limit)
+def _load_candidates(
+    sqlite_store: Any,
+    *,
+    limit: int,
+    cooldown_seconds: float = 86400.0,
+) -> List[MemoryEntry]:
+    cands = sqlite_store.list_candidates_for_consolidation(
+        limit=limit,
+        cooldown_seconds=cooldown_seconds,
+    )
     return [m for m in cands if int(getattr(m, "deleted", 0) or 0) == 0]
 
 
@@ -1234,7 +1245,11 @@ def run_consolidation(
         )
 
     # Phase 0: Scan.
-    cands = _load_candidates(sqlite_store, limit=b.max_candidates)
+    cands = _load_candidates(
+        sqlite_store,
+        limit=b.max_candidates,
+        cooldown_seconds=b.consolidation_cooldown_sec,
+    )
     id_map: Dict[str, MemoryEntry] = {m.id: m for m in cands}
     neighbor_map = _build_neighbor_map(
         vector_store=vector_store,

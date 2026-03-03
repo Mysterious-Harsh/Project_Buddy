@@ -558,34 +558,34 @@ class SQLiteStore:
         )
         return [self._row_to_entry(r) for r in cur.fetchall()]
 
-    def list_candidates_for_consolidation(self, limit: int = 300) -> List[MemoryEntry]:
-        """
-        Consolidation candidates listing.
-
-        Rule:
-        - eligible if COALESCE(last_consolidated_at, created_at) <= now - 2 days
-        - includes flash/short/long INCLUDING summary memories
-        - excludes deleted rows only
-        - orders by most recently used (last_accessed fallback to created_at)
-        """
-        limit = min(int(limit), 1000)
-
-        now = time.time()
-        min_age_sec = 1.0 * 24.0 * 3600.0  # 2 days
-        cutoff = float(now - min_age_sec)
-
-        cur = self._conn.cursor()
-        cur.execute(
-            """
-            SELECT * FROM memories
-            WHERE deleted=0
-            AND COALESCE(last_consolidated_at, created_at) <= ?
-            ORDER BY COALESCE(last_accessed, created_at) DESC, created_at DESC
-            LIMIT ?;
-            """,
-            (cutoff, limit),
-        )
-        return [self._row_to_entry(r) for r in cur.fetchall()]
+    def list_candidates_for_consolidation(
+        self,
+        *,
+        limit: int,
+        cooldown_seconds: float = 86400.0,  # default: 24h rest after being processed
+    ) -> List[MemoryEntry]:
+        cutoff = time.time() - cooldown_seconds
+        with sqlite3.connect(self.db_path) as c:
+            rows = c.execute(
+                """
+                SELECT id, text, importance, memory_type, access_count, created_at,
+                    last_accessed, deleted, consolidated_into_id,
+                    last_consolidated_at, metadata
+                FROM memories
+                WHERE deleted = 0
+                AND (
+                    last_consolidated_at IS NULL        -- never processed: always eligible
+                    OR last_consolidated_at < ?         -- cooldown has expired
+                )
+                ORDER BY
+                    last_consolidated_at ASC NULLS FIRST, -- least-recently-processed first
+                    importance DESC,                       -- tie-break: higher importance
+                    created_at ASC                         -- final tie-break: older first
+                LIMIT ?
+                """,
+                (cutoff, limit),
+            ).fetchall()
+        return [self._row_to_entry(r) for r in rows]
 
     # ---------------------------------------------------------------------------
     # Method 1 — soft_delete_with_snapshot
