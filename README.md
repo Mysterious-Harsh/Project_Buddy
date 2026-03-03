@@ -51,13 +51,13 @@ Every component is designed with a single constraint in mind: **your data never 
 
 Most AI assistants today share the same fundamental flaw — they have no real memory of you.
 
-| Problem | What everyone else does | What Buddy does |
-|---|---|---|
-| Memory | Forgets after the context window | Persistent multi-tier memory across all sessions |
-| Quality | Accumulates junk forever | Self-consolidates during sleep — denser over time |
-| Privacy | Cloud APIs, remote inference | 100% local, air-gap capable |
-| Understanding | Treats every message as new | Builds a structured model of who you are |
-| Prompts | One giant system prompt | Purpose-built per-module prompts, minimal and precise |
+| Problem       | What everyone else does          | What Buddy does                                       |
+| ------------- | -------------------------------- | ----------------------------------------------------- |
+| Memory        | Forgets after the context window | Persistent multi-tier memory across all sessions      |
+| Quality       | Accumulates junk forever         | Self-consolidates during sleep — denser over time     |
+| Privacy       | Cloud APIs, remote inference     | 100% local, air-gap capable                           |
+| Understanding | Treats every message as new      | Builds a structured model of who you are              |
+| Prompts       | One giant system prompt          | Purpose-built per-module prompts, minimal and precise |
 
 Buddy was built to explore a different direction: **AI as a private, self-maintaining cognitive system that actually knows you.**
 
@@ -67,45 +67,45 @@ Buddy was built to explore a different direction: **AI as a private, self-mainta
 
 ```
 ╔══════════════════════════════════════════════════════════════════╗
-║                   BUDDY  ·  COGNITIVE  PIPELINE                 ║
+║                   BUDDY  ·  COGNITIVE  PIPELINE                  ║
 ╠══════════════════════════════════════════════════════════════════╣
 ║                                                                  ║
-║   ┌─────────────┐     ┌──────────────────┐                      ║
-║   │  User Input │────▶│  Retrieval Gate  │                      ║
-║   └─────────────┘     └────────┬─────────┘                      ║
+║   ┌─────────────┐     ┌──────────────────┐                       ║
+║   │  User Input │────▶│  Retrieval Gate  │                       ║
+║   └─────────────┘     └────────┬─────────┘                       ║
 ║                                │                                 ║
-║                    ┌───────────▼───────────┐                    ║
+║                    ┌───────────▼───────────┐                     ║
 ║                    │   Memory Search        │                    ║
 ║                    │  (Vector + SQLite)     │                    ║
-║                    └───────────┬───────────┘                    ║
+║                    └───────────┬───────────┘                     ║
 ║                                │                                 ║
-║                    ┌───────────▼───────────┐                    ║
+║                    ┌───────────▼───────────┐                     ║
 ║                    │   Brain  /  LLM        │                    ║
 ║                    │  (Reasoning Engine)    │                    ║
-║                    └────────┬──────────────┘                    ║
+║                    └────────┬──────────────┘                     ║
 ║                             │                                    ║
-║              ┌──────────────┼──────────────┐                    ║
-║              ▼                             ▼                    ║
-║     ┌────────────────┐           ┌──────────────────┐           ║
-║     │  ACT  Mode     │           │  Direct Response │           ║
-║     │  (if needed)   │           └──────────────────┘           ║
-║     └───────┬────────┘                                          ║
+║              ┌──────────────┼──────────────┐                     ║
+║              ▼                             ▼                     ║
+║     ┌────────────────┐           ┌──────────────────┐            ║
+║     │  ACT  Mode     │           │  Direct Response │            ║
+║     │  (if needed)   │           └──────────────────┘            ║
+║     └───────┬────────┘                                           ║
 ║             │                                                    ║
-║     ┌───────▼────────┐                                          ║
-║     │  Tool Executor │  ← terminal, filesystem, OS              ║
-║     └───────┬────────┘                                          ║
+║     ┌───────▼────────┐                                           ║
+║     │  Tool Executor │  ← terminal, filesystem, OS               ║
+║     └───────┬────────┘                                           ║
 ║             │                                                    ║
-║     ┌───────▼────────┐                                          ║
-║     │    Analyzer    │  ← validates output, retries on failure  ║
-║     └───────┬────────┘                                          ║
+║     ┌───────▼────────┐                                           ║
+║     │    Analyzer    │  ← validates output, retries on failure   ║
+║     └───────┬────────┘                                           ║
 ║             │                                                    ║
-║     ┌───────▼────────┐                                          ║
-║     │  Memory Update │  ← stores what matters, discards noise   ║
-║     └────────────────┘                                          ║
+║     ┌───────▼────────┐                                           ║
+║     │  Memory Update │  ← stores what matters, discards noise    ║
+║     └────────────────┘                                           ║
 ║                                                                  ║
-║  Memory is read at the start of every turn.                     ║
-║  Memory is written at the end of every turn.                    ║
-║  Everything in between serves the memory system.               ║
+║  Memory is read at the start of every turn.                      ║
+║  Memory is written at the end of every turn.                     ║
+║  Everything in between serves the memory system.                 ║
 ╚══════════════════════════════════════════════════════════════════╝
 ```
 
@@ -121,22 +121,22 @@ Buddy models human memory the way it actually works: information enters as raw e
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│                    MEMORY  TIERS                         │
-├──────────────┬──────────────────┬───────────────────────┤
-│    FLASH      │    SHORT-TERM    │      LONG-TERM         │
-│   (hot)       │   (warm)         │      (cold)            │
-├──────────────┼──────────────────┼───────────────────────┤
-│ Current turn  │ Recent sessions  │ Persistent knowledge   │
-│ Immediate ctx │ Recent facts     │ Core identity facts    │
-│ Discardable   │ Consolidation ↑  │ Rarely modified        │
-│               │ candidate        │                        │
-├──────────────┴──────────────────┴───────────────────────┤
-│  Storage: SQLite (metadata + text)  +  Qdrant (vectors)  │
-│  Retrieval: Semantic search  +  Reranking                │
+│                    MEMORY  TIERS                        │
+├───────────────┬──────────────────┬──────────────────────┤
+│    FLASH      │    SHORT-TERM    │      LONG-TERM       │
+│   (hot)       │   (warm)         │      (cold)          │
+├───────────────┼──────────────────┼──────────────────────┤
+│ Current turn  │ Recent sessions  │ Persistent knowledge │
+│ Immediate ctx │ Recent facts     │ Core identity facts  │
+│ Discardable   │ Consolidation ↑  │ Rarely modified      │
+│               │ candidate        │                      │
+├───────────────┴──────────────────┴──────────────────────┤
+│  Storage: SQLite (metadata + text)  +  Qdrant (vectors) │
+│  Retrieval: Semantic search  +  Reranking               │
 └─────────────────────────────────────────────────────────┘
 ```
 
-Every memory carries: an importance score, access count, recency weight, and a semantic embedding. Retrieval is context-aware — Buddy pulls what is *relevant*, not just what is *recent*. A fact you mentioned once six months ago surfaces when it matters, and fades when it doesn't.
+Every memory carries: an importance score, access count, recency weight, and a semantic embedding. Retrieval is context-aware — Buddy pulls what is _relevant_, not just what is _recent_. A fact you mentioned once six months ago surfaces when it matters, and fades when it doesn't.
 
 ---
 
@@ -145,21 +145,21 @@ Every memory carries: an importance score, access count, recency weight, and a s
 When Buddy is idle, a background consolidation engine runs automatically — the same way the human brain consolidates memories during sleep.
 
 ```
-┌─────────────────────────────────────────────────────┐
+┌──────────────────────────────────────────────────────┐
 │               SLEEP  CONSOLIDATION  CYCLE            │
-├─────────────────────────────────────────────────────┤
+├──────────────────────────────────────────────────────┤
 │                                                      │
 │  SCAN      →  Load flash + short-term memories       │
 │  CLUSTER   →  Group semantically related entries     │
 │  SCORE     →  ACT-R activation + arousal + salience  │
 │  SUMMARIZE →  LLM condenses clusters → new entries   │
 │  PROMOTE   →  High-strength entries → long-term      │
-│  DEMOTE    →  Low-strength entries → flash / deleted  │
+│  DEMOTE    →  Low-strength entries → flash / deleted │
 │  PRUNE     →  Duplicates, dead traces, interference  │
 │                                                      │
 │  RESULT: Smaller, denser, higher-quality memory      │
 │                                                      │
-└─────────────────────────────────────────────────────┘
+└──────────────────────────────────────────────────────┘
 ```
 
 **When you wake Buddy up** — the consolidation cancels immediately and Buddy responds without delay. No waiting for a background job to finish.
@@ -177,7 +177,7 @@ The engine is research-grounded:
 
 ## `$ act --show-mode`
 
-ACT mode is a capability layered on top of the memory system. When a task requires it, Buddy can execute real operations on your machine — but this is not what Buddy *is*. Buddy is a cognitive memory system first. ACT mode is a tool it can pick up when needed.
+ACT mode is a capability layered on top of the memory system. When a task requires it, Buddy can execute real operations on your machine — but this is not what Buddy _is_. Buddy is a cognitive memory system first. ACT mode is a tool it can pick up when needed.
 
 ```python
 # When ACT mode is triggered
@@ -189,6 +189,7 @@ ACT mode is a capability layered on top of the memory system. When a task requir
 ```
 
 **Safety constraints built in:**
+
 - Directory and path validation before execution
 - Non-destructive operation rules by default
 - Structured tool output logging at every step
@@ -217,29 +218,29 @@ Buddy avoids large fixed system prompts entirely.
 Buddy listens continuously — **no wake word, no push-to-talk, no trigger phrase.** The moment you speak, it hears you. The same way a person does.
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                  ALWAYS-LISTENING  VOICE  PIPELINE              │
-├─────────────────────────────────────────────────────────────────┤
+┌──────────────────────────────────────────────────────────────────┐
+│                  ALWAYS-LISTENING  VOICE  PIPELINE               │
+├──────────────────────────────────────────────────────────────────┤
 │                                                                  │
-│   MICROPHONE  ──▶  stt-listen   Opens mic, runs calibration,    │
+│   MICROPHONE  ──▶  stt-listen   Opens mic, runs calibration,     │
 │                    (thread 1)   adaptive noise floor tracking    │
 │                         │                                        │
 │                         ▼                                        │
 │                    DUAL  VAD  ENGINE                             │
 │                                                                  │
-│       ┌─────────────────────────────────────────┐               │
+│       ┌─────────────────────────────────────────┐                │
 │       │  Silero VAD  (preferred)                 │               │
 │       │  Neural model · 32 ms chunks             │               │
 │       │  Robust against hum / non-speech noise   │               │
 │       │  Falls back to Custom VAD automatically  │               │
-│       ├─────────────────────────────────────────┤               │
+│       ├─────────────────────────────────────────┤                │
 │       │  Custom VAD  (zero-dependency fallback)  │               │
 │       │  Energy + Crest factor + ZCR heuristics  │               │
-│       │  Impulse/knock rejection built-in         │               │
+│       │  Impulse/knock rejection built-in         │              │
 │       │  Onset flatness check → rejects humming  │               │
-│       └─────────────────────────────────────────┘               │
+│       └─────────────────────────────────────────┘                │
 │                         │                                        │
-│                    SPEECH  CONFIRMED  →  🔔  beep               │
+│                    SPEECH  CONFIRMED  →  🔔  beep                │
 │                         │                                        │
 │                         ▼                                        │
 │                    stt-tx  (thread 2)                            │
@@ -253,7 +254,7 @@ Buddy listens continuously — **no wake word, no push-to-talk, no trigger phras
 │                         ▼                                        │
 │                    Buddy  Brain  ◀── text arrives                │
 │                                                                  │
-└─────────────────────────────────────────────────────────────────┘
+└──────────────────────────────────────────────────────────────────┘
 ```
 
 **How speech detection works:**
@@ -276,11 +277,11 @@ Buddy listens continuously — **no wake word, no push-to-talk, no trigger phras
 
 **Mute is resource-aware — not just silent:**
 
-| State | Microphone | Whisper model | CPU |
-|---|---|---|---|
-| **Listening** | Open | Loaded in RAM/VRAM | Active VAD loop |
-| **Muted** | Released to OS | Evicted from memory | Zero wakeups |
-| **Unmuted** | Reclaimed | Reloaded + recalibrated | Active VAD loop |
+| State         | Microphone     | Whisper model           | CPU             |
+| ------------- | -------------- | ----------------------- | --------------- |
+| **Listening** | Open           | Loaded in RAM/VRAM      | Active VAD loop |
+| **Muted**     | Released to OS | Evicted from memory     | Zero wakeups    |
+| **Unmuted**   | Reclaimed      | Reloaded + recalibrated | Active VAD loop |
 
 Muting is not just pausing — the mic is physically released back to the OS and Whisper is removed from RAM/VRAM entirely. Unmuting triggers a fresh calibration pass to re-establish the noise floor.
 
@@ -300,20 +301,20 @@ Muting is not just pausing — the mic is physically released back to the OS and
 
 ## `$ features --list`
 
-| | Feature | Description |
-|---|---|---|
-| 🧠 | **Multi-tier memory** | Flash → Short → Long, persisted across sessions |
-| 🌙 | **Sleep consolidation** | Auto-runs on idle, cancels instantly on wake |
-| ⚡ | **ACT mode** | Real OS-level action execution with retry logic |
-| 🔒 | **Fully offline** | Local LLM via llama.cpp — zero cloud calls |
-| 🎤 | **Always-listening voice** | No wake word — continuous dual-VAD STT pipeline |
-| 🔍 | **Semantic retrieval** | Vector embeddings + reranking for memory search |
-| 📐 | **Modular prompts** | Per-module minimal prompts, no monolithic bloat |
-| 🔁 | **JSON-enforced output** | All LLM outputs are structured and validated |
-| 📊 | **ACT-R memory scoring** | Research-grade memory strength calculation |
-| 🧹 | **Auto memory pruning** | Deduplication, interference removal, dead trace cleanup |
-| 🛡️ | **Integrity checks** | Boot-time prompt hash verification |
-| 🖥️ | **Terminal UI** | Aurora-themed CLI with voice, hotkeys, status toolbar |
+|     | Feature                    | Description                                             |
+| --- | -------------------------- | ------------------------------------------------------- |
+| 🧠  | **Multi-tier memory**      | Flash → Short → Long, persisted across sessions         |
+| 🌙  | **Sleep consolidation**    | Auto-runs on idle, cancels instantly on wake            |
+| ⚡  | **ACT mode**               | Real OS-level action execution with retry logic         |
+| 🔒  | **Fully offline**          | Local LLM via llama.cpp — zero cloud calls              |
+| 🎤  | **Always-listening voice** | No wake word — continuous dual-VAD STT pipeline         |
+| 🔍  | **Semantic retrieval**     | Vector embeddings + reranking for memory search         |
+| 📐  | **Modular prompts**        | Per-module minimal prompts, no monolithic bloat         |
+| 🔁  | **JSON-enforced output**   | All LLM outputs are structured and validated            |
+| 📊  | **ACT-R memory scoring**   | Research-grade memory strength calculation              |
+| 🧹  | **Auto memory pruning**    | Deduplication, interference removal, dead trace cleanup |
+| 🛡️  | **Integrity checks**       | Boot-time prompt hash verification                      |
+| 🖥️  | **Terminal UI**            | Aurora-themed CLI with voice, hotkeys, status toolbar   |
 
 ---
 
@@ -360,6 +361,7 @@ On first boot, Buddy runs an interactive setup to select your LLM model, downloa
 Contributions, ideas, and technical discussions are welcome.
 
 If you are interested in any of:
+
 - Cognitive architectures and human-like memory systems
 - Memory consolidation, retrieval-augmented generation, and semantic search
 - Context engineering and minimal prompt design
