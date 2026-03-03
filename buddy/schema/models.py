@@ -13,13 +13,13 @@ from pydantic import BaseModel, Field, model_validator
 # ==========================================================
 
 
-class DecisionMode(str, Enum):
+class IntentType(str, Enum):
     """
     Prompt-aligned decision.mode (Brain prompt v1).
     """
 
     CHAT = "CHAT"
-    EXECUTE = "EXECUTE"
+    ACTION = "ACTION"
 
 
 class MemoryType(str, Enum):
@@ -80,7 +80,7 @@ class Decision(BuddyBaseModel):
     Matches the strict JSON output of the Brain prompt.
     """
 
-    mode: DecisionMode
+    intent_type: IntentType
     intent: str
     response: str
     afterthought: str

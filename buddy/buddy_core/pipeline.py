@@ -220,23 +220,7 @@ async def handle_turn(
     interrupt_event: Optional[threading.Event] = None,
     progress_cb: Callable[[str, bool]],
 ) -> str | None:
-    """
-    Strict control flow:
 
-    - Run Brain once.
-    - If mode == FOLLOWUP:
-        - print question
-        - wait for user answer
-        - loop (same turn_id, same turn_index)
-    - Else:
-        - print response
-        - store ONE conversation turn (original user_message + final reply)
-        - return reply
-
-    Notes:
-    - EXECUTE: Brain should NOT ask questions; Planner handles missing info.
-      But we still support mode=EXECUTE here and return the friendly response.
-    """
     t_total = time.perf_counter()
 
     src = _safe_source(source)
@@ -479,12 +463,12 @@ async def handle_turn(
                 ex,
             )
 
-    mode = decision.get("mode")
+    intent_type = decision.get("intent_type")
     response = str(decision.get("response") or "")
     afterthought = str(decision.get("afterthought") or "")
     await ui_output(response)
 
-    if mode == "CHAT":
+    if intent_type == "CHAT":
         conversations.add_user(
             text=user_message,
         )
@@ -494,7 +478,7 @@ async def handle_turn(
         if afterthought:
             conversations.add_buddy(text=afterthought)
             await ui_output(afterthought)
-    elif mode == "EXECUTE":
+    elif intent_type == "ACTION":
         action_rounter = ActionRouter(
             brain=brain, ui_output=ui_output, ui_input=ui_input
         )
@@ -571,11 +555,12 @@ async def handle_turn(
 
     dt_total = time.perf_counter() - t_total
     logger.info(
-        "HANDLE_TURN_END | sid=%s tid=%s turn=%d mode=%s reply_len=%d total=%.3fs",
+        "HANDLE_TURN_END | sid=%s tid=%s turn=%d intent_type=%s reply_len=%d"
+        " total=%.3fs",
         session_id,
         turn_id,
         int(turn_index),
-        mode,
+        intent_type,
         len(response),
         dt_total,
     )

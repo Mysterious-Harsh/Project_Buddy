@@ -387,7 +387,8 @@ class Terminal:
         # for idx, cmd in enumerate(call.command, start=1):
         cmd = str(call.command or "").strip()
         if on_progress:
-            on_progress(f"Executing {cmd[:80]}", False)
+            cmd_preview = cmd.replace("\r", " ").replace("\n", " ").strip()[:80]
+            on_progress(f"Executing {cmd_preview}", False)
 
         if not cmd:
             result = TerminalResult(

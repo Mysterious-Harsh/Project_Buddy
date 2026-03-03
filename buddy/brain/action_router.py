@@ -238,7 +238,8 @@ class ActionRouter:
         t0 = time.perf_counter()
         planner_parsed: Dict[str, Any] = {}
         if on_token:
-            on_token(f"Planning {intent[:80]}", False)
+            preview = intent.replace("\r", " ").replace("\n", " ").strip()[:80]
+            on_token(f"Planning {preview}", False)
         while True:
 
             planner_payload = self.brain.run_planner(
