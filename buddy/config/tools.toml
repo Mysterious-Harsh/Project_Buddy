@@ -1,0 +1,137 @@
+# ==========================================
+# BUDDY TOOL CAPABILITIES (LOCKED v1)
+# ==========================================
+# This file defines what Buddy is technically
+# allowed to do. Brain + tool_policy MUST
+# respect these gates at all times.
+#
+# Final availability = tools.toml AND buddy.toml
+# ==========================================
+
+
+# ------------------------------------------
+# Operating System / Desktop Control
+# ------------------------------------------
+[os]
+apps = true
+files = true
+processes = true
+clipboard = true
+notifications = true
+keyboard_mouse = true
+
+
+# ------------------------------------------
+# Browser & Web Automation
+# ------------------------------------------
+[browser]
+playwright = true
+autofill = true
+scraping = true
+downloads = true
+sessions = true
+
+
+# ------------------------------------------
+# Content Generation & Processing
+# ------------------------------------------
+[content]
+writer = true
+summarizer = true
+converter = true
+formatter = true
+templates = true
+
+
+# ------------------------------------------
+# Accounts & Personal Data Access
+# ------------------------------------------
+[accounts]
+gmail = true
+outlook = true
+calendar = true
+credentials = true
+
+
+# ------------------------------------------
+# Search Capabilities
+# ------------------------------------------
+[search]
+local = true
+web = true
+ranking = true
+
+
+# ------------------------------------------
+# Media Control
+# ------------------------------------------
+[media]
+player = true
+recorder = true
+subtitles = true
+
+
+# ------------------------------------------
+# System-Level Operations
+# ------------------------------------------
+[system]
+network = true
+power = true
+diagnostics = true
+
+
+# ------------------------------------------
+# Memory Subsystems
+# ------------------------------------------
+[memory]
+flash_store = true
+short_term_store = true
+long_term_store = true
+retention = true
+consolidation = true
+
+
+# ------------------------------------------
+# LLM & AI Infrastructure
+# ------------------------------------------
+[llm]
+embeddings = true
+reasoning_pipeline = true
+ollama_client = true
+
+
+# ------------------------------------------
+# Runtime / Orchestration
+# ------------------------------------------
+[runtime]
+job_manager = true
+event_listener = true
+interrupt_handler = true
+background_scheduler = true
+
+
+# ------------------------------------------
+# Adapters & Integration Layers
+# ------------------------------------------
+[adapters]
+langchain_agent = true
+tool_registry = true
+
+
+# ------------------------------------------
+# User Interfaces
+# ------------------------------------------
+[ui]
+cli = true
+tts = true
+stt = true
+
+
+# ------------------------------------------
+# Schemas & Prompts
+# ------------------------------------------
+[schemas]
+models = true
+
+[prompts]
+templates = true

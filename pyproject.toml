@@ -1,0 +1,76 @@
+[tool.poetry]
+name = "buddy"
+version = "0.1.0"
+description = "Buddy — Offline/Online Personal AI Assistant with Memory, Autonomous Reasoning, and Voice"
+authors = ["Your Name <you@example.com>"]
+license = "MIT"
+readme = "README.md"
+packages = [
+    { include = "buddy_core" },
+    { include = "memory" },
+    { include = "llm" },
+    { include = "tools" },
+    { include = "runtime" },
+    { include = "adapters" },
+    { include = "ui" },
+    { include = "schemas" },
+    { include = "prompts" }
+]
+
+[tool.poetry.dependencies]
+python = "^3.11"
+
+# LLM & LangChain
+langchain = "^1.2.0"
+ollama = { git = "https://github.com/your-ollama-client.git" }  # placeholder for local LLM client
+sentence-transformers = "^2.2.2"  # embeddings (qwen3-embedding:4b)
+
+# Vector DB & Storage
+qdrant-client = "^1.9.1"          # Qdrant vector database client
+numpy = "^1.25.2"
+
+# Offline Speech Recognition (STT)
+vosk = "^0.3.65"                  # offline speech recognition
+SpeechRecognition = "^3.8.1"      # wrapper for STT engines
+pyaudio = "^0.2.13"               # microphone input
+sounddevice = "^0.4.9"            # optional alternative for recording
+webrtcvad = "^2.0.10"
+
+# Wake Word Detection
+pvporcupine = "^1.9.0"            # offline hotword detection
+
+# Offline TTS
+pyttsx3 = "^2.90"
+
+# OS Utilities & Automation
+psutil = "^5.9.5"
+pyperclip = "^1.8.2"
+keyboard = "^0.23.0"
+mouse = "^0.7.2"
+pyautogui = "^0.9.53"
+
+# Browser Automation
+playwright = "^1.41.0"
+
+# Data & Config
+python-dotenv = "^1.0.1"
+tomli = "^2.0.1"
+pydantic = "^2.3.0"
+
+# Logging
+loguru = "^0.7.2"
+
+# Optional Utilities
+requests = "^2.31.0"
+beautifulsoup4 = "^4.12.2"
+
+[tool.poetry.dev-dependencies]
+pytest = "^7.4.2"
+pytest-cov = "^4.1.0"
+black = "^24.3.0"
+isort = "^6.0.0"
+mypy = "^1.5.1"
+
+[build-system]
+requires = ["poetry-core>=1.6.0"]
+build-backend = "poetry.core.masonry.api"

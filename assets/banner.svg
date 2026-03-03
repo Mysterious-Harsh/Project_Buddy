@@ -1,0 +1,192 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 300" width="900" height="300">
+  <defs>
+    <linearGradient id="g" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%"   stop-color="#00e5ff"/>
+      <stop offset="48%"  stop-color="#7c4dff"/>
+      <stop offset="100%" stop-color="#e040fb"/>
+    </linearGradient>
+    <linearGradient id="bar" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%"   stop-color="#00e5ff"/>
+      <stop offset="100%" stop-color="#e040fb"/>
+    </linearGradient>
+    <linearGradient id="glow-g" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%"   stop-color="#00e5ff" stop-opacity="0.25"/>
+      <stop offset="100%" stop-color="#e040fb" stop-opacity="0.10"/>
+    </linearGradient>
+    <filter id="glow" x="-20%" y="-40%" width="140%" height="180%">
+      <feGaussianBlur stdDeviation="6" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <filter id="soft" x="-5%" y="-20%" width="110%" height="140%">
+      <feGaussianBlur stdDeviation="2" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <style>
+      @keyframes fadeUp   { from { opacity:0; transform:translateY(8px) } to { opacity:1; transform:translateY(0) } }
+      @keyframes fadeIn   { from { opacity:0 } to { opacity:1 } }
+      @keyframes barGrow  { from { width:0px } to { width:544px } }
+      @keyframes scanMove { 0%{transform:translateY(-2px)} 100%{transform:translateY(300px)} }
+      @keyframes glitch {
+        0%,87%,100% { transform:translate(0,0); opacity:1 }
+        88%          { transform:translate(-3px,0); opacity:.9 }
+        89%          { transform:translate(3px,0);  opacity:.9 }
+        90%          { transform:translate(-2px,0); opacity:1 }
+        91%          { transform:translate(0,0);    opacity:1 }
+      }
+      @keyframes pulseDot { 0%,100%{opacity:.5} 50%{opacity:1} }
+
+      .bg    { fill:#000000 }
+      .title {
+        font-family:'Courier New',Courier,monospace;
+        font-weight:900;
+        font-size:84px;
+        fill:url(#g);
+        letter-spacing:16px;
+      }
+      .sub {
+        font-family:'Courier New',Courier,monospace;
+        font-size:10.5px;
+        fill:#4a4a6a;
+        letter-spacing:6.5px;
+      }
+      .sl {
+        font-family:'Courier New',Courier,monospace;
+        font-size:10.5px;
+        fill:#00e5ff;
+        letter-spacing:2px;
+      }
+      .sr {
+        font-family:'Courier New',Courier,monospace;
+        font-size:10.5px;
+        fill:#ce93d8;
+        letter-spacing:2px;
+      }
+      .pct {
+        font-family:'Courier New',Courier,monospace;
+        font-size:10.5px;
+        fill:#3a3a5a;
+      }
+      .a1 { opacity:0; animation: fadeUp  .7s ease forwards .05s }
+      .a2 { opacity:0; animation: fadeIn  .6s ease forwards  .9s }
+      .a3 { opacity:0; animation: fadeIn  .5s ease forwards 1.35s }
+      .a4 { opacity:0; animation: fadeIn  .5s ease forwards 1.80s }
+      .a5 { opacity:0; animation: fadeIn  .4s ease forwards 2.10s }
+      .bw { width:0;   animation: barGrow 2.6s cubic-bezier(.4,0,.2,1) forwards 2.15s }
+      .gl { animation: glitch 10s ease-in-out infinite }
+      .sc { animation: scanMove 3.5s linear infinite; opacity:.035 }
+      .pd { animation: pulseDot 2.2s ease-in-out infinite }
+    </style>
+  </defs>
+
+  <!-- Background -->
+  <rect width="900" height="300" class="bg"/>
+
+  <!-- Dot grid -->
+  <g opacity="0.07">
+    <g fill="#00e5ff">
+      <circle cx="50"  cy="40"  r="1"/><circle cx="110" cy="40"  r="1"/><circle cx="170" cy="40"  r="1"/>
+      <circle cx="230" cy="40"  r="1"/><circle cx="290" cy="40"  r="1"/><circle cx="350" cy="40"  r="1"/>
+      <circle cx="410" cy="40"  r="1"/><circle cx="470" cy="40"  r="1"/><circle cx="530" cy="40"  r="1"/>
+      <circle cx="590" cy="40"  r="1"/><circle cx="650" cy="40"  r="1"/><circle cx="710" cy="40"  r="1"/>
+      <circle cx="770" cy="40"  r="1"/><circle cx="830" cy="40"  r="1"/>
+      <circle cx="50"  cy="260" r="1"/><circle cx="110" cy="260" r="1"/><circle cx="170" cy="260" r="1"/>
+      <circle cx="230" cy="260" r="1"/><circle cx="290" cy="260" r="1"/><circle cx="350" cy="260" r="1"/>
+      <circle cx="410" cy="260" r="1"/><circle cx="470" cy="260" r="1"/><circle cx="530" cy="260" r="1"/>
+      <circle cx="590" cy="260" r="1"/><circle cx="650" cy="260" r="1"/><circle cx="710" cy="260" r="1"/>
+      <circle cx="770" cy="260" r="1"/><circle cx="830" cy="260" r="1"/>
+    </g>
+  </g>
+
+  <!-- Corner brackets -->
+  <g stroke="#00e5ff" stroke-width="1.5" fill="none" opacity="0.25">
+    <polyline points="20,50 20,20 50,20"/>
+    <polyline points="880,50 880,20 850,20"/>
+    <polyline points="20,250 20,280 50,280"/>
+    <polyline points="880,250 880,280 850,280"/>
+  </g>
+
+  <!-- Scanline sweep -->
+  <rect width="900" height="2" class="sc" fill="#00e5ff"/>
+
+  <!-- Glow halo behind BUDDY -->
+  <text x="450" y="125" text-anchor="middle"
+        font-family="'Courier New',monospace" font-weight="900" font-size="84px"
+        letter-spacing="16px" fill="url(#glow-g)" filter="url(#glow)"
+        class="a1">BUDDY</text>
+
+  <!-- BUDDY title -->
+  <g class="gl a1">
+    <text x="450" y="125" text-anchor="middle" class="title">BUDDY</text>
+  </g>
+
+  <!-- CONSCIOUSNESS ESTABLISHED -->
+  <text x="450" y="153" text-anchor="middle" class="sub a2">CONSCIOUSNESS ESTABLISHED</text>
+
+  <!-- Dot progress row (36 dots, 178–718, 15px spacing) -->
+  <!-- Gradient: cyan → mid-purple → violet, matching boot screen -->
+  <g class="a3">
+    <circle cx="178" cy="173" r="2.8" fill="#00e5ff"/>
+    <circle cx="193" cy="173" r="2.8" fill="#08dbf5"/>
+    <circle cx="208" cy="173" r="2.8" fill="#10d1eb"/>
+    <circle cx="223" cy="173" r="2.8" fill="#18c7e1"/>
+    <circle cx="238" cy="173" r="2.8" fill="#25b8d4"/>
+    <circle cx="253" cy="173" r="2.8" fill="#32a8c6"/>
+    <circle cx="268" cy="173" r="2.8" fill="#4095b8"/>
+    <circle cx="283" cy="173" r="2.8" fill="#5080aa"/>
+    <circle cx="298" cy="173" r="2.8" fill="#606098"/>
+    <circle cx="313" cy="173" r="2.8" fill="#703888"/>
+    <circle cx="328" cy="173" r="2.8" fill="#7c3890"/>
+    <circle cx="343" cy="173" r="2.8" fill="#883898"/>
+    <circle cx="358" cy="173" r="2.8" fill="#9440a0"/>
+    <circle cx="373" cy="173" r="2.8" fill="#9f4aa8"/>
+    <circle cx="388" cy="173" r="2.8" fill="#aa54b0"/>
+    <circle cx="403" cy="173" r="2.8" fill="#b25eb8"/>
+    <circle cx="418" cy="173" r="2.8" fill="#ba68bf"/>
+    <circle cx="433" cy="173" r="2.8" fill="#c070c5"/>
+    <circle cx="448" cy="173" r="2.8" fill="#c878cc"/>
+    <circle cx="463" cy="173" r="2.8" fill="#cc80d0"/>
+    <circle cx="478" cy="173" r="2.8" fill="#ce85d2"/>
+    <circle cx="493" cy="173" r="2.8" fill="#ce88d4"/>
+    <circle cx="508" cy="173" r="2.8" fill="#ce8bd6"/>
+    <circle cx="523" cy="173" r="2.8" fill="#ce8ed7"/>
+    <circle cx="538" cy="173" r="2.8" fill="#ce90d8"/>
+    <circle cx="553" cy="173" r="2.8" fill="#ce92d8"/>
+    <circle cx="568" cy="173" r="2.8" fill="#ce93d8"/>
+    <circle cx="583" cy="173" r="2.8" fill="#ce93d8"/>
+    <circle cx="598" cy="173" r="2.8" fill="#ce93d8"/>
+    <circle cx="613" cy="173" r="2.8" fill="#ce93d8"/>
+    <circle cx="628" cy="173" r="2.8" fill="#ce93d8"/>
+    <circle cx="643" cy="173" r="2.8" fill="#ce93d8"/>
+    <circle cx="658" cy="173" r="2.8" fill="#ce93d8"/>
+    <!-- Semi-active -->
+    <circle cx="673" cy="173" r="2.8" fill="none" stroke="#ce93d8" stroke-width="1.2" opacity="0.6"/>
+    <!-- Inactive -->
+    <circle cx="688" cy="173" r="2.8" fill="#161625"/>
+    <circle cx="703" cy="173" r="2.8" fill="#0e0e1a"/>
+    <circle cx="718" cy="173" r="2.8" fill="#0a0a14"/>
+  </g>
+
+  <!-- Status row -->
+  <g class="a4">
+    <text x="178" y="195" class="sl">▶  IDENTITY STABLE</text>
+    <text x="722" y="195" text-anchor="end" class="sr">cognitive loop online</text>
+  </g>
+
+  <!-- Progress bar track -->
+  <g class="a5">
+    <rect x="178" y="208" width="544" height="13" fill="#08080f" rx="1.5"/>
+    <!-- Animated fill -->
+    <rect x="178" y="208" height="13" fill="url(#bar)" rx="1.5" class="bw"/>
+    <!-- Shimmer block over fill -->
+    <rect x="178" y="208" height="13" fill="url(#bar)" rx="1.5" opacity="0.15" width="544"/>
+    <text x="732" y="219" class="pct">94%</text>
+  </g>
+
+</svg>

@@ -1,0 +1,108 @@
+- Version 1.0
+
+project_buddy/                          # Repo root
+├── README.md                           # Project overview + install/run
+├── pyproject.toml                      # Dependencies/build/tooling config
+├── .env.example                        # Example environment variables
+├── assets/                             # Human docs (design + rules)
+│   ├── ARCHITECTURE.md
+│   ├── FLOW.md
+│   ├── diagram.svg
+│   └── LOCKED_RULES.md
+├── config/                             # Runtime config (loaded by bootstrap)
+│   ├── buddy.toml
+│   ├── tools.toml
+│   └── runtime_settings.py
+├── data/                               # Runtime storage (gitignored usually)
+│   ├── index/                          # Vector indexes / qdrant local data (if local)
+│   ├── cache/                          # Temp cache
+│   └── logs/                           # Logs output
+└── buddy/                              # Python package (import buddy.*)
+    ├── __init__.py
+    ├── logger/
+    │   ├── __init__.py
+    │   └── logger.py                   # get_logger() + formatting
+    ├── buddy_core/                     # Orchestration spine
+    │   ├── __init__.py
+    │   ├── main.py                     # Main pipeline entry
+    │   ├── bootstrap.py                # Wiring: config → llm/memory/tools/brain
+    │   └── controller.py               # Executes decisions/plans safely
+    ├── brain/                          # Decision + routing (no OS I/O)
+    │   ├── __init__.py
+    │   ├── decision_engine.py          # Deterministic scoring/routing (LOCKED)
+    │   ├── prompt_builder.py           # Builds LLM prompts (brain/planner/etc.)
+    │   ├── output_parser.py            # Strict JSON parsing + schema validation
+    │   ├── respond_engine.py           # Generates DIRECT/LLM_ONLY/FOLLOWUP response
+    │   ├── action_router.py            # Maps tool_name → callable (bridge to tools/)
+    │   └── types/
+    │       ├── __init__.py
+    │       ├── actions.py              # ActionPlan + modes
+    │       ├── signals.py              # BrainInputs/candidates/entities/system state
+    │       └── traces.py               # DecisionTrace for debuggability
+    ├── memory/                         # Memory subsystem
+    │   ├── __init__.py
+    │   ├── memory_entry.py             # MemoryEntry wrapper
+    │   ├── sqlite_store.py             # SQLite durability (LOCKED)
+    │   ├── vector_store.py             # Qdrant retrieval (LOCKED)
+    │   ├── memory_manager.py           # Integration API (LOCKED)
+    │   ├── maintenance.py              # Retry-upsert/promotion passes
+    │   ├── consolidation.py            # Summaries short → long (optional v1)
+    │   └── reflection.py               # Future (optional)
+    ├── embeddings/
+    │   ├── __init__.py
+    │   └── embedding_provider.py       # embed_query/embed_passage
+    ├── llm/
+    │   ├── __init__.py
+    │   └── ollama_client.py            # Local LLM client
+    ├── tools/                          # “Hands” (capabilities)
+    │   ├── __init__.py
+    │   ├── registry.py                 # Tool registry + schemas + safety rules
+    │   ├── os/
+    │   │   ├── __init__.py
+    │   │   ├── detector.py             # OS detection
+    │   │   ├── shell_adapter.py        # Run shell commands safely
+    │   │   ├── app_launcher.py         # Launch apps
+    │   │   ├── file_search.py          # Find files
+    │   │   ├── file_io.py              # Read/write files
+    │   │   ├── file_ops.py             # Copy/move/rename/delete
+    │   │   ├── process.py              # Process control
+    │   │   ├── clipboard.py            # Clipboard integration
+    │   │   ├── notifications.py        # System notifications
+    │   │   ├── keyboard_mouse.py       # Input simulation
+    │   │   └── permissions.py          # Permission checks/gates
+    │   └── browser/
+    │       ├── __init__.py
+    │       ├── playwright_client.py    # Browser driver
+    │       ├── actions.py              # Browser actions
+    │       ├── autofill.py             # Form fill helpers
+    │       ├── scraper.py              # Structured extraction
+    │       ├── downloads.py            # Download handling
+    │       └── sessions.py             # Session/state mgmt
+    ├── runtime/                        # Concurrency + job/event handling
+    │   ├── scheduler.py                # Periodic maintenance/reflection hooks
+    │   ├── jobs/
+    │   │   ├── job.py                  # Job definition
+    │   │   └── job_manager.py          # Manage background jobs
+    │   └── events/
+    │       ├── listener.py             # Event listener
+    │       └── interrupt.py            # Interrupt handling
+    ├── ui/                             # Interfaces
+    │   ├── cli.py                      # CLI entry interface
+    │   ├── tts.py                      # Text-to-speech
+    │   └── stt.py                      # Speech-to-text
+    ├── scripts/                             
+    │   ├── build_modelfile.py                                                                
+    ├── schemas/                        # Shared pydantic models (cross-module contracts)
+    │   ├── __init__.py
+    │   └── models.py                   # DecisionResult, Memory models, etc.
+    └── prompts/                        # Prompt templates (kept isolated + versionable)
+        ├── __init__.py
+        ├── base_system_prompts.py
+        ├── brain_prompts.py
+        ├── decision_prompts.py
+        ├── planner_prompts.py
+        ├── tool_prompts.py
+        ├── memory_prompts.py
+        ├── respond_prompts.py
+        ├── search_prompts.py
+        └── critique_prompts.py

@@ -1,0 +1,4 @@
+__pycache__/
+.env
+buddy/data/
+buddy/scripts/

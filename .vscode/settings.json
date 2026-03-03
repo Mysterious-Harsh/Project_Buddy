@@ -1,0 +1,6 @@
+{
+	"python.defaultInterpreterPath": "/Users/kishan/miniforge3/envs/buddy/bin/python",
+	"python.analysis.extraPaths": ["${workspaceFolder}/buddy"],
+	"python.terminal.executeInFileDir": false,
+	"terminal.integrated.cwd": "${workspaceFolder}"
+}
