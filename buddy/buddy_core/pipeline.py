@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import Awaitable, Callable, Optional, Any, Dict, List, Tuple
 import threading
 from buddy.logger.logger import get_logger
+from buddy.brain.action_router import ActionRouter
 import importlib
 import json
 
@@ -134,17 +135,6 @@ def _system_state_from_boot_state(state: Any) -> Dict[str, Any]:
         "timezone": tz,
         "now_iso": _now_local_iso(),
     }
-
-
-def load_action_router(
-    brain: Any,
-    ui_output: UiPrintFn,
-    ui_input: UiInputFn,
-):
-    import buddy.brain.action_router as ar_mod
-
-    importlib.reload(ar_mod)  # pick up code changes
-    return ar_mod.ActionRouter(brain=brain, ui_output=ui_output, ui_input=ui_input)
 
 
 # ==========================================================
@@ -505,7 +495,7 @@ async def handle_turn(
             conversations.add_buddy(text=afterthought)
             await ui_output(afterthought)
     elif mode == "EXECUTE":
-        action_rounter = load_action_router(
+        action_rounter = ActionRouter(
             brain=brain, ui_output=ui_output, ui_input=ui_input
         )
         action_result = await action_rounter.action(
@@ -517,7 +507,7 @@ async def handle_turn(
             on_token=progress_cb,
             llm_options={},
         )
-
+        progress_cb("Checking Execution Results 🤓", False)
         execution_results = action_result.get("step_execution_map")
         payload = brain.run_respond(
             user_current_message=user_message,
@@ -541,6 +531,8 @@ async def handle_turn(
                 text=response,
             )
         if memory_candidates and mm:
+            progress_cb("Creating Some New Memories 🧠", False)
+
             for mem in memory_candidates:
                 try:
                     entry = mm.create_memory_entry(

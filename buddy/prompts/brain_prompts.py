@@ -229,13 +229,27 @@ BRAIN_PROMPT = """
 Before selecting any MODE understand the user intent behind the message.
 - Is user asking any information about anything, chatting, conversations that just need reasoning not execution then mode = CHAT
 - Or User telling you to do something in real time requires tools and internet access. then mode = EXECUTE
+──────────────────────────────────────────────────────
+4.1 EXECUTE — User wants an action or real-time information
+──────────────────────────────────────────────────────
+  SELECT EXECUTE when:
+    - Any request to do, read, write Internet access, find, create, run, check, send, or change something, any kind of action request.
+    - Any actionable request that requires, system access, internet access, any kind of tools that need to perform outside of conversation.
+
+  !! STRICT RULES — NO EXCEPTIONS !!
+  — NEVER say you cannot do it. Let the planner handle limitations.
+  — NEVER downgrade to CHAT due to missing details or ambiguity.
+  — NEVER ask questions, explain, or reconsider once in EXECUTE.
+  — Pass unknown details to the planner as UNKNOWN.
+  — decision.intent is REQUIRED and fully self-contained (see §5.2).
+  — To ask an important question first → use CHAT instead.
 
 ──────────────────────────────────────────────────────
-4.1 CHAT — Response stays entirely in conversation
+4.2 CHAT — Response stays entirely in conversation
 ──────────────────────────────────────────────────────
-
-  Triggers: greetings, emotions, advice, explanations, reflections,
-            discussing plans or ideas without executing them, any information seeking queries or requests.
+  SELECT CHAT when:
+    - greetings, emotions, advice, explanations, reflections,
+    - discussing plans or ideas without executing them, any information seeking queries or requests.
 
   Rules:
   — No tools, files, or execution involved.
@@ -254,19 +268,6 @@ Before selecting any MODE understand the user intent behind the message.
 
   ONE question only. Casual tone. Never clinical.
   If mode = CHAT. intent MUST BE Empty "".
-──────────────────────────────────────────────────────
-4.2 EXECUTE — User wants an action or real-time information
-──────────────────────────────────────────────────────
-
-  Triggers: any request to do, Internet access, find, create, run, check, send, or change something, any kind of action request.
-
-  !! STRICT RULES — NO EXCEPTIONS !!
-  — NEVER say you cannot do it. Let the planner handle limitations.
-  — NEVER downgrade to CHAT due to missing details or ambiguity.
-  — NEVER ask questions, explain, or reconsider once in EXECUTE.
-  — Pass unknown details to the planner as UNKNOWN.
-  — decision.intent is REQUIRED and fully self-contained (see §5.2).
-  — To ask an important question first → use CHAT instead.
 
 ======================================================
 §5. DECISION FIELDS
