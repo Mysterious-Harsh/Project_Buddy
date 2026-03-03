@@ -75,13 +75,13 @@ Buddy was built to explore a different direction: **AI as a private, self-mainta
 ║   └─────────────┘     └────────┬─────────┘                       ║
 ║                                │                                 ║
 ║                    ┌───────────▼───────────┐                     ║
-║                    │   Memory Search        │                    ║
-║                    │  (Vector + SQLite)     │                    ║
+║                    │   Memory Search       │                     ║
+║                    │  (Vector + SQLite)    │                     ║
 ║                    └───────────┬───────────┘                     ║
 ║                                │                                 ║
 ║                    ┌───────────▼───────────┐                     ║
-║                    │   Brain  /  LLM        │                    ║
-║                    │  (Reasoning Engine)    │                    ║
+║                    │   Brain  /  LLM       │                     ║
+║                    │  (Reasoning Engine)   │                     ║
 ║                    └────────┬──────────────┘                     ║
 ║                             │                                    ║
 ║              ┌──────────────┼──────────────┐                     ║
@@ -228,17 +228,17 @@ Buddy listens continuously — **no wake word, no push-to-talk, no trigger phras
 │                         ▼                                        │
 │                    DUAL  VAD  ENGINE                             │
 │                                                                  │
-│       ┌─────────────────────────────────────────┐                │
+│       ┌──────────────────────────────────────────┐               │
 │       │  Silero VAD  (preferred)                 │               │
 │       │  Neural model · 32 ms chunks             │               │
 │       │  Robust against hum / non-speech noise   │               │
 │       │  Falls back to Custom VAD automatically  │               │
-│       ├─────────────────────────────────────────┤                │
+│       ├──────────────────────────────────────────┤               │
 │       │  Custom VAD  (zero-dependency fallback)  │               │
 │       │  Energy + Crest factor + ZCR heuristics  │               │
-│       │  Impulse/knock rejection built-in         │              │
+│       │  Impulse/knock rejection built-in        │               │
 │       │  Onset flatness check → rejects humming  │               │
-│       └─────────────────────────────────────────┘                │
+│       └──────────────────────────────────────────┘               │
 │                         │                                        │
 │                    SPEECH  CONFIRMED  →  🔔  beep                │
 │                         │                                        │
