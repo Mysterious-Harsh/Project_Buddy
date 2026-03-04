@@ -1,0 +1,198 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 300" width="900" height="300">
+<defs>
+  <linearGradient id="bargrad" x1="0%" y1="0%" x2="100%" y2="0%">
+    <stop offset="0%"   stop-color="#00e5ff"/>
+    <stop offset="100%" stop-color="#e040fb"/>
+  </linearGradient>
+  <clipPath id="lc">
+    <rect x="149" y="29" width="602" height="82"/>
+  </clipPath>
+  <style>
+    @keyframes fadeUp  { from{opacity:0;transform:translateY(10px)} to{opacity:1;transform:translateY(0)} }
+    @keyframes fadeIn  { from{opacity:0} to{opacity:1} }
+    @keyframes bGrow   { from{width:0} to{width:573px} }
+    @keyframes sweep   { 0%{transform:translateY(-3px)} 100%{transform:translateY(303px)} }
+    @keyframes glitch  {
+      0%,90%,100% { transform:translate(0,0);opacity:1 }
+      91%          { transform:translate(-5px,0);opacity:.75 }
+      92%          { transform:translate(5px,0); opacity:.75 }
+      93%          { transform:translate(-2px,0);opacity:1 }
+    }
+    .L  { opacity:0; animation:fadeUp .7s ease forwards 0.05s }
+    .GL { animation:glitch 11s ease-in-out infinite }
+    .S  { opacity:0; animation:fadeIn .5s ease forwards 1.0s;
+           font-family:"Courier New",Courier,monospace; font-size:9px;
+           fill:#2e2e55; letter-spacing:7.5px }
+    .D  { opacity:0; animation:fadeIn .45s ease forwards 1.4s }
+    .ST { opacity:0; animation:fadeIn .45s ease forwards 1.85s }
+    .BR { opacity:0; animation:fadeIn .35s ease forwards 2.1s }
+    .BF { width:0; animation:bGrow 2.9s cubic-bezier(.38,0,.22,1) forwards 2.15s }
+    .sl { font-family:"Courier New",Courier,monospace; font-size:9px; fill:#00e5ff; letter-spacing:2px }
+    .sr { font-family:"Courier New",Courier,monospace; font-size:9px; fill:#ce93d8; letter-spacing:2px }
+    .pc { font-family:"Courier New",Courier,monospace; font-size:9px; fill:#2e2e52 }
+    .sw { animation:sweep 3.8s linear infinite; opacity:.028 }
+  </style>
+</defs>
+<rect width="900" height="300" fill="#000"/>
+<rect width="900" height="2" class="sw" fill="#00e5ff"/>
+<g stroke="#00e5ff" stroke-width="1.2" fill="none" opacity="0.16">
+  <polyline points="16,42 16,16 42,16"/>
+  <polyline points="884,42 884,16 858,16"/>
+  <polyline points="16,258 16,284 42,284"/>
+  <polyline points="884,258 884,284 858,284"/>
+</g>
+<g class="L GL">
+<rect x="151" y="30" width="14" height="8" fill="#00E5FF" rx="1"/>
+<rect x="167" y="30" width="14" height="8" fill="#00E5FF" rx="1"/>
+<rect x="183" y="30" width="14" height="8" fill="#00E5FF" rx="1"/>
+<rect x="199" y="30" width="14" height="8" fill="#00E5FF" rx="1"/>
+<rect x="215" y="30" width="14" height="8" fill="#00E5FF" rx="1"/>
+<rect x="151" y="42" width="14" height="8" fill="#22CCFF" rx="1"/>
+<rect x="215" y="42" width="14" height="8" fill="#22CCFF" rx="1"/>
+<rect x="151" y="54" width="14" height="8" fill="#558AFF" rx="1"/>
+<rect x="215" y="54" width="14" height="8" fill="#558AFF" rx="1"/>
+<rect x="151" y="66" width="14" height="8" fill="#7755FF" rx="1"/>
+<rect x="167" y="66" width="14" height="8" fill="#7755FF" rx="1"/>
+<rect x="183" y="66" width="14" height="8" fill="#7755FF" rx="1"/>
+<rect x="199" y="66" width="14" height="8" fill="#7755FF" rx="1"/>
+<rect x="151" y="78" width="14" height="8" fill="#9940EE" rx="1"/>
+<rect x="215" y="78" width="14" height="8" fill="#9940EE" rx="1"/>
+<rect x="151" y="90" width="14" height="8" fill="#BB3ADF" rx="1"/>
+<rect x="215" y="90" width="14" height="8" fill="#BB3ADF" rx="1"/>
+<rect x="151" y="102" width="14" height="8" fill="#CE93D8" rx="1"/>
+<rect x="167" y="102" width="14" height="8" fill="#CE93D8" rx="1"/>
+<rect x="183" y="102" width="14" height="8" fill="#CE93D8" rx="1"/>
+<rect x="199" y="102" width="14" height="8" fill="#CE93D8" rx="1"/>
+<rect x="215" y="102" width="14" height="8" fill="#CE93D8" rx="1"/>
+<rect x="273" y="30" width="14" height="8" fill="#00E5FF" rx="1"/>
+<rect x="337" y="30" width="14" height="8" fill="#00E5FF" rx="1"/>
+<rect x="273" y="42" width="14" height="8" fill="#22CCFF" rx="1"/>
+<rect x="337" y="42" width="14" height="8" fill="#22CCFF" rx="1"/>
+<rect x="273" y="54" width="14" height="8" fill="#558AFF" rx="1"/>
+<rect x="337" y="54" width="14" height="8" fill="#558AFF" rx="1"/>
+<rect x="273" y="66" width="14" height="8" fill="#7755FF" rx="1"/>
+<rect x="337" y="66" width="14" height="8" fill="#7755FF" rx="1"/>
+<rect x="273" y="78" width="14" height="8" fill="#9940EE" rx="1"/>
+<rect x="337" y="78" width="14" height="8" fill="#9940EE" rx="1"/>
+<rect x="273" y="90" width="14" height="8" fill="#BB3ADF" rx="1"/>
+<rect x="337" y="90" width="14" height="8" fill="#BB3ADF" rx="1"/>
+<rect x="289" y="102" width="14" height="8" fill="#CE93D8" rx="1"/>
+<rect x="305" y="102" width="14" height="8" fill="#CE93D8" rx="1"/>
+<rect x="321" y="102" width="14" height="8" fill="#CE93D8" rx="1"/>
+<rect x="395" y="30" width="14" height="8" fill="#00E5FF" rx="1"/>
+<rect x="411" y="30" width="14" height="8" fill="#00E5FF" rx="1"/>
+<rect x="427" y="30" width="14" height="8" fill="#00E5FF" rx="1"/>
+<rect x="395" y="42" width="14" height="8" fill="#22CCFF" rx="1"/>
+<rect x="443" y="42" width="14" height="8" fill="#22CCFF" rx="1"/>
+<rect x="395" y="54" width="14" height="8" fill="#558AFF" rx="1"/>
+<rect x="459" y="54" width="14" height="8" fill="#558AFF" rx="1"/>
+<rect x="395" y="66" width="14" height="8" fill="#7755FF" rx="1"/>
+<rect x="459" y="66" width="14" height="8" fill="#7755FF" rx="1"/>
+<rect x="395" y="78" width="14" height="8" fill="#9940EE" rx="1"/>
+<rect x="459" y="78" width="14" height="8" fill="#9940EE" rx="1"/>
+<rect x="395" y="90" width="14" height="8" fill="#BB3ADF" rx="1"/>
+<rect x="443" y="90" width="14" height="8" fill="#BB3ADF" rx="1"/>
+<rect x="395" y="102" width="14" height="8" fill="#CE93D8" rx="1"/>
+<rect x="411" y="102" width="14" height="8" fill="#CE93D8" rx="1"/>
+<rect x="427" y="102" width="14" height="8" fill="#CE93D8" rx="1"/>
+<rect x="517" y="30" width="14" height="8" fill="#00E5FF" rx="1"/>
+<rect x="533" y="30" width="14" height="8" fill="#00E5FF" rx="1"/>
+<rect x="549" y="30" width="14" height="8" fill="#00E5FF" rx="1"/>
+<rect x="517" y="42" width="14" height="8" fill="#22CCFF" rx="1"/>
+<rect x="565" y="42" width="14" height="8" fill="#22CCFF" rx="1"/>
+<rect x="517" y="54" width="14" height="8" fill="#558AFF" rx="1"/>
+<rect x="581" y="54" width="14" height="8" fill="#558AFF" rx="1"/>
+<rect x="517" y="66" width="14" height="8" fill="#7755FF" rx="1"/>
+<rect x="581" y="66" width="14" height="8" fill="#7755FF" rx="1"/>
+<rect x="517" y="78" width="14" height="8" fill="#9940EE" rx="1"/>
+<rect x="581" y="78" width="14" height="8" fill="#9940EE" rx="1"/>
+<rect x="517" y="90" width="14" height="8" fill="#BB3ADF" rx="1"/>
+<rect x="565" y="90" width="14" height="8" fill="#BB3ADF" rx="1"/>
+<rect x="517" y="102" width="14" height="8" fill="#CE93D8" rx="1"/>
+<rect x="533" y="102" width="14" height="8" fill="#CE93D8" rx="1"/>
+<rect x="549" y="102" width="14" height="8" fill="#CE93D8" rx="1"/>
+<rect x="639" y="30" width="14" height="8" fill="#00E5FF" rx="1"/>
+<rect x="735" y="30" width="14" height="8" fill="#00E5FF" rx="1"/>
+<rect x="639" y="42" width="14" height="8" fill="#22CCFF" rx="1"/>
+<rect x="735" y="42" width="14" height="8" fill="#22CCFF" rx="1"/>
+<rect x="655" y="54" width="14" height="8" fill="#558AFF" rx="1"/>
+<rect x="719" y="54" width="14" height="8" fill="#558AFF" rx="1"/>
+<rect x="671" y="66" width="14" height="8" fill="#7755FF" rx="1"/>
+<rect x="703" y="66" width="14" height="8" fill="#7755FF" rx="1"/>
+<rect x="687" y="78" width="14" height="8" fill="#9940EE" rx="1"/>
+<rect x="687" y="90" width="14" height="8" fill="#BB3ADF" rx="1"/>
+<rect x="687" y="102" width="14" height="8" fill="#CE93D8" rx="1"/>
+<g clip-path="url(#lc)" opacity="1">
+<rect x="149" y="38" width="602" height="3" fill="#000" opacity="0.9"/>
+<rect x="149" y="33" width="602" height="1" fill="#000" opacity="0.40"/>
+<rect x="149" y="36" width="602" height="1" fill="#000" opacity="0.40"/>
+<rect x="149" y="50" width="602" height="3" fill="#000" opacity="0.9"/>
+<rect x="149" y="45" width="602" height="1" fill="#000" opacity="0.40"/>
+<rect x="149" y="48" width="602" height="1" fill="#000" opacity="0.40"/>
+<rect x="149" y="62" width="602" height="3" fill="#000" opacity="0.9"/>
+<rect x="149" y="57" width="602" height="1" fill="#000" opacity="0.40"/>
+<rect x="149" y="60" width="602" height="1" fill="#000" opacity="0.40"/>
+<rect x="149" y="74" width="602" height="3" fill="#000" opacity="0.9"/>
+<rect x="149" y="69" width="602" height="1" fill="#000" opacity="0.40"/>
+<rect x="149" y="72" width="602" height="1" fill="#000" opacity="0.40"/>
+<rect x="149" y="86" width="602" height="3" fill="#000" opacity="0.9"/>
+<rect x="149" y="81" width="602" height="1" fill="#000" opacity="0.40"/>
+<rect x="149" y="84" width="602" height="1" fill="#000" opacity="0.40"/>
+<rect x="149" y="98" width="602" height="3" fill="#000" opacity="0.9"/>
+<rect x="149" y="93" width="602" height="1" fill="#000" opacity="0.40"/>
+<rect x="149" y="96" width="602" height="1" fill="#000" opacity="0.40"/>
+<rect x="149" y="105" width="602" height="1" fill="#000" opacity="0.40"/>
+<rect x="149" y="108" width="602" height="1" fill="#000" opacity="0.40"/>
+</g>
+</g>
+<text x="450" y="132" text-anchor="middle" class="S">CONSCIOUSNESS ESTABLISHED</text>
+<g class="D">
+<circle cx="147.5" cy="152" r="2.5" fill="#00E5FF"/>
+<circle cx="163.9" cy="152" r="2.5" fill="#06E2FE"/>
+<circle cx="180.2" cy="152" r="2.5" fill="#0DE0FD"/>
+<circle cx="196.6" cy="152" r="2.5" fill="#13DDFB"/>
+<circle cx="212.9" cy="152" r="2.5" fill="#1ADBFA"/>
+<circle cx="229.3" cy="152" r="2.5" fill="#20D8F9"/>
+<circle cx="245.6" cy="152" r="2.5" fill="#27D6F8"/>
+<circle cx="262.0" cy="152" r="2.5" fill="#2DD3F6"/>
+<circle cx="278.3" cy="152" r="2.5" fill="#34D0F5"/>
+<circle cx="294.7" cy="152" r="2.5" fill="#3ACEF4"/>
+<circle cx="311.0" cy="152" r="2.5" fill="#40CBF3"/>
+<circle cx="327.4" cy="152" r="2.5" fill="#47C9F2"/>
+<circle cx="343.7" cy="152" r="2.5" fill="#4DC6F0"/>
+<circle cx="360.1" cy="152" r="2.5" fill="#54C4EF"/>
+<circle cx="376.4" cy="152" r="2.5" fill="#5AC1EE"/>
+<circle cx="392.8" cy="152" r="2.5" fill="#61BFED"/>
+<circle cx="409.1" cy="152" r="2.5" fill="#67BCEC"/>
+<circle cx="425.5" cy="152" r="2.5" fill="#6DB9EA"/>
+<circle cx="441.8" cy="152" r="2.5" fill="#74B7E9"/>
+<circle cx="458.2" cy="152" r="2.5" fill="#7AB4E8"/>
+<circle cx="474.5" cy="152" r="2.5" fill="#81B2E7"/>
+<circle cx="490.9" cy="152" r="2.5" fill="#87AFE5"/>
+<circle cx="507.2" cy="152" r="2.5" fill="#8EADE4"/>
+<circle cx="523.6" cy="152" r="2.5" fill="#94AAE3"/>
+<circle cx="539.9" cy="152" r="2.5" fill="#9AA8E2"/>
+<circle cx="556.3" cy="152" r="2.5" fill="#A1A5E1"/>
+<circle cx="572.6" cy="152" r="2.5" fill="#A7A2DF"/>
+<circle cx="589.0" cy="152" r="2.5" fill="#AEA0DE"/>
+<circle cx="605.3" cy="152" r="2.5" fill="#B49DDD"/>
+<circle cx="621.7" cy="152" r="2.5" fill="#BB9BDC"/>
+<circle cx="638.0" cy="152" r="2.5" fill="#C198DA"/>
+<circle cx="654.4" cy="152" r="2.5" fill="#C896D9"/>
+<circle cx="670.7" cy="152" r="2.5" fill="#CE93D8"/>
+<circle cx="687.1" cy="152" r="2.5" fill="none" stroke="#CE93D8" stroke-width="1.2" opacity="0.5"/>
+<circle cx="703.4" cy="152" r="2.5" fill="#0a0a18"/>
+<circle cx="719.8" cy="152" r="2.5" fill="#0a0a18"/>
+<circle cx="736.1" cy="152" r="2.5" fill="#0a0a18"/>
+<circle cx="752.5" cy="152" r="2.5" fill="#0a0a18"/>
+</g>
+<g class="ST">
+  <text x="145" y="168" class="sl">&#9658;  IDENTITY STABLE</text>
+  <text x="755" y="168" text-anchor="end" class="sr">cognitive loop online</text>
+</g>
+<g class="BR">
+  <rect x="145" y="180" width="610" height="10" fill="#05050d" rx="1.5"/>
+  <rect x="145" y="180" height="10" fill="url(#bargrad)" rx="1.5" class="BF"/>
+  <text x="764" y="189" class="pc">94%</text>
+</g>
+</svg>
