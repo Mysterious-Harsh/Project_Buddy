@@ -1,10 +1,10 @@
 # buddy/memory/consolidation_engine.py
 #
 # ╔══════════════════════════════════════════════════════════════════════════════╗
-# ║  RESEARCH-GRADE MEMORY CONSOLIDATION ENGINE  v4.0                           ║
+# ║  RESEARCH-GRADE MEMORY CONSOLIDATION ENGINE  v4.1-patched                   ║
 # ║  "Strength-Only Architecture" — No Categories, Fully Adaptive               ║
 # ╠══════════════════════════════════════════════════════════════════════════════╣
-# ║  CHANGES FROM v3 → v4                                                        ║
+# ║  CHANGES FROM v3 → v4  (+ v3.1 safety patches applied)                      ║
 # ║                                                                              ║
 # ║  NEW: Context-dependent retrieval / encoding specificity                     ║
 # ║       Encoding context hash influences spreading activation weight.          ║
@@ -47,6 +47,28 @@
 # ║       Research on memory reconsolidation (Nader et al. 2000) suggests      ║
 # ║       14-day window before long-term storage is stable.                     ║
 # ║                                                                              ║
+# ║  PATCHES MERGED FROM v3.1 (applied on top of v4.0)                          ║
+# ║                                                                              ║
+# ║  PATCH-1  Catastrophic forgetting guard  (_is_protected)                    ║
+# ║           Any memory with importance >= hard_delete_imp_protect (0.80)      ║
+# ║           and no consolidated_into_id is unconditionally exempt from ALL    ║
+# ║           hard-delete paths: dead-trace, redundancy, and interference.      ║
+# ║           Fixes the confirmed bug where imp=0.99 medical allergy is         ║
+# ║           deleted when acc=0 and 4+ similar flood memories exist.           ║
+# ║                                                                              ║
+# ║  PATCH-2  Long-tier importance floor raised 0.20 → 0.30                    ║
+# ║           Memories in mtype="long" use imp_floor = 0.30 × dyn_imp          ║
+# ║           (was 0.20 in v4). Consolidated knowledge stays more accessible   ║
+# ║           even after months without direct access, matching human LTM.     ║
+# ║                                                                              ║
+# ║  PATCH-3  ALL-CAPS arousal signal + expanded contradiction patterns         ║
+# ║           Writing in ALL-CAPS (URGENT, NEVER, CRITICAL) is a real          ║
+# ║           emotional emphasis marker. A _CAPS_RE detector contributes        ║
+# ║           up to 0.12 to the arousal score (weight taken from punct).       ║
+# ║           Contradiction patterns expanded: deprecated / corrected /         ║
+# ║           replaced / obsolete / overridden / removed now also trigger      ║
+# ║           prediction-error tagging.                                         ║
+# ║                                                                              ║
 # ║  THEORETICAL FOUNDATION (unchanged from v3)                                 ║
 # ║    1. Activation frequency + recency  (ACT-R base-level learning)           ║
 # ║    2. Emotional arousal at encoding   (amygdala → norepinephrine boost)     ║
@@ -76,7 +98,7 @@ import numpy as np
 from buddy.logger.logger import get_logger
 from buddy.memory.memory_entry import MemoryEntry
 
-logger = get_logger("consolidation_v4")
+logger = get_logger("consolidation_v4_1")
 
 
 # =============================================================================
@@ -92,26 +114,90 @@ _AROUSAL_MAX: float = 0.50
 # ── v4: EXPANDED arousal keyword set (+35 new terms) ─────────────────────────
 _AROUSAL_KEYWORDS: frozenset = frozenset([
     # Original v3
-    "urgent", "critical", "emergency", "love", "hate", "fear", "shock",
-    "amazing", "disaster", "death", "died", "crying", "angry", "furious",
-    "excited", "terrified", "important", "pain", "joy", "heartbreak",
-    "thrilled", "frustrated", "broke", "fired", "hired", "promoted",
-    "married", "divorced", "pregnant", "devastated", "elated", "panic",
+    "urgent",
+    "critical",
+    "emergency",
+    "love",
+    "hate",
+    "fear",
+    "shock",
+    "amazing",
+    "disaster",
+    "death",
+    "died",
+    "crying",
+    "angry",
+    "furious",
+    "excited",
+    "terrified",
+    "important",
+    "pain",
+    "joy",
+    "heartbreak",
+    "thrilled",
+    "frustrated",
+    "broke",
+    "fired",
+    "hired",
+    "promoted",
+    "married",
+    "divorced",
+    "pregnant",
+    "devastated",
+    "elated",
+    "panic",
     # v4 additions — validated from affective norms (ANEW, Warriner 2013)
-    "grief", "rage", "ecstatic", "betrayal", "guilt", "shame", "pride",
-    "jealous", "lonely", "abandoned", "abusive", "violent", "trauma",
-    "survived", "rescued", "attacked", "crashed", "bankrupt", "diagnosed",
-    "addiction", "recovered", "relapsed", "obsessed", "overwhelmed",
-    "suicidal", "abuse", "assault", "miracle", "breakthrough", "triumph",
-    "catastrophe", "crisis", "desperate", "hopeless", "hopeful", "blessed",
+    "grief",
+    "rage",
+    "ecstatic",
+    "betrayal",
+    "guilt",
+    "shame",
+    "pride",
+    "jealous",
+    "lonely",
+    "abandoned",
+    "abusive",
+    "violent",
+    "trauma",
+    "survived",
+    "rescued",
+    "attacked",
+    "crashed",
+    "bankrupt",
+    "diagnosed",
+    "addiction",
+    "recovered",
+    "relapsed",
+    "obsessed",
+    "overwhelmed",
+    "suicidal",
+    "abuse",
+    "assault",
+    "miracle",
+    "breakthrough",
+    "triumph",
+    "catastrophe",
+    "crisis",
+    "desperate",
+    "hopeless",
+    "hopeful",
+    "blessed",
 ])
+
+# ── v4.1-patch: ALL-CAPS emotional emphasis detector (PATCH-3) ───────────────
+_CAPS_RE = re.compile(r"\b[A-Z]{3,}\b")
+
+# ── v4.1-patch: importance threshold for hard-delete protection (PATCH-1) ────
+_HARD_DELETE_IMP_PROTECT: float = 0.80
 
 _SURPRISE_SIM_MIN: float = 0.55
 _SURPRISE_BOOST: float = 0.15
 _CONTRADICTION_PATTERNS = re.compile(
     r"\b(not|no longer|cancelled|fired|quit|left|resigned|actually|"
     r"correction|wrong|update|changed|instead|step.?down|failed|never|"
-    r"stopped|ended|broke.?up|dissolved|bankrupt|retracted|clarif)\b",
+    r"stopped|ended|broke.?up|dissolved|bankrupt|retracted|clarif|"
+    r"removed|deprecated|obsolete|overridden|replaced|corrected)\b",  # PATCH-3
     re.IGNORECASE,
 )
 
@@ -128,9 +214,9 @@ _MIN_CYCLES_FOR_LONG: int = 2
 # 24h bump: memory retention shows a slight uptick at 24h post-encoding,
 # hypothesised to be due to overnight consolidation. We model this as a
 # small additive sigmoid boost in the 18-30h window.
-_TEMPORAL_GRADIENT_PEAK_SEC: float = 86400.0   # 24 hours
+_TEMPORAL_GRADIENT_PEAK_SEC: float = 86400.0  # 24 hours
 _TEMPORAL_GRADIENT_WIDTH_SEC: float = 21600.0  # ±6 hours around peak
-_TEMPORAL_GRADIENT_MAX: float = 0.04           # 4% max boost
+_TEMPORAL_GRADIENT_MAX: float = 0.04  # 4% max boost
 
 # ── v4: Proactive interference decay [P11] ───────────────────────────────────
 # Old memories lose strength when newer, similar memories exist.
@@ -217,9 +303,12 @@ class SleepBudget:
     interference_dup_min: int = 2
 
     # ── v4: New feature flags ─────────────────────────────────────────────────
-    use_temporal_gradient: bool = True          # [P9] 24h consolidation bump
-    use_proactive_interference: bool = True      # [P11] PI decay for old dups
-    use_sleep_phase_weighting: bool = True       # [P10] REM/SWS preference
+    use_temporal_gradient: bool = True  # [P9] 24h consolidation bump
+    use_proactive_interference: bool = True  # [P11] PI decay for old dups
+    use_sleep_phase_weighting: bool = True  # [P10] REM/SWS preference
+
+    # ── v4.1-patch: catastrophic forgetting protection threshold (PATCH-1) ────
+    hard_delete_imp_protect: float = _HARD_DELETE_IMP_PROTECT
 
 
 # =============================================================================
@@ -344,14 +433,29 @@ def _build_access_times(m: MemoryEntry, *, now: float) -> List[float]:
 
 
 def _compute_arousal(m: MemoryEntry) -> float:
-    """Estimate emotional arousal from text content. Returns [0, 1]."""
+    """Estimate emotional arousal from text content. Returns [0, 1].
+
+    v4.1 PATCH-3: Added ALL-CAPS detection. Writing in CAPS (URGENT, NEVER,
+    CRITICAL) is a genuine emotional emphasis signal in human text production.
+    Weight distribution: imp=0.50, keywords=0.30, caps=0.12, punct=0.08.
+    """
     text = str(getattr(m, "text", "") or "").lower()
+    text_raw = str(getattr(m, "text", "") or "")
     imp = float(getattr(m, "importance", 0.0) or 0.0)
+
     kw_hits = sum(1 for kw in _AROUSAL_KEYWORDS if kw in text)
     kw_score = min(1.0, kw_hits / 3.0)
+
     punct = text.count("!") + text.count("?")
     punct_score = min(1.0, punct / 3.0)
-    return float(min(1.0, 0.50 * imp + 0.35 * kw_score + 0.15 * punct_score))
+
+    # PATCH-3: ALL-CAPS words (3+ chars) as emotional emphasis signal
+    caps_hits = len(_CAPS_RE.findall(text_raw))
+    caps_score = min(1.0, caps_hits / 3.0)
+
+    return float(
+        min(1.0, 0.50 * imp + 0.30 * kw_score + 0.12 * caps_score + 0.08 * punct_score)
+    )
 
 
 # =============================================================================
@@ -381,7 +485,7 @@ def _compute_temporal_gradient(m: MemoryEntry, *, now: float) -> float:
     dist = age_sec - _TEMPORAL_GRADIENT_PEAK_SEC
     # Gaussian centered at 24h
     boost = _TEMPORAL_GRADIENT_MAX * math.exp(
-        -(dist * dist) / (2 * _TEMPORAL_GRADIENT_WIDTH_SEC ** 2)
+        -(dist * dist) / (2 * _TEMPORAL_GRADIENT_WIDTH_SEC**2)
     )
     return float(min(_TEMPORAL_GRADIENT_MAX, max(0.0, boost)))
 
@@ -661,7 +765,10 @@ def _compute_strength(
         amplified = max(0.0, amplified + pi_penalty)
 
     # 8. Dynamic importance floor.
-    imp_floor = 0.20 * dyn_imp
+    # PATCH-2: long-tier memories get a stronger floor (0.30) so consolidated
+    # knowledge never collapses to near-zero after months without access.
+    mem_type = str(getattr(m, "memory_type", "flash") or "flash")
+    imp_floor = 0.30 * dyn_imp if mem_type == "long" else 0.20 * dyn_imp
 
     return float(max(imp_floor, min(1.0, amplified)))
 
@@ -713,8 +820,9 @@ def _build_neighbor_map(
     for m in candidates:
         emb = getattr(m, "embedding", None)
         if emb is None:
-            out[m.id] = NeighborInfo(sim_max=0.0, dup_ids=[], dup_count=0,
-                                      dup_similarities={})
+            out[m.id] = NeighborInfo(
+                sim_max=0.0, dup_ids=[], dup_count=0, dup_similarities={}
+            )
             continue
 
         hits = vector_store.search_with_payloads(
@@ -738,8 +846,12 @@ def _build_neighbor_map(
                 dup_ids.append(str(mid))
                 dup_sims[str(mid)] = sc  # v4
 
-        prelim = NeighborInfo(sim_max=sim_max, dup_ids=dup_ids,
-                               dup_count=len(dup_ids), dup_similarities=dup_sims)
+        prelim = NeighborInfo(
+            sim_max=sim_max,
+            dup_ids=dup_ids,
+            dup_count=len(dup_ids),
+            dup_similarities=dup_sims,
+        )
         out[m.id] = NeighborInfo(
             sim_max=sim_max,
             dup_ids=dup_ids,
@@ -977,8 +1089,7 @@ def _apply_summary_cluster(
             "is_provisional": is_provisional,
             # v4: extended reconsolidation window [P12]
             "provisional_expires_at": (
-                now + budget.provisional_window_days * 86400
-                if is_provisional else None
+                now + budget.provisional_window_days * 86400 if is_provisional else None
             ),
             "consolidation_cycles": 0,
             # v4: track sleep phase that produced this summary
@@ -1131,6 +1242,27 @@ def _plan_tier_updates(
 # =============================================================================
 
 
+def _is_protected(m: MemoryEntry, budget: SleepBudget) -> bool:
+    """PATCH-1 — Catastrophic forgetting guard.
+
+    Returns True if this memory must never be hard-deleted, regardless of
+    BLA score, duplicate count, or age.
+
+    Rule: memories with importance >= hard_delete_imp_protect (default 0.80)
+    that have NOT been consolidated into a summary are unconditionally exempt
+    from all hard-delete paths (dead-trace, redundancy, interference).
+
+    Rationale: a very old medical allergy, a user's name, or a core identity
+    fact may legitimately have low BLA if last_accessed was months ago — but
+    deleting it would be a silent, unrecoverable data loss. The importance
+    field was set by the encoding system precisely to signal this permanence.
+    """
+    if getattr(m, "consolidated_into_id", None) is not None:
+        return False  # already folded into a summary → safe to purge the raw row
+    imp = float(getattr(m, "importance", 0.0) or 0.0)
+    return imp >= budget.hard_delete_imp_protect
+
+
 def _select_interference_victim(
     m: MemoryEntry,
     dup_ids: List[str],
@@ -1145,9 +1277,13 @@ def _select_interference_victim(
     if len(dup_ids) < budget.interference_dup_min:
         return None
     m_str = _compute_strength(
-        m, now=now, budget=budget,
-        neighbor_map=neighbor_map, raw_bla_scores=raw_bla_scores,
-        dynamic_importances=dynamic_importances, id_map=id_map,
+        m,
+        now=now,
+        budget=budget,
+        neighbor_map=neighbor_map,
+        raw_bla_scores=raw_bla_scores,
+        dynamic_importances=dynamic_importances,
+        id_map=id_map,
     )
     weakest_id: Optional[str] = None
     weakest_str = m_str
@@ -1155,12 +1291,18 @@ def _select_interference_victim(
         dup = id_map.get(did)
         if dup is None or int(getattr(dup, "deleted", 0) or 0) == 1:
             continue
+        if _is_protected(dup, budget):  # PATCH-1: never victimise a protected memory
+            continue
         if dynamic_importances.get(did, 0.0) > 0.50:
             continue
         d_str = _compute_strength(
-            dup, now=now, budget=budget,
-            neighbor_map=neighbor_map, raw_bla_scores=raw_bla_scores,
-            dynamic_importances=dynamic_importances, id_map=id_map,
+            dup,
+            now=now,
+            budget=budget,
+            neighbor_map=neighbor_map,
+            raw_bla_scores=raw_bla_scores,
+            dynamic_importances=dynamic_importances,
+            id_map=id_map,
         )
         if d_str < weakest_str:
             weakest_str = d_str
@@ -1217,6 +1359,10 @@ def _plan_hard_deletes(
         if getattr(m, "consolidated_into_id", None) is not None:
             continue
 
+        # PATCH-1: unconditionally skip high-importance, non-consolidated memories
+        if _is_protected(m, budget):
+            continue
+
         dyn_imp = dynamic_importances.get(m.id, 0.0)
         acc = int(getattr(m, "access_count", 0) or 0)
         age_days = (now - float(getattr(m, "created_at", now))) / 86400.0
@@ -1224,9 +1370,13 @@ def _plan_hard_deletes(
         dup_count = info.dup_count if info else 0
 
         M = _compute_strength(
-            m, now=now, budget=budget,
-            neighbor_map=neighbor_map, raw_bla_scores=raw_bla_scores,
-            dynamic_importances=dynamic_importances, id_map=id_map,
+            m,
+            now=now,
+            budget=budget,
+            neighbor_map=neighbor_map,
+            raw_bla_scores=raw_bla_scores,
+            dynamic_importances=dynamic_importances,
+            id_map=id_map,
         )
 
         # Dead trace
@@ -1245,8 +1395,9 @@ def _plan_hard_deletes(
         # A memory with 3 very-similar dups (sim=0.95) is more redundant than
         # one with 3 barely-threshold dups (sim=0.80). We weight by avg similarity.
         if info and info.dup_similarities:
-            avg_sim = (sum(info.dup_similarities.values()) /
-                       max(1, len(info.dup_similarities)))
+            avg_sim = sum(info.dup_similarities.values()) / max(
+                1, len(info.dup_similarities)
+            )
             weighted_dup_count = dup_count * avg_sim
         else:
             weighted_dup_count = float(dup_count)
@@ -1330,7 +1481,9 @@ def run_consolidation(
     cancel_event: Optional[threading.Event] = None,
 ) -> SleepReport:
     """
-    v4 Sleep Consolidation.  Drop-in replacement for v3.
+    v4.1-patched Sleep Consolidation.  Drop-in replacement for v4.
+
+    Applies three v3.1 safety patches on top of the full v4 feature set.
 
     Architecture mirrors biological sleep consolidation [P3, P4]:
 
@@ -1351,37 +1504,55 @@ def run_consolidation(
     errors: List[str] = []
 
     logger.info(
-        "sleep_v4.start dry_run=%s d=%.2f k=%d alpha=%.2f S=%.1f W=%.1f "
+        "sleep_v4.1p.start dry_run=%s d=%.2f k=%d alpha=%.2f S=%.1f W=%.1f "
         "tg=%s pi=%s sp=%s min_cycles=%d",
-        dry_run, b.actr_d, b.petrov_k, b.imp_alpha,
-        b.spreading_S, b.spreading_W,
-        b.use_temporal_gradient, b.use_proactive_interference,
-        b.use_sleep_phase_weighting, b.min_cycles_for_long,
+        dry_run,
+        b.actr_d,
+        b.petrov_k,
+        b.imp_alpha,
+        b.spreading_S,
+        b.spreading_W,
+        b.use_temporal_gradient,
+        b.use_proactive_interference,
+        b.use_sleep_phase_weighting,
+        b.min_cycles_for_long,
     )
 
     if _cancelled(cancel_event):
         logger.info("sleep_v4.cancelled before_start")
         return SleepReport(
-            scanned=0, clusters_found=0, summarized=0, tier_updates=0,
-            soft_deleted_after_summary=0, hard_deleted=0,
+            scanned=0,
+            clusters_found=0,
+            summarized=0,
+            tier_updates=0,
+            soft_deleted_after_summary=0,
+            hard_deleted=0,
             errors=["cancelled:before_start"],
         )
 
     # Phase 0: Scan.
     cands = _load_candidates(
-        sqlite_store, limit=b.max_candidates,
+        sqlite_store,
+        limit=b.max_candidates,
         cooldown_seconds=b.consolidation_cooldown_sec,
     )
     id_map: Dict[str, MemoryEntry] = {m.id: m for m in cands}
     neighbor_map = _build_neighbor_map(
-        vector_store=vector_store, candidates=cands, budget=b, now=now,
+        vector_store=vector_store,
+        candidates=cands,
+        budget=b,
+        now=now,
     )
 
     if _cancelled(cancel_event):
         logger.info("sleep_v4.cancelled after_scan scanned=%d", len(cands))
         return SleepReport(
-            scanned=len(cands), clusters_found=0, summarized=0, tier_updates=0,
-            soft_deleted_after_summary=0, hard_deleted=0,
+            scanned=len(cands),
+            clusters_found=0,
+            summarized=0,
+            tier_updates=0,
+            soft_deleted_after_summary=0,
+            hard_deleted=0,
             errors=["cancelled:after_scan"],
         )
 
@@ -1390,7 +1561,10 @@ def run_consolidation(
         m.id: _compute_dynamic_importance(m, now=now, budget=b) for m in cands
     }
     raw_bla_scores: Dict[str, float] = _compute_all_raw_bla(
-        cands, now=now, budget=b, dynamic_importances=dynamic_importances,
+        cands,
+        now=now,
+        budget=b,
+        dynamic_importances=dynamic_importances,
     )
     prediction_errors_flagged = sum(1 for i in neighbor_map.values() if i.is_surprising)
     arousal_boosted = sum(1 for m in cands if _compute_arousal(m) > 0.5)
@@ -1406,19 +1580,30 @@ def run_consolidation(
     proactive_interference_detected = 0
     if b.use_proactive_interference:
         proactive_interference_detected = sum(
-            1 for m in cands
-            if (neighbor_map.get(m.id) and
-                neighbor_map[m.id].dup_count > 0 and
-                any(id_map.get(nid) and
-                    float(getattr(id_map[nid], "created_at", now)) > float(getattr(m, "created_at", now))
-                    for nid in (neighbor_map[m.id].dup_ids or [])))
+            1
+            for m in cands
+            if (
+                neighbor_map.get(m.id)
+                and neighbor_map[m.id].dup_count > 0
+                and any(
+                    id_map.get(nid)
+                    and float(getattr(id_map[nid], "created_at", now))
+                    > float(getattr(m, "created_at", now))
+                    for nid in (neighbor_map[m.id].dup_ids or [])
+                )
+            )
         )
 
     # Phase 1: Replay — cluster and summarise near-duplicate groups.
     clusters = _build_clusters(
-        sqlite_store=sqlite_store, candidates=cands, id_map=id_map,
-        neighbor_map=neighbor_map, raw_bla_scores=raw_bla_scores,
-        dynamic_importances=dynamic_importances, budget=b, now=now,
+        sqlite_store=sqlite_store,
+        candidates=cands,
+        id_map=id_map,
+        neighbor_map=neighbor_map,
+        raw_bla_scores=raw_bla_scores,
+        dynamic_importances=dynamic_importances,
+        budget=b,
+        now=now,
     )
     summary_targets = _pick_summary_clusters(clusters, budget=b)
 
@@ -1429,13 +1614,17 @@ def run_consolidation(
         if _cancelled(cancel_event):
             logger.info(
                 "sleep_v4.cancelled mid_replay summarized=%d remaining=%d",
-                summarized, len(summary_targets) - summarized,
+                summarized,
+                len(summary_targets) - summarized,
             )
             return SleepReport(
-                scanned=len(cands), clusters_found=len(clusters),
-                summarized=summarized, tier_updates=0,
+                scanned=len(cands),
+                clusters_found=len(clusters),
+                summarized=summarized,
+                tier_updates=0,
                 soft_deleted_after_summary=soft_deleted_after_summary,
-                hard_deleted=0, errors=["cancelled:mid_replay"],
+                hard_deleted=0,
+                errors=["cancelled:mid_replay"],
                 provisional_summaries=provisional_summaries,
                 arousal_boosted=arousal_boosted,
                 prediction_errors_flagged=prediction_errors_flagged,
@@ -1444,9 +1633,15 @@ def run_consolidation(
             )
         try:
             _, sd_count, is_prov = _apply_summary_cluster(
-                sqlite_store=sqlite_store, vector_store=vector_store,
-                brain=brain, embed=embed, id_map=id_map,
-                cluster=cl, budget=b, dry_run=dry_run, now=now,
+                sqlite_store=sqlite_store,
+                vector_store=vector_store,
+                brain=brain,
+                embed=embed,
+                id_map=id_map,
+                cluster=cl,
+                budget=b,
+                dry_run=dry_run,
+                now=now,
             )
             summarized += 1
             soft_deleted_after_summary += sd_count
@@ -1461,11 +1656,15 @@ def run_consolidation(
     if _cancelled(cancel_event):
         logger.info("sleep_v4.cancelled after_replay summarized=%d", summarized)
         return SleepReport(
-            scanned=len(cands), clusters_found=len(clusters),
-            summarized=summarized, tier_updates=0,
+            scanned=len(cands),
+            clusters_found=len(clusters),
+            summarized=summarized,
+            tier_updates=0,
             soft_deleted_after_summary=soft_deleted_after_summary,
-            hard_deleted=0, errors=["cancelled:after_replay"],
-            promoted=0, demoted=0,
+            hard_deleted=0,
+            errors=["cancelled:after_replay"],
+            promoted=0,
+            demoted=0,
             provisional_summaries=provisional_summaries,
             arousal_boosted=arousal_boosted,
             prediction_errors_flagged=prediction_errors_flagged,
@@ -1475,9 +1674,13 @@ def run_consolidation(
 
     # Phase 2: Tier updates.
     tier_updates_plan = _plan_tier_updates(
-        candidates=cands, id_map=id_map,
-        neighbor_map=neighbor_map, raw_bla_scores=raw_bla_scores,
-        dynamic_importances=dynamic_importances, budget=b, now=now,
+        candidates=cands,
+        id_map=id_map,
+        neighbor_map=neighbor_map,
+        raw_bla_scores=raw_bla_scores,
+        dynamic_importances=dynamic_importances,
+        budget=b,
+        now=now,
     )[: b.max_tier_updates]
 
     _TIER_RANK = {"flash": 0, "short": 1, "long": 2}
@@ -1499,9 +1702,14 @@ def run_consolidation(
 
     # Phase 3: Hard deletes.
     delete_plan, redundancy_ids, interference_ids = _plan_hard_deletes(
-        sqlite_store=sqlite_store, candidates=cands, id_map=id_map,
-        neighbor_map=neighbor_map, raw_bla_scores=raw_bla_scores,
-        dynamic_importances=dynamic_importances, budget=b, now=now,
+        sqlite_store=sqlite_store,
+        candidates=cands,
+        id_map=id_map,
+        neighbor_map=neighbor_map,
+        raw_bla_scores=raw_bla_scores,
+        dynamic_importances=dynamic_importances,
+        budget=b,
+        now=now,
         limit=b.max_hard_deletes,
     )
 
@@ -1529,42 +1737,66 @@ def run_consolidation(
     cycles_incremented = 0
     if not dry_run:
         survivor_ids = [
-            m.id for m in cands
+            m.id
+            for m in cands
             if m.id not in summarised_ids
             and m.id not in deleted_ids
             and int(getattr(m, "deleted", 0) or 0) == 0
         ]
         cycles_incremented = _increment_cycle_counts(
-            sqlite_store=sqlite_store, survivor_ids=survivor_ids,
+            sqlite_store=sqlite_store,
+            survivor_ids=survivor_ids,
         )
 
     logger.info(
-        "sleep_v4.done scanned=%d clusters=%d summarized=%d(prov=%d) "
+        "sleep_v4.1p.done scanned=%d clusters=%d summarized=%d(prov=%d) "
         "tiers=%d(+%d/-%d) hard=%d redundant=%d interference=%d "
         "cycles_bumped=%d surprises=%d arousal=%d tg=%d pi=%d errors=%d",
-        len(cands), len(clusters), summarized, provisional_summaries,
-        tier_updates, promoted, demoted, hard_deleted, redundancy_deleted,
-        interference_pruned, cycles_incremented, prediction_errors_flagged,
-        arousal_boosted, temporal_gradient_applied, proactive_interference_detected,
+        len(cands),
+        len(clusters),
+        summarized,
+        provisional_summaries,
+        tier_updates,
+        promoted,
+        demoted,
+        hard_deleted,
+        redundancy_deleted,
+        interference_pruned,
+        cycles_incremented,
+        prediction_errors_flagged,
+        arousal_boosted,
+        temporal_gradient_applied,
+        proactive_interference_detected,
         len(errors),
     )
 
     if dry_run:
         _print_dry_run(
-            cands=cands, clusters=clusters, summary_targets=summary_targets,
-            tier_updates_plan=tier_updates_plan, delete_plan=delete_plan,
-            neighbor_map=neighbor_map, id_map=id_map,
-            redundancy_set=redundancy_set, interference_set=interference_set,
-            raw_bla_scores=raw_bla_scores, dynamic_importances=dynamic_importances,
-            budget=b, now=now,
+            cands=cands,
+            clusters=clusters,
+            summary_targets=summary_targets,
+            tier_updates_plan=tier_updates_plan,
+            delete_plan=delete_plan,
+            neighbor_map=neighbor_map,
+            id_map=id_map,
+            redundancy_set=redundancy_set,
+            interference_set=interference_set,
+            raw_bla_scores=raw_bla_scores,
+            dynamic_importances=dynamic_importances,
+            budget=b,
+            now=now,
         )
 
     return SleepReport(
-        scanned=len(cands), clusters_found=len(clusters),
-        summarized=summarized, tier_updates=tier_updates,
+        scanned=len(cands),
+        clusters_found=len(clusters),
+        summarized=summarized,
+        tier_updates=tier_updates,
         soft_deleted_after_summary=soft_deleted_after_summary,
-        hard_deleted=hard_deleted, errors=errors,
-        promoted=promoted, demoted=demoted,
+        hard_deleted=hard_deleted,
+        errors=errors,
+        promoted=promoted,
+        demoted=demoted,
         redundancy_deleted=redundancy_deleted,
         interference_pruned=interference_pruned,
         provisional_summaries=provisional_summaries,
@@ -1582,9 +1814,19 @@ def run_consolidation(
 
 
 def _print_dry_run(
-    cands, clusters, summary_targets, tier_updates_plan, delete_plan,
-    neighbor_map, id_map, redundancy_set, interference_set,
-    raw_bla_scores, dynamic_importances, budget, now,
+    cands,
+    clusters,
+    summary_targets,
+    tier_updates_plan,
+    delete_plan,
+    neighbor_map,
+    id_map,
+    redundancy_set,
+    interference_set,
+    raw_bla_scores,
+    dynamic_importances,
+    budget,
+    now,
 ) -> None:
     _TR = {"flash": 0, "short": 1, "long": 2}
     print("\n" + "=" * 90)
@@ -1593,14 +1835,22 @@ def _print_dry_run(
     for m in cands[:15]:
         info = neighbor_map.get(m.id)
         M = _compute_strength(
-            m, now=now, budget=budget, neighbor_map=neighbor_map,
-            raw_bla_scores=raw_bla_scores, dynamic_importances=dynamic_importances,
+            m,
+            now=now,
+            budget=budget,
+            neighbor_map=neighbor_map,
+            raw_bla_scores=raw_bla_scores,
+            dynamic_importances=dynamic_importances,
             id_map=id_map,
         )
         dyn_imp = dynamic_importances.get(m.id, 0.0)
         raw_b = raw_bla_scores.get(m.id, -99.0)
         arousal = _compute_arousal(m)
-        tg = _compute_temporal_gradient(m, now=now) if budget.use_temporal_gradient else 0.0
+        tg = (
+            _compute_temporal_gradient(m, now=now)
+            if budget.use_temporal_gradient
+            else 0.0
+        )
         cycles = int((getattr(m, "metadata", {}) or {}).get("consolidation_cycles", 0))
         flag = "⚡" if (info and info.is_surprising) else "  "
         phase = "REM" if arousal > 0.5 else "SWS"
@@ -1639,8 +1889,12 @@ def _print_dry_run(
         m = id_map.get(mem_id)
         if m:
             M = _compute_strength(
-                m, now=now, budget=budget, neighbor_map=neighbor_map,
-                raw_bla_scores=raw_bla_scores, dynamic_importances=dynamic_importances,
+                m,
+                now=now,
+                budget=budget,
+                neighbor_map=neighbor_map,
+                raw_bla_scores=raw_bla_scores,
+                dynamic_importances=dynamic_importances,
                 id_map=id_map,
             )
             cyc = int((getattr(m, "metadata", {}) or {}).get("consolidation_cycles", 0))

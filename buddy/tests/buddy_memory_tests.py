@@ -2388,7 +2388,7 @@ def generate_all_visualizations():
     ax_title.text(
         0.5,
         0.2,
-        "Cognitive Memory Engine v3.0 — ACT-R × Petrov BLA × CLS Theory × Arousal × Fan"
+        "Cognitive Memory Engine v4.0 — ACT-R × Petrov BLA × CLS Theory × Arousal × Fan"
         " Effect",
         ha="center",
         va="center",

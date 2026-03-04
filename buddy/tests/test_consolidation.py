@@ -4,7 +4,11 @@ from __future__ import annotations
 from typing import Any, Callable, List, Optional, Sequence
 
 from buddy.logger.logger import get_logger
-from consolidation_engine import SleepBudget, SleepReport, run_consolidation
+from buddy.memory.consolidation_engine import (
+    SleepBudget,
+    SleepReport,
+    run_consolidation,
+)
 
 logger = get_logger("sleep_maintenance")
 

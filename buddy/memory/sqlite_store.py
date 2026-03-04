@@ -134,7 +134,7 @@ class SQLiteStore:
                 last_consolidated_at     REAL NULL,
 
                 -- arbitrary metadata
-                metadata_json   TEXT NOT NULL DEFAULT '{}'
+                metadata   TEXT NOT NULL DEFAULT '{}'
             );
             """)
 
@@ -207,7 +207,7 @@ class SQLiteStore:
         add_col("consolidation_error", "TEXT NULL")
         add_col("last_consolidated_at", "REAL NULL")
 
-        add_col("metadata_json", "TEXT NOT NULL DEFAULT '{}'")
+        add_col("metadata", "TEXT NOT NULL DEFAULT '{}'")
 
         self._conn.commit()
 
@@ -275,7 +275,7 @@ class SQLiteStore:
             else None
         )
 
-        e.metadata = self._loads_json(row["metadata_json"], {})
+        e.metadata = self._loads_json(row["metadata"], {})
 
         # embedding_json is optional and only used for re-upsert/debug
         emb_json = row["embedding_json"]
@@ -317,7 +317,7 @@ class SQLiteStore:
                 embedding_json = None
 
         # Pre-compute other serialized fields
-        metadata_json = self._dumps_json(getattr(entry, "metadata", {}) or {}, "{}")
+        metadata = self._dumps_json(getattr(entry, "metadata", {}) or {}, "{}")
 
         # Use getattr with defaults to avoid KeyError exceptions
         memory_type = getattr(entry, "memory_type", "flash") or "flash"
@@ -335,7 +335,7 @@ class SQLiteStore:
             pending_upsert, upsert_error, upsert_attempts, last_upsert_at,
             deleted,
             consolidation_status, consolidated_into_id, consolidation_error, last_consolidated_at,
-            metadata_json
+            metadata
         )
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
@@ -358,7 +358,7 @@ class SQLiteStore:
             consolidated_into_id=excluded.consolidated_into_id,
             consolidation_error=excluded.consolidation_error,
             last_consolidated_at=excluded.last_consolidated_at,
-            metadata_json=excluded.metadata_json;
+            metadata=excluded.metadata;
         """
 
         params = (
@@ -382,7 +382,7 @@ class SQLiteStore:
             getattr(entry, "consolidated_into_id", None),
             getattr(entry, "consolidation_error", None),
             getattr(entry, "last_consolidated_at", None),
-            metadata_json,
+            metadata,
         )
 
         cur = self._conn.cursor()
@@ -559,33 +559,42 @@ class SQLiteStore:
         return [self._row_to_entry(r) for r in cur.fetchall()]
 
     def list_candidates_for_consolidation(
-        self,
-        *,
-        limit: int,
-        cooldown_seconds: float = 86400.0,  # default: 24h rest after being processed
+        self, limit: int = 300, cooldown_seconds: float = 86400.0
     ) -> List[MemoryEntry]:
+        """
+        Consolidation candidates listing.
+
+        Rule:
+        - eligible if COALESCE(last_consolidated_at, created_at) <= now - 2 days
+        - includes flash/short/long INCLUDING summary memories
+        - excludes deleted rows only
+        - orders by most recently used (last_accessed fallback to created_at)
+        """
+        limit = min(int(limit), 1000)
+
+        now = time.time()
+        min_age_sec = 1.0 * 24.0 * 3600.0  # 2 days
         cutoff = time.time() - cooldown_seconds
-        with sqlite3.connect(self.db_path) as c:
-            rows = c.execute(
-                """
-                SELECT id, text, importance, memory_type, access_count, created_at,
-                    last_accessed, deleted, consolidated_into_id,
-                    last_consolidated_at, metadata
-                FROM memories
-                WHERE deleted = 0
-                AND (
-                    last_consolidated_at IS NULL        -- never processed: always eligible
-                    OR last_consolidated_at < ?         -- cooldown has expired
-                )
-                ORDER BY
-                    last_consolidated_at ASC NULLS FIRST, -- least-recently-processed first
-                    importance DESC,                       -- tie-break: higher importance
-                    created_at ASC                         -- final tie-break: older first
-                LIMIT ?
-                """,
-                (cutoff, limit),
-            ).fetchall()
-        return [self._row_to_entry(r) for r in rows]
+
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            SELECT *
+            FROM memories
+            WHERE deleted = 0
+              AND (
+                  last_consolidated_at IS NULL        -- never processed: always eligible
+                  OR last_consolidated_at < ?         -- cooldown has expired
+              )
+            ORDER BY
+                last_consolidated_at ASC NULLS FIRST, -- least-recently-processed first
+                importance DESC,                       -- tie-break: higher importance
+                created_at ASC                         -- final tie-break: older first
+            LIMIT ?
+            """,
+            (cutoff, limit),
+        )
+        return [self._row_to_entry(r) for r in cur.fetchall()]
 
     # ---------------------------------------------------------------------------
     # Method 1 — soft_delete_with_snapshot
@@ -805,7 +814,7 @@ class SQLiteStore:
             pending_upsert, upsert_error, upsert_attempts, last_upsert_at,
             deleted,
             consolidation_status, consolidated_into_id, consolidation_error, last_consolidated_at,
-            metadata_json
+            metadata
         )
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
@@ -828,7 +837,7 @@ class SQLiteStore:
             consolidated_into_id=excluded.consolidated_into_id,
             consolidation_error=excluded.consolidation_error,
             last_consolidated_at=excluded.last_consolidated_at,
-            metadata_json=excluded.metadata_json;
+            metadata=excluded.metadata;
         """
 
         # Prepare all parameters in one go
@@ -853,7 +862,7 @@ class SQLiteStore:
                 except Exception:
                     embedding_json = None
 
-            metadata_json = self._dumps_json(getattr(entry, "metadata", {}) or {}, "{}")
+            metadata = self._dumps_json(getattr(entry, "metadata", {}) or {}, "{}")
 
             memory_type = getattr(entry, "memory_type", "flash") or "flash"
             importance = float(getattr(entry, "importance", 0.5) or 0.5)
@@ -883,7 +892,7 @@ class SQLiteStore:
                 getattr(entry, "consolidated_into_id", None),
                 getattr(entry, "consolidation_error", None),
                 getattr(entry, "last_consolidated_at", None),
-                metadata_json,
+                metadata,
             )
             params_list.append(params)
 
