@@ -85,7 +85,7 @@ For large $n$, the exact sum is prohibitively expensive. Petrov's $k=3$ hybrid a
 
 $$B_i \approx \ln\!\left(\sum_{j=1}^{\min(n,3)} t_j^{-d_{\text{eff}}} \;+\; \frac{(n-3) \cdot t_{\text{mean}}^{1-d_{\text{eff}}}}{1 - d_{\text{eff}}}\right)$$
 
-![BLA decay curves](assets/memory_test_graphs/petrov_bla.png)
+![BLA decay curves](../../assets/memory_test_graphs/petrov_bla.png)
 
 ### Step 2: Importance-Modulated Decay
 
@@ -113,7 +113,7 @@ In v4, early-turn memories (source_turn ≤ 3) use:
 
 $$\lambda_{\text{early}} = \lambda \cdot 1.3$$
 
-![Dynamic importance trajectories](assets/memory_test_graphs/dynamic_importance.png)
+![Dynamic importance trajectories](../../assets/memory_test_graphs/dynamic_importance.png)
 
 ### Step 5: Arousal Modulation (McGaugh 2004)
 
@@ -125,7 +125,7 @@ The arousal score boosts BLA normalised strength:
 
 $$\text{amplified} = \text{bla\_norm} + \text{budget.arousal\_boost} \cdot \text{arousal}(m)$$
 
-![Emotional arousal effect over time](assets/memory_test_graphs/arousal.png)
+![Emotional arousal effect over time](../../assets/memory_test_graphs/arousal.png)
 
 ### Step 6: Surprise Boost (Friston 2010)
 
@@ -143,7 +143,7 @@ where $S$ is the maximum associative strength constant and $\text{fan}$ is the n
 
 $$\text{amplified} \mathrel{+}= A_{\text{spread}} \cdot w_{\text{activation}}$$
 
-![Fan effect: activation vs interference](assets/memory_test_graphs/fan_effect.png)
+![Fan effect: activation vs interference](../../assets/memory_test_graphs/fan_effect.png)
 
 ### Step 8: Importance Floor
 
@@ -155,7 +155,7 @@ $$\text{strength} = \max\!\left(0.20 \cdot I_{\text{dyn}},\; \min(1.0, \text{amp
 
 ## v3 → v4: What's New and Why
 
-![v3 vs v4 summary](assets/v3_vs_v4/diff_DASHBOARD.png)
+![v3 vs v4 summary](../../assets/v3_vs_v4/diff_DASHBOARD.png)
 
 Every feature below was absent in v3. The differential test suite proves this: each test is designed to **fail on v3 and pass on v4**.
 
@@ -182,7 +182,7 @@ $$\text{amplified} \mathrel{+}= \text{TG}(m, t_{\text{now}})$$
 | 24 hours   | 0.0107      | **0.0439**  | **+0.0332**     |
 | 48 hours   | 0.0107      | 0.0107      | 0               |
 
-![Temporal gradient](assets/v3_vs_v4/diff_D1_temporal_gradient.png)
+![Temporal gradient](../../assets/v3_vs_v4/diff_D1_temporal_gradient.png)
 
 ---
 
@@ -212,7 +212,7 @@ Conditions for PI to apply:
 | 0.99       | −0.055     | Strong interference |
 | v3 (any)   | **0.000**  | No PI implemented   |
 
-![Proactive interference](assets/v3_vs_v4/diff_D2_proactive_interference.png)
+![Proactive interference](../../assets/v3_vs_v4/diff_D2_proactive_interference.png)
 
 ---
 
@@ -237,7 +237,7 @@ where $|C|$ is cluster size, $\overline{I_{\text{dyn}}}$ is mean dynamic importa
 | Neutral      | 0.05        | 1.560       | 1.576       | +1.0%      |
 | Emotional    | 0.85        | **1.560**   | **1.825**   | **+15.8%** |
 
-![Sleep phase weighting](assets/v3_vs_v4/diff_D3_sleep_phase.png)
+![Sleep phase weighting](../../assets/v3_vs_v4/diff_D3_sleep_phase.png)
 
 ---
 
@@ -257,7 +257,7 @@ In v3, `source_turn` is stored in the `MemoryEntry` metadata but never read by `
 | 15          | 0.9434        | 0.9434        | 0           |
 | 50          | 0.9434        | 0.9434        | 0           |
 
-![Source turn decay](assets/v3_vs_v4/diff_D4_source_turn.png)
+![Source turn decay](../../assets/v3_vs_v4/diff_D4_source_turn.png)
 
 ---
 
@@ -285,7 +285,7 @@ where $\tau = 3$ (default).
 | 0.81     | Prune       | 3.24              | Prune       |
 | **0.74** | **Prune**   | **2.96**          | **Spare**   |
 
-![Weighted redundancy](assets/v3_vs_v4/diff_D5_weighted_redundancy.png)
+![Weighted redundancy](../../assets/v3_vs_v4/diff_D5_weighted_redundancy.png)
 
 ---
 
@@ -306,7 +306,7 @@ v3 used 32 arousal keywords drawn informally from emotional language lists. v4 e
 | v3      | 0 matching terms | 0.250     |
 | v4      | 5 matching terms | **0.600** |
 
-![Arousal keyword expansion](assets/v3_vs_v4/diff_D6_arousal_keywords.png)
+![Arousal keyword expansion](../../assets/v3_vs_v4/diff_D6_arousal_keywords.png)
 
 ---
 
@@ -334,7 +334,7 @@ The function reads `budget.provisional_window_days * 86400`, making the window f
 | Configurable   | ❌ hardcoded | ✅ `SleepBudget` param |
 | Paper basis    | —            | Nader et al. 2000      |
 
-![Provisional window](assets/v3_vs_v4/diff_D7_provisional_window.png)
+![Provisional window](../../../../assets/v3_vs_v4/diff_D7_provisional_window.png)
 
 ---
 
@@ -358,7 +358,7 @@ These counters are incremented inside `run_consolidation()` and returned with ev
 
 The full test suite (v3 base + v4 differential) validates 12 distinct cognitive phenomena:
 
-![Test dashboard](assets/memory_test_graphs/dashboard.png)
+![Test dashboard](../../assets/memory_test_graphs/dashboard.png)
 
 | #   | Phenomenon                        | Paper                    | Key result                             |
 | --- | --------------------------------- | ------------------------ | -------------------------------------- |
@@ -375,10 +375,10 @@ The full test suite (v3 base + v4 differential) validates 12 distinct cognitive 
 | 11  | Memory cluster summarisation      | —                        | Topic clustering + summary generation  |
 | 12  | 500-memory stress test            | —                        | Emotional 177% > routine, <0.05s       |
 
-![Ebbinghaus forgetting curve](assets/memory_test_graphs/ebbinghaus.png)
-![Spaced repetition](assets/memory_test_graphs/spaced_repetition.png)
-![Serial position effect](assets/memory_test_graphs/serial_position.png)
-![Stress test overview](assets/memory_test_graphs/stress_test.png)
+![Ebbinghaus forgetting curve](../../assets/memory_test_graphs/ebbinghaus.png)
+![Spaced repetition](../../assets/memory_test_graphs/spaced_repetition.png)
+![Serial position effect](../../assets/memory_test_graphs/serial_position.png)
+![Stress test overview](../../assets/memory_test_graphs/stress_test.png)
 
 ---
 
