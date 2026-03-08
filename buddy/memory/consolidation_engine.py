@@ -1105,6 +1105,7 @@ def _apply_summary_cluster(
         for mid in cluster.ids:
             sqlite_store.mark_consolidated(mid, into_id=summary_mem.id)
             sqlite_store.soft_delete(mid)
+            vector_store.soft_delete(mid)
             soft_deleted_count += 1
     else:
         soft_deleted_count = len(cluster.ids)

@@ -710,7 +710,6 @@ class MemoryManager:
         if not qt or self.vector is None or self.embedder is None:
             return []
 
-        k = max(1, int(top_k or 1))
         t0 = time.perf_counter()
 
         # 1) Embed
@@ -727,7 +726,7 @@ class MemoryManager:
             hits = self.vector.search_with_payloads(
                 query_vector=qv,
                 query_text=qt,
-                top_k=k,
+                top_k=top_k,
                 memory_types=memory_types,
                 include_deleted=include_deleted,
                 mode=mode,
@@ -736,7 +735,7 @@ class MemoryManager:
         except Exception:
             base = self.vector.search(
                 query_vector=qv,
-                top_k=k,
+                top_k=top_k,
                 memory_types=memory_types,
                 include_deleted=include_deleted,
                 query_text=qt,
@@ -763,7 +762,7 @@ class MemoryManager:
         out: List[MemoryCandidateLite] = []
         sqlite_touch = self.sqlite.touch
 
-        for e, sc, pl in hydrated[:k]:
+        for e, sc, pl in hydrated:
             try:
                 sqlite_touch(e.id)
             except Exception:

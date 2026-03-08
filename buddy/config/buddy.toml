@@ -195,6 +195,6 @@ max_length = 2048
 qwen_model = "Qwen/Qwen3-Reranker-0.6B"
 cross_encoder_model = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 
-dense_threshold = 0.25
-rerank_threshold = 0.40
+dense_threshold = 0.24
+rerank_threshold = 0.24
 rerank_min_keep = 4

@@ -1332,6 +1332,28 @@ class VectorStore:
         """Alias kept for backward compatibility."""
         self.delete(memory_id)
 
+    def soft_delete(self, memory_id: str) -> None:
+        """
+        Soft-delete a point by setting deleted=1 in its payload.
+
+        The point remains in the collection and is retrievable by ID,
+        but will be excluded from search results via the deleted filter.
+        """
+        try:
+            self.client.set_payload(
+                collection_name=self.collection,
+                payload={"deleted": 1},
+                points=[str(memory_id)],
+            )
+        except Exception as ex:
+            logger.exception(
+                "soft_delete failed: collection=%s id=%s err=%r",
+                self.collection,
+                memory_id,
+                ex,
+            )
+            raise
+
     # FEAT-3: Direct ID lookup
     def search_by_ids(
         self,
@@ -2408,6 +2430,40 @@ if __name__ == "__main__":
     # If reranker is available, should keep something; if reranker disabled/fallback, this still returns dense hits.
     assert lenient
     print("✅ TEST 6: lenient threshold keeps results")
+    # --------------------------------------------------
+    # TEST 7a: soft_delete sets deleted=1 in payload
+    # --------------------------------------------------
+    target_entry = entries[0]  # "Remember that my wife's name is Pallavi."
+    store.soft_delete(target_entry.id)
+
+    retrieved = store.search_by_ids([str(target_entry.id)], with_payload=True)
+    assert retrieved, "soft_delete: point should still exist in collection"
+    _, payload = retrieved[0]
+    assert (
+        payload.get("deleted") == 1  # type: ignore
+    ), f"Expected deleted=1 after soft_delete, got: {payload.get('deleted')}"  # type: ignore
+    print("✅ TEST 7a: soft_delete sets deleted=1 in payload (point still exists)")
+
+    # --------------------------------------------------
+    # TEST 7b: soft-deleted entry is excluded from search results
+    # --------------------------------------------------
+    q7 = emb.embed_query("What is my wife's name?")
+    results_after = store.search_with_payloads(
+        query_vector=q7,
+        query_text="What is my wife's name?",
+        top_k=10,
+        mode="dense",
+        rerank_mode="fast",
+    )
+    deleted_ids = {
+        mid
+        for mid, _sc, pl in results_after
+        if isinstance(pl, dict) and pl.get("deleted") == 1
+    }
+    assert (
+        str(target_entry.id) not in deleted_ids
+    ), "soft_delete: deleted entry should not appear in search results"
+    print("✅ TEST 7b: soft-deleted entry is excluded from search results")
 
     print("🎉 VectorStore tests passed.")
     store.close()

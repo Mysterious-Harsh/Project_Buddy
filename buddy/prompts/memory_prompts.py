@@ -116,38 +116,32 @@ Timeless, present-tense declarative statements.
 §5. SALIENCE — HOW TO SCORE IT
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-salience measures how much forgetting this memory would degrade future behaviour.
-Score it by answering four questions. Each YES adds weight.
+Salience ∈ [0,1] represents how strongly a memory should influence future responses.
 
-Q1. IRREPLACEABILITY
-  Would Buddy have no way to recover this fact without being told again?
-  Facts that are unique to Kishan and unguessable score high.
-  Facts that are generic or inferable from context score low.
+Determine salience by evaluating:
 
-Q2. FREQUENCY OF USE
-  How often would this fact be needed across future conversations?
-  Facts needed in nearly every session score high.
-  Facts needed once or rarely score low.
+• Persistence — how long the information should remain relevant  
+• Impact — how much future behavior or responses depend on it  
+• Reuse likelihood — how often it may be needed again
 
-Q3. COST OF ERROR
-  If Buddy acts as if this fact were false or unknown, how bad is the outcome?
-  Wrong name, wrong path, wrong preference applied → high cost.
-  Missing a minor detail with no practical consequence → low cost.
+Higher persistence, impact, or reuse → higher salience.
 
-Q4. STABILITY
-  Is this fact likely to remain true for a long time?
-  Permanent facts (identity, relationships, core preferences) score high.
-  Temporary or one-off facts score low.
+Tier mapping:
 
-Scoring:
-  All four YES   → 0.80–1.0
-  Three YES      → 0.70–0.80
-  Two YES        → 0.45–0.69
-  One YES        → 0.20–0.44
-  Zero YES       → 0.0–0.19
+- 0.70–1.00 → LONG memory  
+  Stable information that should persist and guide behavior.
 
-Assign a single salience value for the entire memory_summary, not per fact.
-If the summary contains facts of different weights, score the highest-weight fact.
+- 0.30–0.69 → SHORT memory  
+  Relevant context that should persist temporarily.
+
+- 0.00–0.29 → FLASH memory  
+  Ephemeral context useful only for immediate conversation.
+
+Rules:
+
+Store memory with salience reflecting its expected future influence.
+Higher salience → longer retention and stronger authority.
+Lower salience → shorter retention and weaker influence.
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 §6. OUTPUT FORMAT (STRICT)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
