@@ -11,7 +11,7 @@ PALETTE (single source of truth — the AURORA dict):
   Deco lines: bright cyan  * —- *
   Matrix:     same aurora arc, cyan -> blue -> indigo -> violet during neural activation
 
-main.py imports:  AURORA, RETRO (alias), _c, _term_width, _info, _ok, _warn, _fail,
+main.py imports:  AURORA, _c, _term_width, _info, _ok, _warn, _fail,
                   Spinner, _banner_centered
 """
 from __future__ import annotations
@@ -24,25 +24,7 @@ import textwrap
 import threading
 import time
 import unicodedata
-from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
-
-# =======================================================================
-# Bootstrap integrity  (shared dataclass)
-# =======================================================================
-
-
-@dataclass
-class BootstrapIntegrity:
-    prompts_lock_ok: bool = True
-    os_profile_ok: bool = True
-    violations: List[str] = field(default_factory=list)
-    warnings: List[str] = field(default_factory=list)
-
-    @property
-    def tainted(self) -> bool:
-        return bool(self.violations)
-
 
 # =======================================================================
 # AURORA — single source of truth for every color in Buddy
@@ -83,9 +65,6 @@ AURORA: Dict[str, str] = {
     "white": "\033[97m",  # bright white   — heartbeat flash
     "reset": "\033[0m",
 }
-
-# Backward-compat alias — any code still importing RETRO works unchanged
-RETRO = AURORA
 
 _LOGO_ROW_KEYS: Tuple[str, ...] = (
     "logo_r0",
@@ -153,7 +132,7 @@ def _supports_ansi() -> bool:
 def _is_tty() -> bool:
     try:
         return bool(sys.stdout.isatty())
-    except:
+    except Exception:
         return False
 
 
@@ -224,7 +203,7 @@ def _term_width(default: int = 96) -> int:
     """Current terminal column count — sampled fresh each call."""
     try:
         return max(60, shutil.get_terminal_size((default, 24)).columns)
-    except:
+    except Exception:
         return default
 
 
@@ -232,7 +211,7 @@ def _term_height(default: int = 24) -> int:
     """Current terminal row count — sampled fresh each call."""
     try:
         return max(10, shutil.get_terminal_size((96, default)).lines)
-    except:
+    except Exception:
         return default
 
 

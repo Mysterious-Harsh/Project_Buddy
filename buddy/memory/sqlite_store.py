@@ -132,11 +132,30 @@ class SQLiteStore:
                 consolidated_into_id     TEXT NULL,
                 consolidation_error      TEXT NULL,
                 last_consolidated_at     REAL NULL,
+                -- v5: cached strength from last sleep cycle (read at recall time)
+                consolidation_strength   REAL NOT NULL DEFAULT 0.0,
 
                 -- arbitrary metadata
                 metadata   TEXT NOT NULL DEFAULT '{}'
             );
             """)
+
+        # v5: audit log for hard-deleted memories (rolling 1000-row window)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS forgotten_log (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                memory_id       TEXT NOT NULL,
+                memory_text     TEXT NOT NULL DEFAULT '',
+                memory_type     TEXT NOT NULL DEFAULT 'flash',
+                importance      REAL NOT NULL DEFAULT 0.0,
+                reason          TEXT NOT NULL DEFAULT '',
+                deleted_at      REAL NOT NULL
+            );
+        """)
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_forgotten_deleted_at ON "
+            "forgotten_log(deleted_at DESC);"
+        )
 
         # Indexes optimized for performance
         cur.execute(
@@ -206,6 +225,7 @@ class SQLiteStore:
         add_col("consolidated_into_id", "TEXT NULL")
         add_col("consolidation_error", "TEXT NULL")
         add_col("last_consolidated_at", "REAL NULL")
+        add_col("consolidation_strength", "REAL NOT NULL DEFAULT 0.0")  # v5
 
         add_col("metadata", "TEXT NOT NULL DEFAULT '{}'")
 
@@ -277,6 +297,12 @@ class SQLiteStore:
 
         e.metadata = self._loads_json(row["metadata"], {})
 
+        # v5: consolidation_strength (graceful fallback for old rows before migration)
+        try:
+            e.consolidation_strength = float(row["consolidation_strength"] or 0.0)
+        except (IndexError, KeyError):
+            e.consolidation_strength = 0.0
+
         # embedding_json is optional and only used for re-upsert/debug
         emb_json = row["embedding_json"]
         if emb_json and emb_json.strip():
@@ -335,9 +361,10 @@ class SQLiteStore:
             pending_upsert, upsert_error, upsert_attempts, last_upsert_at,
             deleted,
             consolidation_status, consolidated_into_id, consolidation_error, last_consolidated_at,
+            consolidation_strength,
             metadata
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             text=excluded.text,
             embedding_json=excluded.embedding_json,
@@ -358,6 +385,7 @@ class SQLiteStore:
             consolidated_into_id=excluded.consolidated_into_id,
             consolidation_error=excluded.consolidation_error,
             last_consolidated_at=excluded.last_consolidated_at,
+            consolidation_strength=excluded.consolidation_strength,
             metadata=excluded.metadata;
         """
 
@@ -382,6 +410,7 @@ class SQLiteStore:
             getattr(entry, "consolidated_into_id", None),
             getattr(entry, "consolidation_error", None),
             getattr(entry, "last_consolidated_at", None),
+            float(getattr(entry, "consolidation_strength", 0.0) or 0.0),
             metadata,
         )
 
@@ -459,13 +488,18 @@ class SQLiteStore:
         self._conn.commit()
 
     def touch(self, memory_id: str) -> None:
-        """Optimized access tracking."""
+        """Update access metadata and bump consolidation_strength (P17).
+
+        Repeated recall reinforces a memory (+0.05 per touch, capped at 1.0),
+        consistent with ACT-R base-level learning.
+        """
         cur = self._conn.cursor()
         cur.execute(
             """
             UPDATE memories
             SET last_accessed=?,
-                access_count=access_count+1
+                access_count=access_count+1,
+                consolidation_strength=MIN(1.0, consolidation_strength+0.05)
             WHERE id=? AND deleted=0;
             """,
             (time.time(), str(memory_id)),
@@ -814,9 +848,10 @@ class SQLiteStore:
             pending_upsert, upsert_error, upsert_attempts, last_upsert_at,
             deleted,
             consolidation_status, consolidated_into_id, consolidation_error, last_consolidated_at,
+            consolidation_strength,
             metadata
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             text=excluded.text,
             embedding_json=excluded.embedding_json,
@@ -837,6 +872,7 @@ class SQLiteStore:
             consolidated_into_id=excluded.consolidated_into_id,
             consolidation_error=excluded.consolidation_error,
             last_consolidated_at=excluded.last_consolidated_at,
+            consolidation_strength=excluded.consolidation_strength,
             metadata=excluded.metadata;
         """
 
@@ -892,6 +928,7 @@ class SQLiteStore:
                 getattr(entry, "consolidated_into_id", None),
                 getattr(entry, "consolidation_error", None),
                 getattr(entry, "last_consolidated_at", None),
+                float(getattr(entry, "consolidation_strength", 0.0) or 0.0),
                 metadata,
             )
             params_list.append(params)
@@ -899,6 +936,107 @@ class SQLiteStore:
         cur = self._conn.cursor()
         cur.executemany(sql, params_list)
         self._conn.commit()
+
+    # ------------------------------------------------------
+    # v5: Consolidation strength writer (Phase 3 reader lives in memory_manager)
+    # ------------------------------------------------------
+    def update_consolidation_strength(
+        self, memory_id: str, strength: float
+    ) -> None:
+        """Write the cached consolidation strength for a memory.
+
+        Called by the consolidation engine during Phase 0b scoring.
+        The value is read at recall time in memory_manager._composite_score().
+        """
+        cur = self._conn.cursor()
+        cur.execute(
+            "UPDATE memories SET consolidation_strength=? WHERE id=? AND deleted=0;",
+            (float(max(0.0, min(1.0, strength))), str(memory_id)),
+        )
+        if cur.rowcount > 0:
+            self._conn.commit()
+
+    def batch_update_consolidation_strength(
+        self, updates: List[tuple]
+    ) -> None:
+        """Batch write consolidation_strength for many memories at once.
+
+        Args:
+            updates: list of (memory_id: str, strength: float) tuples.
+        """
+        if not updates:
+            return
+        params = [
+            (float(max(0.0, min(1.0, s))), str(mid)) for mid, s in updates
+        ]
+        cur = self._conn.cursor()
+        cur.executemany(
+            "UPDATE memories SET consolidation_strength=? WHERE id=? AND deleted=0;",
+            params,
+        )
+        self._conn.commit()
+
+    # ------------------------------------------------------
+    # v5: Forgotten-log audit trail
+    # ------------------------------------------------------
+    _FORGOTTEN_LOG_MAX_ROWS: int = 1000
+
+    def forgotten_log_append(
+        self,
+        *,
+        memory_id: str,
+        memory_text: str,
+        memory_type: str,
+        importance: float,
+        reason: str,
+    ) -> None:
+        """Record a hard-deleted memory for forensic/diagnostic purposes.
+
+        Maintains a rolling window of _FORGOTTEN_LOG_MAX_ROWS rows — oldest
+        entries are pruned automatically so storage cost stays constant.
+        """
+        ts = time.time()
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO forgotten_log (memory_id, memory_text, memory_type, importance, reason, deleted_at)
+            VALUES (?, ?, ?, ?, ?, ?);
+            """,
+            (
+                str(memory_id),
+                str(memory_text or "")[:500],  # cap text length
+                str(memory_type or "flash"),
+                float(importance or 0.0),
+                str(reason or "")[:200],
+                ts,
+            ),
+        )
+        # Rolling window: delete oldest rows beyond limit
+        cur.execute(
+            """
+            DELETE FROM forgotten_log WHERE id NOT IN (
+                SELECT id FROM forgotten_log ORDER BY deleted_at DESC LIMIT ?
+            );
+            """,
+            (self._FORGOTTEN_LOG_MAX_ROWS,),
+        )
+        self._conn.commit()
+
+    def forgotten_log_recent(self, limit: int = 50) -> List[dict]:
+        """Return the most recently forgotten memories (diagnostic use)."""
+        limit = min(int(limit), self._FORGOTTEN_LOG_MAX_ROWS)
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            SELECT memory_id, memory_text, memory_type, importance, reason, deleted_at
+            FROM forgotten_log
+            ORDER BY deleted_at DESC
+            LIMIT ?;
+            """,
+            (limit,),
+        )
+        cols = ["memory_id", "memory_text", "memory_type", "importance", "reason", "deleted_at"]
+        return [dict(zip(cols, row)) for row in cur.fetchall()]
 
     # ------------------------------------------------------
     # Close

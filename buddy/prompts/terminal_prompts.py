@@ -1,3 +1,10 @@
+# 🔒 LOCKED — terminal_prompts.py
+# Tool call contract: { command, cwd, timeout }
+# Result fields: OK, EXIT_CODE, STDOUT, STDERR, ERROR, TIMED_OUT
+# Safety gate: §10 DESTRUCTIVE GATE — all destructive ops require FOLLOWUP_HISTORY confirmation.
+# Allowed: bug fixes, adding error categories to recovery prompt, timeout guidance updates.
+# Not allowed: removing §10 safety gate, changing tool_call schema, altering §10.4 (what is not confirmation).
+
 TERMINAL_TOOL_PROMPT = """
 ===================================================
 # TERMINAL TOOL — EXECUTION MODE

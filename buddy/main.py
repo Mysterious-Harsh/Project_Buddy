@@ -1,22 +1,26 @@
-# buddy/buddy_core/main.py  —  Aurora Gradient Theme
+# buddy/main.py  —  Aurora Gradient Theme
 """
 Terminal UI — Aurora theme, unified with boot_ui.py palette.
 
-Fixes & improvements vs previous version:
-  ✅ SIGINT handler wired: first Ctrl+C interrupts turn, second exits app
-  ✅ request_interrupt uses "__INTERRUPT__" sentinel (not empty string)
-       so InputMux.push() actually unblocks the waiting pipeline future
-  ✅ _is_interrupt_cmd() now recognises "__interrupt__" sentinel
-  ✅ set_voice_mute() logic inversion fixed (was calling mute when unmuting)
-  ✅ Dead variables removed: SIGINT_EXIT_WINDOW_S, _last_sigint_ts
-  ✅ Duplicate set_pipeline_running() consolidated into actions.set_pipeline_running()
-  ✅ _get_pt_style() dead function removed; _PT_SESSION uses cached style
-  ✅ PromptSession / prompt() try/except deduplicated (build style once)
-  ✅ _detect_color_support() race condition fixed (single lock scope)
-  ✅ bare except in _isatty() replaced with except Exception
-  ✅ _render_right renamed to _render_bubble_right for consistency
-  ✅ argv parameter removed from main() (was received but never used)
-  ✅ Sections reorganised: utilities → theme → UI → actions → mux → runtime
+Architecture:
+  run_terminal()  — main async runtime (signal handling, tasks, main loop, shutdown)
+  TerminalUI      — spinner, bubble rendering, input/output
+  RuntimeActions  — voice mute, sleep/wake, consolidation lifecycle
+  InputMux        — multiplexes typed + voice input into one async stream
+  typed_producer  — asyncio task that drives PT reads into InputMux
+  _inactivity_watcher — asyncio task for idle-based auto-sleep
+
+Signal handling:
+  SIGINT first press  → request_interrupt() (interrupts current turn)
+  SIGINT second press → quit (within SIGINT_EXIT_WINDOW_S = 1.25s)
+  SIGWINCH            → invalidate terminal width cache + PT redraw
+
+Interrupt path:
+  _handle_sigint → interrupt_event.set() (immediate, stops LLM stream)
+                 → loop.call_soon_threadsafe(request_interrupt)
+  request_interrupt → _pt_submit_from_other_thread (abort PT prompt if active)
+                    → mux.push(INTERRUPT_SENTINEL) (unblock pipeline_input)
+                    → active_turn_task.cancel()
 """
 from __future__ import annotations
 
@@ -46,7 +50,7 @@ from prompt_toolkit.styles import Style
 from buddy.buddy_core.bootstrap_llama import bootstrap
 from buddy.buddy_core.pipeline import handle_turn
 from buddy.logger.logger import get_logger
-from buddy.ui.boot_ui import AURORA  # single palette source
+from buddy.ui.boot_ui import AURORA, _ANSI_RE, _is_tty  # single palette source
 from buddy.ui.stt import SpeechToText
 
 try:
@@ -77,13 +81,12 @@ INTERRUPT_SENTINEL = "__INTERRUPT__"
 
 PROMPTS = {
     "input": "▌ ",
-    "voice": "🎤 ",
-    "thinking": "⏳ ",
-    "response": "🤖 ",
+    "voice": "◎ ",
+    "thinking": "◌ ",
+    "response": "◈ ",
 }
 
 _ANIMATIONS_ENABLED = not bool(os.environ.get("NO_MOTION"))
-_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
 _MAIN_LOOP: Optional[asyncio.AbstractEventLoop] = None
 
@@ -265,11 +268,7 @@ class ANSI:
     DIM = "\x1b[2m"
 
 
-def _isatty() -> bool:
-    try:
-        return bool(sys.stdout.isatty())
-    except Exception:
-        return False
+_isatty = _is_tty  # single implementation lives in boot_ui.py
 
 
 def _no_color() -> bool:
@@ -313,18 +312,15 @@ def _pad_to_disp(s: str, width: int) -> str:
     return s if cur >= width else s + (" " * (width - cur))
 
 
-def _term_width(default: int = 100) -> int:
+def _term_width(default: int = 96) -> int:
     global _TERM_WIDTH_CACHE
     with _TERM_CACHE_LOCK:
-        if _TERM_WIDTH_CACHE is not None:
-            return _TERM_WIDTH_CACHE
-    try:
-        w = shutil.get_terminal_size((default, 20)).columns
-    except Exception:
-        w = default
-    with _TERM_CACHE_LOCK:
-        _TERM_WIDTH_CACHE = w
-    return w
+        if _TERM_WIDTH_CACHE is None:
+            try:
+                _TERM_WIDTH_CACHE = shutil.get_terminal_size((default, 20)).columns
+            except Exception:
+                _TERM_WIDTH_CACHE = default
+        return _TERM_WIDTH_CACHE
 
 
 def _clear_current_line() -> None:
@@ -377,9 +373,12 @@ def _set_banner_meta(s: str) -> None:
         _BANNER_META = (s or "").strip()
 
 
+_HELP_TEXT = "Esc+Enter:submit  •  F2:mute  •  F3:sleep  •  /stop:interrupt  •  Ctrl+C×2:quit"
+
+
 def _get_banner_meta() -> str:
     with _BANNER_META_LOCK:
-        return _BANNER_META
+        return _BANNER_META or _HELP_TEXT
 
 
 # ==========================================================
@@ -472,6 +471,7 @@ def _banner_toolbar_text(
     with state_lock:
         label_map = {
             "sleeping": "SLEP",
+            "consolidating": "CNSL",
             "voice_muted": "VOIC",
             "pipeline_running": "PIPE",
         }
@@ -484,7 +484,8 @@ def _banner_toolbar_text(
     meta = _get_banner_meta()
 
     parts: List[Tuple[str, str]] = [("class:toolbar.title", f"{title} ")]
-    status_text = " ".join(f"{'●' if v else '○'}{label}" for label, v in bool_fields)
+    active = [label for label, v in bool_fields if v]
+    status_text = " ".join(f"●{label}" for label in active) if active else "ready"
     parts.append(("class:toolbar.status", status_text))
     if meta.strip():
         parts.append(("class:toolbar", " │ "))
@@ -980,7 +981,10 @@ async def _read_typed_blocking(
             if not _isatty():
                 return input(prompt_text)
 
-            _clear_prompt_area()
+            # Do NOT call _clear_prompt_area() here.
+            # The spinner was already cleaned up by spinner_stop() → _clear_current_line()
+            # before ui_input() called us.  An aggressive \x1b[J here would erase any
+            # buddy response or user bubble that was just printed above the cursor.
 
             def _pre_run() -> None:
                 global _PT_ACTIVE_APP
@@ -1015,16 +1019,27 @@ async def _read_typed_blocking(
                         pre_run=_pre_run,
                         bottom_toolbar=_toolbar,
                     )
+            # patch_stdout replays buffered writes here (spinner frames, meta messages
+            # that arrived while PT was active).  Do NOT call _clear_prompt_area() after
+            # this point — that \x1b[J would erase everything patch_stdout just replayed.
             return text
 
-        except (EOFError, KeyboardInterrupt):
+        except EOFError:
+            # Ctrl+D — user wants to quit
             _echo_reset()
             return None
+        except KeyboardInterrupt:
+            # Ctrl+C — _handle_sigint already handles this via request_interrupt().
+            # Return empty so mux.push discards it; do NOT push EXIT_SENTINEL.
+            _echo_reset()
+            return ""
 
         finally:
             with _PT_LOCK:
                 _PT_ACTIVE_APP = None
-            _clear_prompt_area()
+            # Only clear the current cursor line — PT's erase_when_done already removed
+            # the prompt itself; this just cleans up any cursor-position artifacts.
+            _clear_current_line()
 
     return await asyncio.to_thread(_blocking)
 
@@ -1059,12 +1074,17 @@ class TerminalUI:
     ) -> None:
         if not _isatty():
             return
+        # Ensure any previous thread is fully stopped before starting a new one.
+        # spinner_stop() uses a 0.25 s join timeout; if that elapsed and the thread
+        # is still alive (e.g. stuck in a longer sleep frame), signal it again and
+        # wait a little longer so we never run two spinner threads simultaneously.
+        if self._spinner_thread and self._spinner_thread.is_alive():
+            self._spinner_stop.set()
+            self._spinner_thread.join(timeout=0.5)
         self._spinner_label = label
         self._spinner_state = state
         self._spinner_pause.clear()
         self._spinner_stop.clear()
-        if self._spinner_thread and self._spinner_thread.is_alive():
-            return
         t = threading.Thread(target=self._spin, daemon=True)
         self._spinner_thread = t
         t.start()
@@ -1747,8 +1767,9 @@ class InputMux:
         if self._buffer:
             return self._buffer.popleft()
         if self._pending is not None and not self._pending.done():
-            await self._pending
+            result = await self._pending
             self._pending = None
+            return result
         loop = asyncio.get_running_loop()
         fut: asyncio.Future[str] = loop.create_future()
         self._pending = fut
@@ -1761,7 +1782,7 @@ class InputMux:
 # ==========================================================
 
 
-async def run_terminal_hybrid_temp() -> None:
+async def run_terminal() -> None:
     global _MAIN_LOOP
     _MAIN_LOOP = asyncio.get_running_loop()
 
@@ -1810,19 +1831,29 @@ async def run_terminal_hybrid_temp() -> None:
     # ── Inactivity / auto-sleep config ───────────────────────────────
     # Read from config; default 20 minutes after last pipeline turn.
     # Set to 0 to disable.
-    _idle_timeout_min: float = float(general_cfg.get("sleep_after_idle_sec", 5.0) * 60)
+    _idle_timeout_sec: float = float(general_cfg.get("sleep_after_idle_sec", 5.0) * 60)
     _last_activity_ts: float = time.monotonic()  # reset after every pipeline turn
 
-    _set_banner_meta(
-        "Esc+Enter:submit  •  F2:mute  •  F3:sleep  •  /stop:interrupt  • "
-        " Ctrl+C×2:quit"
-    )
-
     # ── Helpers ───────────────────────────────────────────────────────
+
+    _META_CLEAR_DELAY = 6.0  # seconds before status msg is cleared back to help text
 
     def _post_meta(msg: str) -> None:
         _set_banner_meta(msg)
         _pt_invalidate()
+        # Schedule auto-clear so help text returns after the status fades
+        loop = _MAIN_LOOP
+        if loop is not None:
+            async def _clear_meta_after(text: str) -> None:
+                await asyncio.sleep(_META_CLEAR_DELAY)
+                with _BANNER_META_LOCK:
+                    still_showing = (_BANNER_META == text)
+                if still_showing:
+                    _set_banner_meta("")
+                    _pt_invalidate()
+            loop.call_soon_threadsafe(
+                lambda: asyncio.ensure_future(_clear_meta_after(msg))
+            )
 
     def request_interrupt() -> None:
         nonlocal active_turn_task, last_interrupt_ts, interrupt_event
@@ -1879,6 +1910,10 @@ async def run_terminal_hybrid_temp() -> None:
             return
 
         last_sigint_ts = now
+        # Set interrupt_event immediately (signal-handler context, thread-safe).
+        # This stops the LLM stream right away without waiting for the event loop.
+        # request_interrupt() below also sets it — the redundancy is intentional:
+        # the direct set here is synchronous; request_interrupt's set is deferred.
         interrupt_event.set()
         logger.info("sigint: interrupt requested (single tap)")
         if loop:
@@ -1961,30 +1996,38 @@ async def run_terminal_hybrid_temp() -> None:
     # set_sleeping(True) which starts background consolidation automatically.
 
     async def _inactivity_watcher() -> None:
-        _POLL_INTERVAL = 30.0
+        nonlocal actions
         try:
             while not quit_event.is_set():
-                await asyncio.sleep(_POLL_INTERVAL)
-                if quit_event.is_set():
-                    break
-                if _idle_timeout_min <= 0:
-                    continue  # auto-sleep disabled by config
-                with state_lock:
-                    already_sleeping = sys_state.sleeping
-                    running = sys_state.pipeline_running
-                idle_secs = time.monotonic() - _last_activity_ts
-                if (
-                    not already_sleeping
-                    and not running
-                    and idle_secs >= _idle_timeout_min
-                ):
-                    logger.info(
-                        "inactivity_watcher: idle %.0fs >= %.0fs — sleeping",
-                        idle_secs,
-                        _idle_timeout_min,
-                    )
-                    # Already inside the event loop — call directly.
-                    actions.set_sleeping(True)
+                if _idle_timeout_sec <= 0:
+                    # Auto-sleep disabled — check again in 60s in case config changes
+                    await asyncio.sleep(60.0)
+                    continue
+
+                now = time.monotonic()
+                elapsed = now - _last_activity_ts
+                remaining = _idle_timeout_sec - elapsed
+
+                if remaining <= 0:
+                    with state_lock:
+                        already_sleeping = sys_state.sleeping
+                        running = sys_state.pipeline_running
+                    if not already_sleeping and not running:
+                        logger.info(
+                            "inactivity_watcher: idle %.0fs >= %.0fs — sleeping",
+                            elapsed,
+                            _idle_timeout_sec,
+                        )
+                        actions.set_sleeping(True)
+                    # After sleeping (or if already sleeping/running), wait a full
+                    # cycle before checking again so we don't busy-loop.
+                    await asyncio.sleep(_idle_timeout_sec)
+                else:
+                    # Sleep exactly until the timeout would fire.
+                    # Cap at 60s so activity resets (_last_activity_ts) are noticed
+                    # promptly without waiting a full timeout cycle.
+                    await asyncio.sleep(min(remaining, 60.0))
+
         except asyncio.CancelledError:
             pass
         except Exception as ex:
@@ -1995,6 +2038,7 @@ async def run_terminal_hybrid_temp() -> None:
     # ── STT ──────────────────────────────────────────────────────────
 
     def on_stt_text(text: str) -> None:
+        nonlocal actions
         loop = _MAIN_LOOP
         if loop:
             loop.call_soon_threadsafe(actions.handle_voice_text, text, mux.push)
@@ -2043,9 +2087,9 @@ async def run_terminal_hybrid_temp() -> None:
         return await mux.ui_input()
 
     async def run_one_turn(source: str, user_text: str) -> None:
-        nonlocal active_turn_task, interrupt_event
-        interrupt_event.clear()
+        nonlocal active_turn_task, interrupt_event, actions
         async with turn_lock:
+            interrupt_event.clear()  # cleared inside lock — no race with previous turn
             turn_id = f"turn-{uuid.uuid4().hex[:8]}"
             t0 = time.perf_counter()
             logger.info(
@@ -2075,7 +2119,6 @@ async def run_terminal_hybrid_temp() -> None:
                     ui.spinner_update(current_label, SpinnerState.WORKING)
                     return
                 if not _thinking_done:
-
                     stream_buf.append(text)
                     if now - _last_preview_t >= _PREVIEW_MIN_S:
                         _last_preview_t = now
@@ -2088,22 +2131,23 @@ async def run_terminal_hybrid_temp() -> None:
                         ui.spinner_update(
                             preview or current_label, SpinnerState.THINKING
                         )
-                    if "</THINK>" in preview:
-                        _thinking_done = True
-                        stream_buf.clear()
-                        ui.spinner_update("Thinking", SpinnerState.THINKING)
+                        if "</THINK>" in preview:
+                            _thinking_done = True
+                            stream_buf.clear()
+                            ui.spinner_update("Thinking", SpinnerState.THINKING)
 
             async def pipeline_input() -> str:
+                nonlocal actions
                 _notify_activity()
                 actions.set_pipeline_running(False)
                 ans = await ui_input()
                 actions.set_pipeline_running(True)
-                if (
-                    ans
-                    and ans != EXIT_SENTINEL
-                    and not _is_interrupt_cmd(ans)
-                    and not _should_exit(ans)
-                ):
+                # Interrupt arrived while pipeline was waiting for user input —
+                # abort this turn cleanly instead of passing the sentinel string
+                # to the planner as a followup answer.
+                if ans == INTERRUPT_SENTINEL or _is_interrupt_cmd(ans):
+                    raise asyncio.CancelledError("interrupted")
+                if ans and not _should_exit(ans):
                     await ui.ui_output(ans, kind="user")
                 if active_turn_task is not None and not active_turn_task.done():
                     ui.spinner_start(current_label, SpinnerState.WAITING)
@@ -2216,7 +2260,7 @@ async def run_terminal_hybrid_temp() -> None:
 
 def main() -> int:
     try:
-        asyncio.run(run_terminal_hybrid_temp())
+        asyncio.run(run_terminal())
         return 0
     except KeyboardInterrupt:
         return 0

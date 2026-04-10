@@ -9,7 +9,7 @@ from typing import Any, Dict, List, Optional
 
 class ToolRegistry:
     """
-    Dynamic tool registry with hot-reload (Option B).
+    Dynamic tool registry.
 
     - Discovers ALL tools under the root package: buddy.tools
     - A tool module must define:
@@ -18,50 +18,59 @@ class ToolRegistry:
             def get_tool() -> Tool: ...
           or:
             TOOL_CLASS = ToolClass
-    - get()/tool_info()/available_tools() always reload modules to pick up changes
-      without restarting Buddy.
+    - Discovery runs once and is cached. Call invalidate_cache() to force rediscovery
+      (e.g. after adding a new tool at runtime).
+    - get() always returns a fresh tool instance (calls get_tool()/TOOL_CLASS() each time)
+      without reloading the module.
     """
 
     ROOT_PACKAGE = "buddy.tools"
 
     def __init__(self) -> None:
-        self._tools: Dict[str, Any] = {}  # tool_name -> latest instance
-        self._module_map: Dict[str, str] = (
-            {}
-        )  # tool_name -> module path (discovery cache)
+        self._module_map: Dict[str, str] = {}   # tool_name -> module_path
+        self._discovered: bool = False
 
     # -------------------------
     # Discovery
     # -------------------------
 
-    def _import_module(self, module_path: str, *, reload: bool) -> Any:
-        mod = importlib.import_module(module_path)
-        if reload and module_path in sys.modules:
-            mod = importlib.reload(mod)
-        return mod
+    def _import_module(self, module_path: str) -> Any:
+        if module_path not in sys.modules:
+            return importlib.import_module(module_path)
+        return sys.modules[module_path]
 
-    def _discover(self, *, reload: bool) -> Dict[str, str]:
+    def _discover(self) -> Dict[str, str]:
         """
         Walk all modules under buddy.tools and collect those defining TOOL_NAME.
-        Returns mapping: {tool_name: module_path}
+        Result is cached; call invalidate_cache() to re-run.
         """
+        if self._discovered:
+            return self._module_map
+
         root = importlib.import_module(self.ROOT_PACKAGE)
-
         mapping: Dict[str, str] = {}
-        for it in pkgutil.walk_packages(root.__path__, root.__name__ + "."):
-            module = self._import_module(it.name, reload=reload)
 
+        for it in pkgutil.walk_packages(root.__path__, root.__name__ + "."):
+            module = importlib.import_module(it.name)
             tool_name = getattr(module, "TOOL_NAME", None)
             if isinstance(tool_name, str) and tool_name.strip():
                 mapping[tool_name.strip()] = it.name
 
         self._module_map = mapping
+        self._discovered = True
         return mapping
+
+    def invalidate_cache(self) -> None:
+        """Force rediscovery and module reload on next access (dev / plugin install)."""
+        for module_path in self._module_map.values():
+            if module_path in sys.modules:
+                importlib.reload(sys.modules[module_path])
+        self._module_map = {}
+        self._discovered = False
 
     def _instantiate_tool(self, module: Any) -> Any:
         if hasattr(module, "get_tool"):
             return module.get_tool()
-
         tool_cls = getattr(module, "TOOL_CLASS", None)
         if tool_cls is None:
             raise RuntimeError(
@@ -75,18 +84,15 @@ class ToolRegistry:
 
     def get(self, tool_name: str) -> Any:
         """
-        Get a fresh tool instance by name (module is reloaded each call).
+        Get a fresh tool instance by name. Module is NOT reloaded; call
+        invalidate_cache() first if you need hot-reload behaviour.
         """
-        mapping = self._discover(reload=True)
+        mapping = self._discover()
         if tool_name not in mapping:
             raise KeyError(f"Tool not found: {tool_name}")
 
-        module_path = mapping[tool_name]
-        module = self._import_module(module_path, reload=True)
-
-        tool = self._instantiate_tool(module)
-        self._tools[tool_name] = tool
-        return tool
+        module = self._import_module(mapping[tool_name])
+        return self._instantiate_tool(module)
 
     def tool_info(self, tool_name: str) -> Dict[str, Any]:
         return self.get(tool_name).get_info()
@@ -94,12 +100,14 @@ class ToolRegistry:
     def available_tools(self) -> List[Dict[str, Any]]:
         """
         Used by Planner. Returns tool list with name/description/version.
+        Single discovery pass; no module reloads.
         """
-        mapping = self._discover(reload=True)
+        mapping = self._discover()
         out: List[Dict[str, Any]] = []
 
         for name in sorted(mapping.keys()):
-            tool = self.get(name)  # reload + re-instantiate
+            module = self._import_module(mapping[name])
+            tool = self._instantiate_tool(module)
             info = tool.get_info()
             out.append({
                 "name": name,
@@ -110,12 +118,8 @@ class ToolRegistry:
         return out
 
     def module_path(self, tool_name: str) -> Optional[str]:
-        """
-        Debug helper: where did this tool come from?
-        """
-        if not self._module_map:
-            self._discover(reload=False)
-        return self._module_map.get(tool_name)
+        """Debug helper: where did this tool come from?"""
+        return self._discover().get(tool_name)
 
 
 # ==========================================================
@@ -144,7 +148,7 @@ def _test_get_returns_fresh_instance_each_time() -> None:
     reg = ToolRegistry()
     t1 = reg.get("terminal")
     t2 = reg.get("terminal")
-    _assert(t1 is not t2, "Expected fresh instance on each get() with hot-reload.")
+    _assert(t1 is not t2, "Expected fresh instance on each get().")
 
 
 def _test_terminal_execute_echo() -> None:

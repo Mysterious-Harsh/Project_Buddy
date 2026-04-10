@@ -232,6 +232,18 @@ class ActionRouter:
         available_tools = registry.available_tools()
         available_tools_str = json.dumps(available_tools, ensure_ascii=False)
 
+        # ── log what the planner will see ────────────────────────────────────
+        tool_names = [t["name"] for t in available_tools]
+        logger.info(
+            "┌─ PLANNER INPUT ─────────────────────────────────────────\n"
+            "│  tools (%d): %s\n"
+            "│  intent: %s\n"
+            "└─────────────────────────────────────────────────────────",
+            len(tool_names),
+            ", ".join(tool_names),
+            intent[:120],
+        )
+
         # ======================================================
         # 1) Planner loop
         # ======================================================
@@ -255,14 +267,54 @@ class ActionRouter:
 
             rerun = await self.stack.handle(
                 followup=bool(planner_parsed.get("followup")),
-                followup_question=str(planner_parsed.get("followup_question", "")),
+                followup_question=str(planner_parsed.get("followup_question")),
                 stage="planner",
             )
             if not rerun:
                 self.stack.clear()
                 break
 
-        logger.info("planner LLM finished in %.3fs", time.perf_counter() - t0)
+        planner_dt = time.perf_counter() - t0
+
+        # ── log the plan the planner produced ────────────────────────────────
+        _steps_raw = planner_parsed.get("steps") or []
+        if planner_parsed.get("refusal"):
+            logger.info(
+                "┌─ PLAN: REFUSED (%.2fs) ──────────────────────────────────\n"
+                "│  reason: %s\n"
+                "└─────────────────────────────────────────────────────────",
+                planner_dt,
+                str(planner_parsed.get("refusal_reason") or "")[:200],
+            )
+        elif planner_parsed.get("followup"):
+            logger.info(
+                "┌─ PLAN: FOLLOWUP (%.2fs) ─────────────────────────────────\n"
+                "│  question: %s\n"
+                "└─────────────────────────────────────────────────────────",
+                planner_dt,
+                str(planner_parsed.get("followup_question") or "")[:200],
+            )
+        elif _steps_raw:
+            step_lines = "\n".join(
+                "│  step {:>2} │ {:<14} │ {}".format(
+                    s.get("step_id", "?"),
+                    str(s.get("tool") or "?")[:14],
+                    str(s.get("goal") or s.get("instruction") or "")[:70],
+                )
+                for s in _steps_raw
+            )
+            logger.info(
+                "┌─ PLAN: %d step(s) (%.2fs) ─────────────────────────────────\n"
+                "%s\n"
+                "└─────────────────────────────────────────────────────────",
+                len(_steps_raw),
+                planner_dt,
+                step_lines,
+            )
+        else:
+            logger.info(
+                "planner returned no steps and no refusal/followup (%.2fs)", planner_dt
+            )
 
         steps = (
             (planner_parsed.get("steps") or [])
@@ -283,11 +335,20 @@ class ActionRouter:
         # 2) Execute steps sequentially
         # ======================================================
         for step in steps:
-            step_id = int(step.get("step_id", 0) or 0)
-            tool_name = str(step.get("tool", "") or "").strip()
-            ack = str(step.get("ack_message", "") or "").strip()
-            output_name = str(step.get("output", "") or "").strip()
-            instruction = str(step.get("instruction", "") or "").strip()
+            step_id = int(step.get("step_id") or 0)
+            tool_name = str(step.get("tool") or "").strip()
+            output_name = str(step.get("output") or "").strip()
+            goal = str(step.get("goal") or "").strip()
+            instruction = str(step.get("instruction") or "").strip()
+            hints = str(step.get("hints") or "").strip()
+            ack = goal
+            instruction = {
+                "Execution_Step_Id": step_id,
+                "Goal": goal,
+                "Instruction": instruction,
+                "Hints": hints,
+            }
+
             input_steps = step.get("input_steps", []) if isinstance(step, dict) else []
             input_steps = input_steps if isinstance(input_steps, list) else []
 
@@ -360,8 +421,15 @@ class ActionRouter:
                 break
 
             tool_info = tool.get_info()
-            tool_prompt = str(tool_info.get("prompt", "") or "")
-            tool_call_format = str(tool_info.get("tool_call_format", "") or "")
+            tool_prompt = str(tool_info.get("prompt") or "")
+            tool_call_format = str(tool_info.get("tool_call_format") or "")
+
+            # Narrow tool_call_format to the specific action the planner intends.
+            # The executor only sees one focused example → no field mix-ups across actions.
+            if hasattr(tool, "detect_action") and hasattr(tool, "get_call_example"):
+                _detected = tool.detect_action(goal + " " + hints)
+                if _detected:
+                    tool_call_format = tool.get_call_example(_detected)
 
             # reset per-step error context
             self.errors.clear()
@@ -392,7 +460,7 @@ class ActionRouter:
                 # 1) Ask executor for tool_call (or followup/abort)
                 t0 = time.perf_counter()
                 exec_payload = self.brain.run_executor(
-                    instruction=f"Executing Step {step_id}\n" + instruction,
+                    instruction=json.dumps(instruction),
                     prior_outputs=json.dumps(prior_outputs, ensure_ascii=False),
                     step_followups=self.stack.appendix,
                     step_errors=self.errors.appendix,
@@ -405,7 +473,7 @@ class ActionRouter:
                 exec_ms = int((time.perf_counter() - t0) * 1000)
 
                 exec_result = exec_payload.get("parsed") or {}
-                status = str(exec_result.get("status", "") or "").strip().lower()
+                status = str(exec_result.get("status") or "").strip().lower()
 
                 logger.info(
                     "step %d attempt %d executor_status=%s dt_ms=%d",
@@ -419,12 +487,12 @@ class ActionRouter:
                 # FOLLOWUP path (NO attempt++)
                 # ---------------------------
                 if status == "followup":
-                    fq = str(exec_result.get("followup_question", "") or "").strip()
+                    fq = str(exec_result.get("followup_question") or "").strip()
                     logger.warning("step %d followup asked: %r", step_id, fq[:140])
 
                     rerun = await self.stack.handle(
                         followup=True,
-                        followup_question=str(exec_result.get("followup_question", "")),
+                        followup_question=str(exec_result.get("followup_question")),
                         stage="executor",
                         step_id=step_id,
                         tool_name=tool_name,
@@ -462,7 +530,7 @@ class ActionRouter:
                 # ---------------------------
                 if status == "abort":
                     reason = str(
-                        exec_result.get("abort_reason", "") or "Executor aborted"
+                        exec_result.get("abort_reason") or "Executor aborted"
                     ).strip()
                     step_execution_map[str(step_id)] = {
                         "step_id": step_id,
@@ -500,6 +568,15 @@ class ActionRouter:
 
                 # 2) Parse tool call (invalid => ErrorStack, attempt++)
                 tool_call_payload = exec_result.get("tool_call", {})
+                logger.info(
+                    "┌─ EXECUTOR CALL  step=%d attempt=%d tool=%s ──────────────\n"
+                    "│  %s\n"
+                    "└─────────────────────────────────────────────────────────",
+                    step_id,
+                    attempt,
+                    tool_name,
+                    json.dumps(tool_call_payload, ensure_ascii=False)[:300],
+                )
                 try:
                     call_obj = tool.parse_call(tool_call_payload)
                 except Exception as e:
@@ -530,11 +607,31 @@ class ActionRouter:
                     else False
                 )
 
+                # compact result summary for the log
+                if isinstance(tool_exec_result, dict):
+                    _summary_parts = []
+                    if "ACTION" in tool_exec_result:
+                        _summary_parts.append(f"action={tool_exec_result['ACTION']}")
+                    if "TOTAL_FOUND" in tool_exec_result:
+                        _summary_parts.append(f"found={tool_exec_result['TOTAL_FOUND']}")
+                    if "SIZE_BYTES" in tool_exec_result and tool_exec_result["SIZE_BYTES"] is not None:
+                        _summary_parts.append(f"size={tool_exec_result['SIZE_BYTES']}B")
+                    if "EXIT_CODE" in tool_exec_result:
+                        _summary_parts.append(f"exit={tool_exec_result['EXIT_CODE']}")
+                    if not ok and tool_exec_result.get("ERROR"):
+                        _summary_parts.append(f"error={str(tool_exec_result['ERROR'])[:120]}")
+                    elif not ok and tool_exec_result.get("STDERR"):
+                        _summary_parts.append(f"stderr={str(tool_exec_result['STDERR'])[:120]}")
+                    _result_summary = "  ".join(_summary_parts) or "(no summary fields)"
+                else:
+                    _result_summary = str(tool_exec_result)[:120]
+
                 logger.info(
-                    "step %d attempt %d tool_done ok=%s",
+                    "step %d attempt %d tool_done ok=%s  %s",
                     step_id,
                     attempt,
                     ok,
+                    _result_summary,
                 )
 
                 if ok:
@@ -580,33 +677,6 @@ class ActionRouter:
             "planner": planner_parsed,
             "step_execution_map": step_execution_map,
         }
-
-    # # ======================================================
-    # # Heuristics for retry classification (minimal)
-    # # ======================================================
-    # @staticmethod
-    # def _extract_tool_error_evidence(
-    #     tool_exec_result: Any,
-    # ) -> Tuple[str, str]:
-    #     """
-    #     Pull compact stderr + cmd/cmd from typical TerminalResult shapes.
-    #     Returns (evidence, argv_preview)
-    #     """
-    #     if not isinstance(tool_exec_result, dict):
-    #         return ("", "")
-
-    #     evidence = ""
-    #     cmd: str = ""
-
-    #     outputs = tool_exec_result.get("outputs")
-    #     if isinstance(outputs, list) and outputs:
-    #         first = outputs[0] if isinstance(outputs[0], dict) else {}
-
-    #         evidence = str(first.get("error", "") or "")
-
-    #         cmd = str(first.get("command", "") or "").strip()
-
-    #     return (evidence, cmd)
 
     # -------------------------
     # Time helper

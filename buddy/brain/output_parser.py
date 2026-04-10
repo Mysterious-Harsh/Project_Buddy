@@ -44,6 +44,10 @@ class OutputParser:
         """Parse/validate BrainResult from the Brain prompt output."""
         data = self._extract_json_object(raw_text)
 
+        # Normalize memories: single object → list (LLM drift safety)
+        if isinstance(data.get("memories"), dict):
+            data["memories"] = [data["memories"]]
+
         # 1) strict validate
         model = self._validate(BrainResult, data)
         if model:
@@ -77,6 +81,17 @@ class OutputParser:
         """
         data = self._extract_json_object(raw_text)
 
+        # Normalize: old single search_query string → search_queries list
+        if "search_query" in data and "search_queries" not in data:
+            sq = data.pop("search_query")
+            data["search_queries"] = [sq] if sq else []
+        # Normalize: single string instead of list
+        if isinstance(data.get("search_queries"), str):
+            data["search_queries"] = [data["search_queries"]]
+        # Strip empty strings from list
+        if isinstance(data.get("search_queries"), list):
+            data["search_queries"] = [q for q in data["search_queries"] if str(q).strip()]
+
         # 1) strict validate
         model = self._validate(RetrievalGateResult, data)
         if model:
@@ -100,7 +115,7 @@ class OutputParser:
         return {}
 
     def parse_memory_summary(self, raw_text: str) -> Dict[str, Any]:
-        """Parse/validate MemorySummaryResult from the Planner prompt output."""
+        """Parse/validate MemorySummaryResult from the Memory Summary prompt output."""
         data = self._extract_json_object(raw_text)
 
         # 1) strict validate
@@ -111,7 +126,7 @@ class OutputParser:
         return {}
 
     def parse_respond(self, raw_text: str) -> Dict[str, Any]:
-        """Parse/validate parse_respond from the Planner prompt output."""
+        """Parse/validate FinalRespond from the Respond prompt output."""
         data = self._extract_json_object(raw_text)
 
         # 1) strict validate

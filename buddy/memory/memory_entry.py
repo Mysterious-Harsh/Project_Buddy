@@ -72,6 +72,9 @@ class MemoryEntry:
     consolidated_into_id: Optional[str] = None
     consolidation_error: Optional[str] = None
     last_consolidated_at: Optional[float] = None
+    # Cached strength from latest consolidation run — read at recall time (Phase 3).
+    # 0.0 = never consolidated or too new. Written by consolidation_engine Phase 0b.
+    consolidation_strength: float = 0.0
 
     # --------------------------
     # Free-form metadata
@@ -125,6 +128,12 @@ class MemoryEntry:
         self.pending_upsert = int(bool(self.pending_upsert))
         self.deleted = int(bool(self.deleted))
 
+        # consolidation_strength clamp
+        try:
+            self.consolidation_strength = float(self.consolidation_strength or 0.0)
+        except Exception:
+            self.consolidation_strength = 0.0
+
         # consolidation_status guard (locked to 3 states)
         s = (self.consolidation_status or "candidate").strip().lower()
         self.consolidation_status = (
@@ -135,10 +144,14 @@ class MemoryEntry:
     # Behavior
     # ==================================================
     def touch(self) -> None:
-        """Update access metadata when memory is used."""
+        """Update access metadata when memory is used.
+        Also bumps consolidation_strength slightly (P17) — repeated recall
+        reinforces a memory, consistent with ACT-R base-level learning.
+        """
         now = time.time()
         self.last_accessed = float(now)
         self.access_count += 1
+        self.consolidation_strength = min(1.0, self.consolidation_strength + 0.05)
 
     def promote(self, new_type: str) -> None:
         """Promote memory to a longer-lived store."""
@@ -199,6 +212,7 @@ class MemoryEntry:
                 if self.last_consolidated_at is not None
                 else None
             ),
+            "consolidation_strength": float(self.consolidation_strength),
             # metadata
             "metadata": dict(self.metadata or {}),
         }

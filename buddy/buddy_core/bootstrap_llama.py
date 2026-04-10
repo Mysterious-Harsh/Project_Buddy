@@ -134,6 +134,7 @@ class BootstrapState:
     artifacts: BootstrapArtifacts = field(default_factory=BootstrapArtifacts)
     config: Dict[str, Any] = field(default_factory=dict)
     shutdown: Optional[Callable[[], None]] = None
+    context_budget: Optional[Any] = None  # ContextBudget — set during boot
 
 
 # ═══════════════════════════════════════════════════════════
@@ -209,6 +210,31 @@ def _as_str(x: Any, default: str) -> str:
         return default
     s = (x if isinstance(x, str) else str(x)).strip()
     return s if s else default
+
+
+def _inject_ctx_size(server_args: List[str], n_ctx: int) -> List[str]:
+    """
+    Replace an existing --ctx-size value in server_args with n_ctx,
+    or append --ctx-size n_ctx if not present.
+    """
+    args = list(server_args)
+    ctx_flags = {"--ctx-size", "-c"}
+    i = 0
+    replaced = False
+    while i < len(args):
+        if args[i] in ctx_flags and i + 1 < len(args):
+            args[i + 1] = str(n_ctx)
+            replaced = True
+            i += 2
+        elif "=" in args[i] and args[i].split("=")[0] in ctx_flags:
+            args[i] = f"--ctx-size={n_ctx}"
+            replaced = True
+            i += 1
+        else:
+            i += 1
+    if not replaced:
+        args.extend(["--ctx-size", str(n_ctx)])
+    return args
 
 
 def _atomic_write(path: Path, text: str, *, enc: str = "utf-8") -> None:
@@ -1765,6 +1791,38 @@ def bootstrap(options: Optional[BootstrapOptions] = None) -> BootstrapState:
             )
         else:
             srv_args = _flatten(llama_cfg.get("server_args"))
+
+            # ── Dynamic context budget ────────────────────────────
+            try:
+                from buddy.buddy_core.context_budget import ContextBudget
+                os_profile_data = {}
+                try:
+                    import json as _json
+                    _op_path = paths.get("os_profile")
+                    if _op_path and Path(_op_path).exists():
+                        with open(_op_path, "r", encoding="utf-8") as _f:
+                            os_profile_data = _json.load(_f)
+                except Exception:
+                    pass
+
+                _budget = ContextBudget.from_hardware(os_profile_data)
+
+                # Apply toml override if configured
+                _cb_cfg = config.get("context_budget") or {}
+                _budget = ContextBudget.from_override(_budget, _cb_cfg)
+
+                # Replace --ctx-size in server_args with computed n_ctx
+                srv_args = _inject_ctx_size(srv_args, _budget.n_ctx)
+                state.context_budget = _budget
+                _ui_ok(
+                    f"Context budget: {_budget.tier_label} "
+                    f"n_ctx={_budget.n_ctx} turns={_budget.recent_turns} "
+                    f"top_k={_budget.top_k_memories}"
+                )
+            except Exception as _cb_err:
+                logger.warning("context_budget failed, using toml server_args: %r", _cb_err)
+            # ─────────────────────────────────────────────────────
+
             clean, removed = _sanitize_args(srv_args)
             if removed:
                 integrity.warnings.append(f"server_args_removed:{removed}")

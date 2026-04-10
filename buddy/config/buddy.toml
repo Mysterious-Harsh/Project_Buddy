@@ -65,7 +65,7 @@ server_args = [
 
 tts_engines = ["pyttsx3", "tts"]
 
-microphone_index = -1
+microphone_index = 0  # MacBook Pro Microphone (global device index)
 
 enabled = true
 
@@ -157,6 +157,18 @@ prefer_local_search = true
 # -----------------------------------------
 [context]
 max_conversation_turn = 12
+
+# -----------------------------------------
+# Dynamic Context Budget
+# Auto-computed from hardware at boot.
+# Set override = true to pin manual values.
+# -----------------------------------------
+[context_budget]
+override = false
+n_ctx = 16384
+recent_turns = 14
+top_k_memories = 10
+pre_rerank_k = 20
 
 # -----------------------------------------
 # CLI

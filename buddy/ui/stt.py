@@ -1788,15 +1788,35 @@ class SpeechToText:
             except queue.Empty:
                 break
 
+    # Virtual/aggregate device name fragments that cause AUHAL errors when
+    # PortAudio tries to open them as raw input streams.
+    _VIRTUAL_DEVICE_FRAGMENTS = (
+        "teams", "zoom", "meet", "slack", "discord", "webex",
+        "virtual", "aggregate", "multi-output", "blackhole",
+        "loopback", "soundflower", "cables",
+    )
+
     def _list_input_devices(self) -> List[Tuple[int, dict]]:
-        """Return [(global_index, device_dict)] for input-capable devices."""
+        """Return [(global_index, device_dict)] for real input-capable devices.
+
+        Skips virtual / aggregate devices (Teams, Zoom, etc.) that have input
+        channels on paper but fail with AUHAL errors when opened as raw streams.
+        """
         out: List[Tuple[int, dict]] = []
         try:
             devs = sd.query_devices()
 
             for i, d in enumerate(devs):
-                if isinstance(d, dict) and int(d.get("max_input_channels", 0)) > 0:
-                    out.append((i, d))
+                if not isinstance(d, dict):
+                    continue
+                if int(d.get("max_input_channels", 0)) <= 0:
+                    continue
+                # skip virtual/aggregate devices
+                name_lower = str(d.get("name", "")).lower()
+                if any(frag in name_lower for frag in self._VIRTUAL_DEVICE_FRAGMENTS):
+                    logger.debug("[STT] Skipping virtual device idx=%d name=%r", i, d.get("name"))
+                    continue
+                out.append((i, d))
         except Exception:
             logger.debug("[STT] Failed to query devices", exc_info=True)
         return out

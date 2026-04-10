@@ -346,17 +346,11 @@ class Terminal:
             "name": self.tool_name,
             "version": self.version,
             "description": (
-                """
-                - Execute OS commands with full shell capabilities.
-                - Inspect and discover system state (files, folders, processes, env, disk, network).
-                - Search, filter, and transform data via standard shell utilities.
-                - Support shell features when needed: pipes, redirects, globbing, variable expansion, chaining.
-                - Prefer read-only operations by default; modify system state ONLY when explicitly authorized.
-                - Safely navigate paths with spaces/special characters using correct quoting.
-                - Discover before acting; never assume paths or resources exist.
-                - Execute single or multi-step shell logic as required.
-                - Return compact, structured results: stdout, stderr, exit code, success flag.
-                - Produce outputs suitable for verification and reuse in later steps."""
+                "Run shell commands. Use for: running programs, scripts, git, package managers, "
+                "compilers, system utilities, network commands, process management, installing software. "
+                "NOT for basic file operations (use filesystem tool instead). "
+                "Use terminal only when no other tool can do the job — it returns raw stdout/stderr "
+                "which is harder to parse than structured tool output."
             ),
             "prompt": TERMINAL_TOOL_PROMPT,
             "error_prompt": TERMINAL_ERROR_RECOVERY_PROMPT,

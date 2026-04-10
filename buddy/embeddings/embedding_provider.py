@@ -57,7 +57,7 @@ class EmbeddingProvider:
         env_model = (os.getenv("BUDDY_EMBED_MODEL") or "").strip()
         self.model_name: str = env_model if env_model else "Qwen/Qwen3-Embedding-0.6B"
 
-        self.debug = True
+        self.debug = False
         self.device = self._choose_device()
 
         logger.info(

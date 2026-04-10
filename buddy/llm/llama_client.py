@@ -1,19 +1,18 @@
-# buddy/llm/llama_client.py - ULTIMATE OPTIMIZED VERSION
+# 🔒 LOCKED — llama_client.py
+# Contract: LlamaClient.generate() / .chat() — streaming + blocking, JSON extraction, interrupt support.
+# Allowed: bug fixes, compatibility patches, perf improvements that preserve the public API.
+# Not allowed: changing generate()/chat() signatures, removing n_predict/json_extract/interrupt_event,
+#              changing SSE parsing or _JsonCapture behaviour, altering retry/backoff logic.
+# buddy/llm/llama_client.py
 """
 High-performance llama.cpp HTTP client with robust JSON extraction.
 
 Key features:
-- O(n) SSE parsing (was O(n²) - 40% faster on large responses)
-- Per-request interrupt events (thread-safe concurrent requests)
-- Smart JSON validation with retry and detailed logging
-- Comprehensive diagnostics and error handling
-- Production-grade reliability
-
-Performance improvements:
-- 35% faster on 500+ token responses
-- 60% faster on 2000+ token responses
-- Proper connection pooling with keep-alive
-- Optimized JSON parsing (orjson when available)
+- O(n) SSE parsing with incremental _JsonCapture and early stream close
+- Per-request interrupt events (thread-safe)
+- JSON validation with repair fallback
+- Connection pooling with keep-alive
+- orjson fast path with stdlib fallback
 """
 from __future__ import annotations
 

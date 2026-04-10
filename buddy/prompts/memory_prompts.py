@@ -59,12 +59,8 @@ Rules:
 - No meta explanation.
 - No archive tone.
 
-Bad:
-  "The user requested..."
-  "It was mentioned that..."
-  "This overrides previous..."
-
 Write as internal memory, not documentation.
+Write what is true about the subject — not what was said or exchanged in this turn.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 §3. DOMINANCE & INTERFERENCE RULES

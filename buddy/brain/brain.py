@@ -140,7 +140,7 @@ class Brain:
     ) -> Dict[str, Any]:
         """
         Runs the Retrieval Gate prompt (JSON expected):
-        { "needs_memory": bool, "search_query": str|null }
+        { "ack_message": str, "search_queries": [], "deep_recall": bool }
 
         Strict validation via OutputParser.parse_retrieval_gate().
         """
@@ -168,6 +168,7 @@ class Brain:
             on_token=on_token,
             system=system_prompt,
             options=llm_options,
+            # n_predict=256,  # tiny JSON: {ack_message, search_queries[], deep_recall}
             json_mode=True,  # ✅ MUST extract/validate JSON here
         )
 
@@ -221,6 +222,7 @@ class Brain:
             on_token=on_token,
             options=llm_options,
             system=system_prompt,
+            # n_predict=768,  # decision + memories JSON, CHAT response can be ~300 tokens
             json_mode=True,  # ✅ MUST extract/validate JSON here
         )
 
@@ -239,16 +241,16 @@ class Brain:
         memories: str,
         available_tools: str,
         temperature: float = 0.2,
-        top_p: float = 0.98,
+        top_p: float = 1.0,
         repeat_penalty: float = 1.12,
-        repeat_last_n: int = 64,
+        repeat_last_n: int = 86,
         stream: bool = True,
         on_token: Optional[Callable[[str], None]] = None,
         llm_options: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
-        Runs the Decision+Ingestion prompt (JSON expected).
-        Strict validation via OutputParser.parse_brain().
+        Runs the Planner prompt (JSON expected).
+        Strict validation via OutputParser.parse_planner().
         """
         now_iso, timezone = self._get_time_info()
 
@@ -276,6 +278,7 @@ class Brain:
             stream=bool(stream),
             on_token=on_token,
             options=llm_options,
+            # n_predict=2048,  # steps[] with reasoning can be large for complex tasks
             json_mode=True,  # ✅ MUST extract/validate JSON here
         )
 
@@ -335,6 +338,7 @@ class Brain:
             stream=bool(stream),
             on_token=on_token,
             options=llm_options,
+            # n_predict=1024,  # THINK reasoning + JSON tool_call
             json_mode=True,  # executor MUST be strict JSON
         )
 
@@ -358,10 +362,8 @@ class Brain:
         llm_options: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
-        Runs the Retrieval Gate prompt (JSON expected):
-        { "needs_memory": bool, "search_query": str|null }
-
-        Strict validation via OutputParser.parse_retrieval_gate().
+        Runs the Memory Summary prompt (JSON expected).
+        Strict validation via OutputParser.parse_memory_summary().
         """
         now_iso, timezone = self._get_time_info()
 
@@ -386,6 +388,7 @@ class Brain:
             stream=bool(stream),
             on_token=on_token,
             options=llm_options,
+            # n_predict=512,  # summary JSON
             json_mode=True,  # ✅ MUST extract/validate JSON here
         )
 
@@ -411,8 +414,8 @@ class Brain:
         llm_options: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
-        Runs the Decision+Ingestion prompt (JSON expected).
-        Strict validation via OutputParser.parse_brain().
+        Runs the Respond prompt (JSON expected).
+        Strict validation via OutputParser.parse_respond().
         """
         now_iso, timezone = self._get_time_info()
 
@@ -439,6 +442,7 @@ class Brain:
             stream=bool(stream),
             on_token=on_token,
             options=llm_options,
+            # n_predict=1024,  # response + memory_candidates JSON
             json_mode=True,  # ✅ MUST extract/validate JSON here
         )
 
@@ -462,6 +466,7 @@ class Brain:
         top_p: float = 0.98,
         repeat_penalty: float = 1.0,
         repeat_last_n: int = 64,
+        n_predict: Optional[int] = None,
         on_token: Optional[Callable[[str], None]],
         options: Optional[Dict[str, Any]],
         system: Optional[str] = "",
@@ -472,11 +477,13 @@ class Brain:
 
         if self.debug:
             logger.debug(
-                "LLM call: stream=%s json_mode=%s sys_len=%d prompt_len=%d",
+                "LLM call: stream=%s json_mode=%s sys_len=%d prompt_len=%d"
+                " n_predict=%s",
                 bool(stream),
                 bool(json_mode),
                 len(system) if system else 0,
                 len(prompt),
+                n_predict,
             )
 
         out = self.llm.generate(
@@ -487,6 +494,7 @@ class Brain:
             top_p=float(top_p),
             repeat_penalty=float(repeat_penalty),
             repeat_last_n=int(repeat_last_n),
+            n_predict=n_predict,
             options=opts,
             on_delta=(on_token if stream else None),
             # ✅ JSON pipeline toggles

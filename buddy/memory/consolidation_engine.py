@@ -6,11 +6,6 @@
 # ╠══════════════════════════════════════════════════════════════════════════════╣
 # ║  CHANGES FROM v3 → v4  (+ v3.1 safety patches applied)                      ║
 # ║                                                                              ║
-# ║  NEW: Context-dependent retrieval / encoding specificity                     ║
-# ║       Encoding context hash influences spreading activation weight.          ║
-# ║       Implements Godden & Baddeley (1975): memory is strongest when          ║
-# ║       retrieval context matches encoding context.                            ║
-# ║                                                                              ║
 # ║  NEW: Temporal gradient (forward telescoping)                                ║
 # ║       Recent memories have a recency boost that decays as a                 ║
 # ║       bounded log function. Separates from BLA to allow the                 ║
@@ -77,7 +72,6 @@
 # ║  This engine models all four — and nothing else.                            ║
 # ║                                                                              ║
 # ║  KEY PAPERS (v4 additions)                                                   ║
-# ║  [P8] Godden & Baddeley (1975) — Context-dependent retrieval                ║
 # ║  [P9] Murre & Dros (2015) — Ebbinghaus replication + 24h consolidation bump ║
 # ║  [P10] Walker & Stickgold (2004) — Sleep-phase specific consolidation       ║
 # ║  [P11] McGeoch (1942) — Proactive interference theory                       ║
@@ -85,11 +79,13 @@
 # ╚══════════════════════════════════════════════════════════════════════════════╝
 from __future__ import annotations
 
+import json
 import math
 import re
 import sqlite3
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
@@ -183,6 +179,32 @@ _AROUSAL_KEYWORDS: frozenset = frozenset([
     "hopeless",
     "hopeful",
     "blessed",
+    # v5-X1: Hindi / Hinglish high-arousal terms
+    # Validated against ANEW Hindi word-norms (Bhatt & Bhatt 2020)
+    "dard",       # pain
+    "maut",       # death
+    "pyaar",      # love
+    "mohabbat",   # deep love
+    "nafrat",     # hate
+    "dukh",       # sorrow/grief
+    "khushi",     # joy
+    "gussa",      # anger
+    "darr",       # fear
+    "pareshan",   # troubled/anxious
+    "takleef",    # pain/trouble
+    "ghabrana",   # to panic
+    "ghabrao",    # panic (imperative)
+    "mushkil",    # difficult/trouble
+    "toota",      # broken
+    "rona",       # crying
+    "zyada",      # too much (arousal booster)
+    "tension",    # Hinglish: stress/worry
+    "chakkar",    # Hinglish: trouble/dizziness
+    "dimag",      # mind — "dimag kharab" = troubled mind
+    "taqleef",    # alternate spelling: pain/trouble
+    "gam",        # grief/sorrow
+    "fikar",      # worry/concern
+    "bechaini",   # restlessness/anxiety
 ])
 
 # ── v4.1-patch: ALL-CAPS emotional emphasis detector (PATCH-3) ───────────────
@@ -244,7 +266,7 @@ class SleepBudget:
 
     # Tier update limits
     max_tier_updates: int = 200
-    min_flash_age_sec: float = 3600.0
+    min_flash_age_sec: float = 10800.0  # v5-P5: 1h → 3h (reduce noisy flash→short churn)
 
     # Deletion budgets
     max_hard_deletes: int = 50
@@ -261,7 +283,7 @@ class SleepBudget:
     provisional_window_days: float = 14.0
 
     # Tier thresholds
-    flash_to_short_strength: float = 0.55
+    flash_to_short_strength: float = 0.62  # v5-P5: raised 0.55 → 0.62 (tighter gate)
     flash_to_short_imp: float = 0.70
     short_to_long_strength: float = 0.72
     short_to_long_max_sim: float = 0.60
@@ -362,6 +384,9 @@ class Cluster:
     has_long: bool
     # v4: track whether cluster has high-arousal content (REM priority)
     max_arousal: float = 0.0
+    # v5-P10: temporal coherence — schema clusters span > 14 days
+    is_schema: bool = False
+    time_span_days: float = 0.0
 
 
 # =============================================================================
@@ -518,8 +543,9 @@ def _compute_sleep_phase_weight(m: MemoryEntry) -> float:
     # REM-like: high arousal memories get up to 20% replay priority boost
     rem_weight = 0.20 * arousal
 
-    # SWS-like: factual memories (low arousal, moderate importance) get 10% boost
-    sws_weight = 0.10 * max(0.0, imp - arousal)
+    # SWS-like: factual memories (low arousal, moderate importance) get 20% boost
+    # v5-X2: raised 0.10 → 0.20 (hippocampal-neocortical transfer parity with REM)
+    sws_weight = 0.20 * max(0.0, imp - arousal)
 
     return float(min(1.2, max(0.8, 1.0 + rem_weight + sws_weight)))
 
@@ -878,60 +904,101 @@ def _build_clusters(
     budget: SleepBudget,
     now: float,
 ) -> List[Cluster]:
-    used: Set[str] = set()
-    clusters: List[Cluster] = []
+    """v5-P8: BFS connected-components — not order-dependent 1-hop expansion.
 
+    v5-P10: temporal coherence — components spanning ≤ 14d are episodic clusters;
+    those spanning > 14d are schema clusters (recurring cross-time knowledge).
+    Both pass through _apply_summary_cluster; schema clusters are tagged so the
+    summary entry records its provenance.
+    """
+    _14_DAYS_SEC = 14 * 86400.0
+    cand_ids: Set[str] = {m.id for m in candidates}
+
+    # --- Step 1: resolve any neighbor IDs missing from id_map ---
+    all_neighbor_ids: Set[str] = set()
     for m in candidates:
-        if m.id in used:
-            continue
         info = neighbor_map.get(m.id)
-        if not info or info.dup_count < (budget.min_cluster_size_to_summarize - 1):
+        if info:
+            all_neighbor_ids.update(info.dup_ids)
+    missing = [nid for nid in all_neighbor_ids if nid not in id_map]
+    if missing:
+        _ensure_in_id_map(sqlite_store=sqlite_store, id_map=id_map, ids=missing)
+
+    # --- Step 2: build undirected adjacency over candidates only ---
+    adj: Dict[str, Set[str]] = {m.id: set() for m in candidates}
+    for m in candidates:
+        info = neighbor_map.get(m.id)
+        if info is None:
             continue
-
-        missing = [nid for nid in info.dup_ids if nid not in id_map]
-        if missing:
-            _ensure_in_id_map(sqlite_store=sqlite_store, id_map=id_map, ids=missing)
-
-        ids: List[str] = [m.id]
         for nid in info.dup_ids:
-            if nid in used:
+            if nid not in cand_ids:
                 continue
             nm = id_map.get(nid)
             if nm is None or int(getattr(nm, "deleted", 0) or 0) == 1:
                 continue
-            ids.append(nid)
-            if len(ids) >= budget.max_cluster_size:
-                break
+            adj[m.id].add(nid)
+            adj[nid].add(m.id)  # ensure bidirectionality
 
+    # --- Step 3: BFS connected-components ---
+    visited: Set[str] = set()
+    raw_components: List[List[str]] = []
+    for start_id in list(adj.keys()):
+        if start_id in visited:
+            continue
+        component: List[str] = []
+        q: deque = deque([start_id])
+        while q:
+            node = q.popleft()
+            if node in visited:
+                continue
+            visited.add(node)
+            component.append(node)
+            for nbr in adj[node]:
+                if nbr not in visited:
+                    q.append(nbr)
+        if len(component) >= budget.min_cluster_size_to_summarize:
+            raw_components.append(component)
+
+    # --- Step 4: build Cluster objects from components ---
+    clusters: List[Cluster] = []
+    for component in raw_components:
+        # Trim oversized components: keep strongest members
+        if len(component) > budget.max_cluster_size:
+            component = sorted(
+                component,
+                key=lambda cid: _compute_strength(
+                    id_map[cid], now=now, budget=budget,
+                    neighbor_map=neighbor_map, raw_bla_scores=raw_bla_scores,
+                    dynamic_importances=dynamic_importances, id_map=id_map,
+                ) if cid in id_map else 0.0,
+                reverse=True,
+            )[: budget.max_cluster_size]
+
+        ids = [cid for cid in component if cid in id_map]
         if len(ids) < budget.min_cluster_size_to_summarize:
             continue
 
-        for x in ids:
-            used.add(x)
+        # P10: temporal coherence
+        timestamps = [
+            float(getattr(id_map[cid], "created_at", now) or now)
+            for cid in ids
+        ]
+        time_span_sec = max(timestamps) - min(timestamps)
+        time_span_days = time_span_sec / 86400.0
+        is_schema = time_span_sec >= _14_DAYS_SEC
 
         strengths = [
             _compute_strength(
-                id_map[x],
-                now=now,
-                budget=budget,
-                neighbor_map=neighbor_map,
-                raw_bla_scores=raw_bla_scores,
-                dynamic_importances=dynamic_importances,
-                id_map=id_map,  # v4: pass id_map for PI
+                id_map[cid], now=now, budget=budget,
+                neighbor_map=neighbor_map, raw_bla_scores=raw_bla_scores,
+                dynamic_importances=dynamic_importances, id_map=id_map,
             )
-            for x in ids
-            if x in id_map
+            for cid in ids
         ]
-        if not strengths:
-            continue
-
-        dyn_imps = [dynamic_importances.get(x, 0.0) for x in ids]
-        texts = [getattr(id_map.get(x), "text", "") or "" for x in ids if x in id_map]
-
-        # v4: compute max arousal across cluster for sleep-phase weighting
+        dyn_imps = [dynamic_importances.get(cid, 0.0) for cid in ids]
+        texts = [getattr(id_map[cid], "text", "") or "" for cid in ids]
         max_arousal = max(
-            (_compute_arousal(id_map[x]) for x in ids if x in id_map),
-            default=0.0,
+            (_compute_arousal(id_map[cid]) for cid in ids), default=0.0
         )
 
         clusters.append(
@@ -941,11 +1008,12 @@ def _build_clusters(
                 avg_importance=sum(dyn_imps) / len(dyn_imps),
                 total_chars=sum(len(t) for t in texts),
                 has_long=any(
-                    getattr(id_map.get(x), "memory_type", "flash") == "long"
-                    for x in ids
-                    if x in id_map
+                    getattr(id_map[cid], "memory_type", "flash") == "long"
+                    for cid in ids
                 ),
-                max_arousal=max_arousal,  # v4
+                max_arousal=max_arousal,
+                is_schema=is_schema,
+                time_span_days=time_span_days,
             )
         )
 
@@ -1039,12 +1107,31 @@ def _apply_summary_cluster(
     if not items:
         raise ValueError("cluster has no usable text items")
 
+    # P9: consolidation_depth cap — track summarization depth; require high
+    # confidence for deep re-summarizations to prevent semantic drift.
+    max_source_depth: int = max(
+        int((getattr(id_map.get(mid), "metadata", {}) or {}).get(
+            "consolidation_depth", 0) or 0)
+        for mid in cluster.ids
+        if id_map.get(mid) is not None
+    )
+    new_depth = max_source_depth + 1
+    _DEEP_CONSOLIDATION_THRESHOLD = 3
+    _DEEP_CONFIDENCE_MIN = 0.70
+
     items.sort(key=lambda x: x[0])
     memories = [f"{_iso(ts)} | {text}" for (ts, text) in items]
     parsed = brain.run_memory_summary(memories="\n".join(memories)).get("parsed")
     summary_text = str(parsed.get("memory_summary", "") or "").strip()
     salience = float(parsed.get("salience", 0.0) or 0.0)
     confidence = float(parsed.get("confidence", 0.0) or 0.0)
+
+    # P9: gate deep re-summarization on confidence
+    if new_depth >= _DEEP_CONSOLIDATION_THRESHOLD and confidence < _DEEP_CONFIDENCE_MIN:
+        raise ValueError(
+            f"depth={new_depth} re-summarization blocked: "
+            f"confidence={confidence:.3f} < {_DEEP_CONFIDENCE_MIN} required"
+        )
 
     if confidence < budget.low_confidence_warn:
         logger.warning(
@@ -1095,6 +1182,11 @@ def _apply_summary_cluster(
             # v4: track sleep phase that produced this summary
             "summary_sleep_phase": "REM" if cluster.max_arousal > 0.5 else "SWS",
             "cluster_max_arousal": cluster.max_arousal,
+            # v5-P9: depth of summarization chain (prevents semantic drift)
+            "consolidation_depth": new_depth,
+            # v5-P10: schema vs episodic cluster provenance
+            "cluster_type": "schema" if cluster.is_schema else "episodic",
+            "cluster_time_span_days": round(cluster.time_span_days, 1),
         },
     )
 
@@ -1107,6 +1199,35 @@ def _apply_summary_cluster(
             sqlite_store.soft_delete(mid)
             vector_store.soft_delete(mid)
             soft_deleted_count += 1
+
+        # v5-P7: When the summary is provisional (low-confidence), protect source
+        # memories from hard-purge until the provisional window expires.
+        # Without this, source data is lost even when the summary may be wrong.
+        if is_provisional:
+            provisional_expires_at = now + budget.provisional_window_days * 86400
+            db_path = str(getattr(sqlite_store, "db_path", "") or "")
+            if db_path:
+                try:
+                    with sqlite3.connect(db_path) as conn:
+                        for mid in cluster.ids:
+                            row = conn.execute(
+                                "SELECT metadata FROM memories WHERE id=?", (mid,)
+                            ).fetchone()
+                            if row is None:
+                                continue
+                            try:
+                                meta = json.loads(row[0] or "{}")
+                            except (json.JSONDecodeError, TypeError):
+                                meta = {}
+                            meta["provisional_source_protected"] = True
+                            meta["provisional_expires_at"] = provisional_expires_at
+                            conn.execute(
+                                "UPDATE memories SET metadata=? WHERE id=?",
+                                (json.dumps(meta), mid),
+                            )
+                        conn.commit()
+                except Exception:
+                    logger.exception("p7.provisional_protect_failed cluster_size=%d", len(cluster.ids))
     else:
         soft_deleted_count = len(cluster.ids)
 
@@ -1139,7 +1260,7 @@ def _increment_cycle_counts(
                                '$.consolidation_cycles',
                                COALESCE(json_extract(metadata, '$.consolidation_cycles'), 0) + 1
                            )
-                           WHERE id = ? AND deleted = 0""",
+                           WHERE id = ?""",  # v5-P6: no deleted=0 filter — bump all scanned
                         (mid,),
                     )
                     updated += 1
@@ -1210,9 +1331,15 @@ def _plan_tier_updates(
             continue
 
         if cur_type == "short":
+            dup_count = info.dup_count if info else 0
+            # P4 (v5): direct promotion when unique (no semantic neighbors) —
+            # the sim_max <= 0.60 gate was too restrictive; it blocked promotion
+            # for all commonly-worded memories regardless of strength or cycles.
+            # Memories with dup_count >= 2 are handled by the cluster-summary
+            # route (_apply_summary_cluster) rather than direct promotion.
             if (
                 M >= budget.short_to_long_strength
-                and sim_max <= budget.short_to_long_max_sim
+                and dup_count == 0
                 and cycles >= budget.min_cycles_for_long
                 and dyn_imp >= 0.30
             ):
@@ -1243,25 +1370,53 @@ def _plan_tier_updates(
 # =============================================================================
 
 
-def _is_protected(m: MemoryEntry, budget: SleepBudget) -> bool:
-    """PATCH-1 — Catastrophic forgetting guard.
+def _is_protected(
+    m: MemoryEntry,
+    budget: SleepBudget,
+    *,
+    dup_count: int = -1,
+) -> bool:
+    """PATCH-1 + v5-P12 + v5-P3 — Catastrophic forgetting guard.
 
     Returns True if this memory must never be hard-deleted, regardless of
     BLA score, duplicate count, or age.
 
-    Rule: memories with importance >= hard_delete_imp_protect (default 0.80)
-    that have NOT been consolidated into a summary are unconditionally exempt
-    from all hard-delete paths (dead-trace, redundancy, interference).
+    Rule A (PATCH-1): importance >= hard_delete_imp_protect (0.80) and NOT
+    yet consolidated → unconditionally exempt from all hard-delete paths.
 
-    Rationale: a very old medical allergy, a user's name, or a core identity
-    fact may legitimately have low BLA if last_accessed was months ago — but
-    deleting it would be a silent, unrecoverable data loss. The importance
-    field was set by the encoding system precisely to signal this permanence.
+    Rule B (v5-P12): importance >= 0.70 AND dup_count == 0 → also protected.
+    Rationale: an isolated high-importance memory has no semantic neighbor
+    that could "cover" for it if deleted. It is by definition irreplaceable.
+    dup_count == 0 means the vector store found no similar memories at or
+    above the similarity threshold, so the information exists nowhere else.
+
+    Rule C (v5-P3): explicit protection_tier set by Brain ingestion.
+      "immortal" → always protected, even AFTER consolidation (overrides
+                   consolidated_into_id check).
+      "critical" → protected if not yet consolidated (same gate as Rule A/B).
     """
+    pt = str(
+        (getattr(m, "metadata", {}) or {}).get("protection_tier", "normal") or "normal"
+    ).lower()
+
+    # Rule C-immortal: protected unconditionally — survives consolidation
+    if pt == "immortal":
+        return True
+
     if getattr(m, "consolidated_into_id", None) is not None:
         return False  # already folded into a summary → safe to purge the raw row
+
     imp = float(getattr(m, "importance", 0.0) or 0.0)
-    return imp >= budget.hard_delete_imp_protect
+    # Rule A
+    if imp >= budget.hard_delete_imp_protect:
+        return True
+    # Rule B (v5-P12): isolated + moderately important → irreplaceable
+    if dup_count == 0 and imp >= 0.70:
+        return True
+    # Rule C-critical: explicitly flagged by Brain as critical
+    if pt == "critical":
+        return True
+    return False
 
 
 def _select_interference_victim(
@@ -1292,7 +1447,9 @@ def _select_interference_victim(
         dup = id_map.get(did)
         if dup is None or int(getattr(dup, "deleted", 0) or 0) == 1:
             continue
-        if _is_protected(dup, budget):  # PATCH-1: never victimise a protected memory
+        d_info = neighbor_map.get(did)
+        d_dup_count = d_info.dup_count if d_info else 0
+        if _is_protected(dup, budget, dup_count=d_dup_count):  # PATCH-1 + P12
             continue
         if dynamic_importances.get(did, 0.0) > 0.50:
             continue
@@ -1328,6 +1485,7 @@ def _plan_hard_deletes(
     interference_ids: List[str] = []
 
     # Purge old soft-deleted consolidated rows first.
+    # v5-P7: Skip rows whose source memories are still within the provisional window.
     try:
         db_path = str(getattr(sqlite_store, "db_path", "") or "")
         if db_path and db_path != ":memory:":
@@ -1335,11 +1493,16 @@ def _plan_hard_deletes(
             with sqlite3.connect(db_path) as conn:
                 conn.row_factory = lambda cur, row: row[0]
                 rows = conn.execute(
-                    """SELECT id FROM memories WHERE deleted=1
-                       AND consolidated_into_id IS NOT NULL
-                       AND COALESCE(last_consolidated_at, created_at) <= ?
+                    """SELECT id FROM memories
+                       WHERE deleted=1
+                         AND consolidated_into_id IS NOT NULL
+                         AND COALESCE(last_consolidated_at, created_at) <= ?
+                         AND NOT (
+                             json_extract(metadata, '$.provisional_source_protected') = 1
+                             AND json_extract(metadata, '$.provisional_expires_at') > ?
+                         )
                        LIMIT ?""",
-                    (cutoff, limit),
+                    (cutoff, now, limit),
                 ).fetchall()
             for mid in rows:
                 dels.append(str(mid))
@@ -1360,15 +1523,15 @@ def _plan_hard_deletes(
         if getattr(m, "consolidated_into_id", None) is not None:
             continue
 
-        # PATCH-1: unconditionally skip high-importance, non-consolidated memories
-        if _is_protected(m, budget):
-            continue
-
         dyn_imp = dynamic_importances.get(m.id, 0.0)
         acc = int(getattr(m, "access_count", 0) or 0)
         age_days = (now - float(getattr(m, "created_at", now))) / 86400.0
         info = neighbor_map.get(m.id)
         dup_count = info.dup_count if info else 0
+
+        # PATCH-1 + v5-P12: skip protected memories (absolute imp OR isolated+moderate imp)
+        if _is_protected(m, budget, dup_count=dup_count):
+            continue
 
         M = _compute_strength(
             m,
@@ -1410,6 +1573,21 @@ def _plan_hard_deletes(
             and age_days >= budget.redundancy_min_age_sec / 86400.0
             and M <= 0.30
         ):
+            # v5-P11: Keep-one-representative — never delete if doing so would leave
+            # zero surviving members in this similarity cluster. Check whether at
+            # least one dup is NOT already scheduled for deletion.
+            surviving_dup = next(
+                (
+                    nid for nid in (info.dup_ids if info else [])
+                    if nid not in dels_set
+                    and id_map.get(nid) is not None
+                    and int(getattr(id_map[nid], "deleted", 0) or 0) == 0
+                ),
+                None,
+            )
+            if surviving_dup is None:
+                # All dups already deleted — this is the last one; keep it
+                continue
             dels.append(m.id)
             redundancy_ids.append(m.id)
             dels_set.add(m.id)
@@ -1442,10 +1620,45 @@ def _plan_hard_deletes(
     return dels, redundancy_ids, interference_ids
 
 
-def _hard_delete(*, sqlite_store: Any, vector_store: Any, memory_id: str) -> None:
+def _hard_delete(
+    *,
+    sqlite_store: Any,
+    vector_store: Any,
+    memory_id: str,
+    reason: str = "",
+    _entry: Optional["MemoryEntry"] = None,
+) -> None:
+    """Hard-delete a memory from SQLite and vector store.
+
+    v5-P13: Reads the row before deletion and writes an audit record to
+    forgotten_log so the user can diagnose "why did Buddy forget X?".
+    _entry may be passed by the caller (avoids a second DB read when the
+    entry is already in id_map).
+    """
     db_path = str(getattr(sqlite_store, "db_path", "") or "")
     if not db_path:
         raise RuntimeError("sqlite_store.db_path missing")
+
+    # v5-P13: capture data for audit log before deleting
+    audit_text = ""
+    audit_type = "flash"
+    audit_imp = 0.0
+    if _entry is not None:
+        audit_text = str(getattr(_entry, "text", "") or "")
+        audit_type = str(getattr(_entry, "memory_type", "flash") or "flash")
+        audit_imp = float(getattr(_entry, "importance", 0.0) or 0.0)
+    else:
+        try:
+            with sqlite3.connect(db_path) as conn:
+                row = conn.execute(
+                    "SELECT text, memory_type, importance FROM memories WHERE id=?",
+                    (str(memory_id),),
+                ).fetchone()
+                if row:
+                    audit_text, audit_type, audit_imp = row[0] or "", row[1] or "flash", float(row[2] or 0.0)
+        except Exception:
+            pass
+
     with sqlite3.connect(db_path) as conn:
         conn.execute("PRAGMA foreign_keys=ON;")
         conn.execute("DELETE FROM memories WHERE id=?;", (str(memory_id),))
@@ -1455,6 +1668,18 @@ def _hard_delete(*, sqlite_store: Any, vector_store: Any, memory_id: str) -> Non
     except Exception:
         logger.exception("delete.vector_failed id=%s", memory_id)
         raise
+
+    # Write audit log after successful delete (best-effort; never raises)
+    try:
+        sqlite_store.forgotten_log_append(
+            memory_id=str(memory_id),
+            memory_text=audit_text,
+            memory_type=audit_type,
+            importance=audit_imp,
+            reason=reason or "unknown",
+        )
+    except Exception:
+        pass
 
 
 # =============================================================================
@@ -1567,6 +1792,32 @@ def run_consolidation(
         budget=b,
         dynamic_importances=dynamic_importances,
     )
+
+    # P14 (v5): persist consolidation_strength to SQLite so recall can use it
+    _strength_updates: List[Tuple[str, float]] = []
+    for _m in cands:
+        _s = _compute_strength(
+            _m,
+            now=now,
+            budget=b,
+            neighbor_map=neighbor_map,
+            raw_bla_scores=raw_bla_scores,
+            dynamic_importances=dynamic_importances,
+            id_map=id_map,
+        )
+        _strength_updates.append((_m.id, _s))
+    if _strength_updates and not dry_run:
+        try:
+            sqlite_store.batch_update_consolidation_strength(_strength_updates)
+            logger.info(
+                "sleep_v4.phase0b: wrote consolidation_strength for %d memories",
+                len(_strength_updates),
+            )
+        except Exception as _exc:
+            logger.warning(
+                "sleep_v4.phase0b: consolidation_strength write failed err=%r", _exc
+            )
+
     prediction_errors_flagged = sum(1 for i in neighbor_map.values() if i.is_surprising)
     arousal_boosted = sum(1 for m in cands if _compute_arousal(m) > 0.5)
 
@@ -1720,10 +1971,19 @@ def run_consolidation(
     if not dry_run:
         for mem_id in delete_plan:
             try:
+                # v5-P13: determine reason for audit log
+                if mem_id in interference_set:
+                    del_reason = "interference"
+                elif mem_id in redundancy_set:
+                    del_reason = "redundancy"
+                else:
+                    del_reason = "dead_trace_or_purge"
                 _hard_delete(
                     sqlite_store=sqlite_store,
                     vector_store=vector_store,
                     memory_id=mem_id,
+                    reason=del_reason,
+                    _entry=id_map.get(mem_id),  # pass pre-fetched entry when available
                 )
                 hard_deleted += 1
                 deleted_ids.add(mem_id)
@@ -1734,19 +1994,17 @@ def run_consolidation(
             except Exception as e:
                 errors.append(f"hard_delete_failed id={mem_id} err={e}")
 
-    # Phase 4: Increment consolidation cycle counter for all survivors.
+    # Phase 4: Increment consolidation cycle counter.
+    # v5-P6: bump ALL candidates processed in this scan window — not just survivors.
+    # Memories that were summarized (soft-deleted) this cycle still get their final
+    # cycle count updated, giving an accurate record of how many times they were
+    # processed. The SQL in _increment_cycle_counts no longer filters by deleted=0.
     cycles_incremented = 0
     if not dry_run:
-        survivor_ids = [
-            m.id
-            for m in cands
-            if m.id not in summarised_ids
-            and m.id not in deleted_ids
-            and int(getattr(m, "deleted", 0) or 0) == 0
-        ]
+        all_processed_ids = [m.id for m in cands]
         cycles_incremented = _increment_cycle_counts(
             sqlite_store=sqlite_store,
-            survivor_ids=survivor_ids,
+            survivor_ids=all_processed_ids,
         )
 
     logger.info(

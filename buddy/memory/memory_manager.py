@@ -5,7 +5,7 @@ MemoryManager — integration layer between Brain and the memory subsystem.
 Responsibilities (v2):
   - SQLite is the source of truth for all memory entries.
   - VectorStore/Qdrant is a best-effort retrieval index (may be absent).
-  - No LLM calls here; accepts pre-classified ingestion dicts from Brain.
+  - No LLM calls here; accepts pre-classified memory dicts from Brain.
   - Provides Brain-friendly candidate retrieval via search_candidates().
   - Owns the ConsolidationController lifecycle:
       start_consolidation() / stop_consolidation() / is_consolidating.
@@ -107,6 +107,43 @@ class MemoryCandidateLite:
     content: str
     source: Optional[str] = None
     created_at_iso: Optional[str] = None
+    memory_type: str = "flash"
+
+
+# ==========================================================
+# Re-scoring weights — Phase 3 (v5)
+# ==========================================================
+#
+# Formula (P15): semantic×0.40 + strength×0.25 + rerank×0.15
+#                + tier×0.10 + encoding_arousal×0.10
+#
+# recency/frequency are now folded into consolidation_strength (computed
+# by the sleep engine) rather than carried as separate signals here.
+
+W_SEMANTIC  = 0.40
+W_STRENGTH  = 0.25  # consolidation_strength written by sleep engine (P14)
+W_RERANK    = 0.15  # only when reranker is active
+W_TIER      = 0.10
+W_AROUSAL   = 0.10  # encoding_arousal from raw user message (P1/Phase 2)
+
+_TIER_BOOST = {"long": 1.0, "short": 0.5, "flash": 0.0}
+
+
+def _composite_score(
+    semantic: float,
+    rerank: float,
+    consolidation_strength: float,
+    tier: str,
+    encoding_arousal: float,
+) -> float:
+    tier_boost = _TIER_BOOST.get(str(tier).lower(), 0.0)
+    return (
+        semantic               * W_SEMANTIC
+        + consolidation_strength * W_STRENGTH
+        + rerank               * W_RERANK
+        + tier_boost           * W_TIER
+        + encoding_arousal     * W_AROUSAL
+    )
 
 
 # ==========================================================
@@ -457,7 +494,7 @@ class MemoryManager:
         self,
         *,
         text: Optional[str] = None,
-        ingestion: Optional[Dict[str, Any]] = None,
+        memory: Optional[Dict[str, Any]] = None,
         role: Optional[str] = None,
         source: Optional[str] = None,
         source_turn: Optional[int] = None,
@@ -472,27 +509,31 @@ class MemoryManager:
 
         Returns None if input is empty or explicitly discarded.
         """
-        if ingestion is not None and not isinstance(ingestion, dict):
-            raise TypeError("ingestion must be a dict or None")
+        if memory is not None and not isinstance(memory, dict):
+            raise TypeError("memory must be a dict or None")
 
-        # ── ingestion path ────────────────────────────────────────────
-        if ingestion is not None:
+        # ── memory path ───────────────────────────────────────────────
+        if memory is not None:
             mem_type = (
-                str(ingestion.get("memory_type", "discard") or "discard")
+                str(memory.get("memory_type", "discard") or "discard")
                 .strip()
                 .lower()
             )
-            mem_text = str(ingestion.get("memory_text", "") or "").strip()
-            reason = str(ingestion.get("reason", "") or "").strip()
-
+            mem_text = str(memory.get("memory_text", "") or "").strip()
             if not mem_text or mem_type == "discard":
                 return None
 
-            imp = _clamp01(ingestion.get("salience", 0.0))
+            imp = _clamp01(memory.get("salience", 0.0))
             md: Dict[str, Any] = dict(metadata or {})
             if source is not None:
                 md.setdefault("source", str(source))
-            md.setdefault("reason", reason)
+
+            # P3 (Phase 2): capture protection_tier from Brain ingestion output
+            pt = str(memory.get("protection_tier", "normal") or "normal").strip().lower()
+            if pt not in ("normal", "critical", "immortal"):
+                pt = "normal"
+            if pt != "normal":
+                md["protection_tier"] = pt
 
             txt = mem_text.lower() if normalize_text_lower else mem_text
             e = MemoryEntry(text=txt)
@@ -598,7 +639,53 @@ class MemoryManager:
                     getattr(entry, "memory_type", None),
                 )
 
+        # X5 (Phase 5): novelty-burst micro-consolidation
+        # High-arousal new memories propagate a small strength boost to their
+        # semantic neighbors — simulating the way emotional novelty accelerates
+        # consolidation of related knowledge (Cahill & McGaugh 1998).
+        self._novelty_burst(entry)
+
         return True
+
+    def _novelty_burst(self, entry: MemoryEntry) -> None:
+        """X5: If encoding_arousal >= 0.7, boost semantic neighbors' consolidation_strength."""
+        if self.vector is None or self.embedder is None:
+            return
+        arousal = float((getattr(entry, "metadata", {}) or {}).get("encoding_arousal", 0.0) or 0.0)
+        if arousal < 0.7:
+            return
+        emb = getattr(entry, "embedding", None)
+        if emb is None:
+            return
+        try:
+            hits = self.vector.search(
+                query_vector=emb,
+                top_k=5,
+                include_deleted=False,
+                query_text=str(getattr(entry, "text", "") or ""),
+                mode="auto",
+                rerank_mode="none",
+            )
+        except Exception:
+            return
+        updates: List[Tuple[str, float]] = []
+        for mid, _sim in hits:
+            if mid == entry.id:
+                continue
+            neighbor = self.sqlite.get_memory(mid)
+            if neighbor is None:
+                continue
+            cur = float(getattr(neighbor, "consolidation_strength", 0.0) or 0.0)
+            updates.append((mid, min(1.0, cur + 0.03)))
+        if updates:
+            try:
+                self.sqlite.batch_update_consolidation_strength(updates)
+                self._dbg(
+                    "novelty_burst | arousal=%.2f boosted=%d neighbors",
+                    arousal, len(updates),
+                )
+            except Exception:
+                pass
 
     def add_text(
         self,
@@ -643,7 +730,7 @@ class MemoryManager:
     #     self,
     #     *,
     #     text: Optional[str] = None,
-    #     ingestion: Optional[Dict[str, Any]] = None,
+    #     memory: Optional[Dict[str, Any]] = None,
     #     role: Optional[str] = None,
     #     source: Optional[str] = None,
     #     source_turn: Optional[int] = None,
@@ -658,7 +745,7 @@ class MemoryManager:
     #     """
     #     e = self._build_entry(
     #         text=text,
-    #         ingestion=ingestion,
+    #         memory=memory,
     #         role=role,
     #         source=source,
     #         source_turn=source_turn,
@@ -758,15 +845,14 @@ class MemoryManager:
         if not hydrated:
             return []
 
-        # 4) Build Brain DTOs
-        out: List[MemoryCandidateLite] = []
+        # 4) Build Brain DTOs with composite re-scoring
+        now_ts = time.time()
+        scored: List[Tuple[float, MemoryCandidateLite]] = []
         sqlite_touch = self.sqlite.touch
+        _touch_ids: List[str] = []  # collect for batched touch after scoring
 
         for e, sc, pl in hydrated:
-            try:
-                sqlite_touch(e.id)
-            except Exception:
-                pass
+            _touch_ids.append(e.id)
 
             rerank_score = 0.0
             source = None
@@ -780,17 +866,108 @@ class MemoryManager:
                 sv = pl.get("source")
                 source = sv if isinstance(sv, str) else None
 
-            out.append(
+            # P14/P15: composite score using sleep-persisted consolidation_strength
+            strength = float(getattr(e, "consolidation_strength", 0.0) or 0.0)
+            arousal = float(
+                (getattr(e, "metadata", {}) or {}).get("encoding_arousal", 0.0) or 0.0
+            )
+            final = _composite_score(
+                semantic=float(sc),
+                rerank=rerank_score,
+                consolidation_strength=strength,
+                tier=str(getattr(e, "memory_type", "flash") or "flash"),
+                encoding_arousal=arousal,
+            )
+
+            scored.append((
+                final,
                 MemoryCandidateLite(
                     memory_id=str(e.id),
                     semantic_score=float(sc),
-                    rerank_score=rerank_score,
+                    rerank_score=final,  # expose composite as rerank_score for downstream
                     summary=_summarize(e.text),
                     content=str(e.text),
                     source=source,
                     created_at_iso=_iso(getattr(e, "created_at", None)),
+                    memory_type=str(getattr(e, "memory_type", "flash") or "flash"),
                 )
-            )
+            ))
+
+        # Re-sort by composite score
+        scored.sort(key=lambda x: x[0], reverse=True)
+
+        # P16: 1-hop spreading activation
+        # Top-3 scoring hits → reuse stored embedding (no re-inference) →
+        # secondary vector search → promote semantically adjacent memories.
+        _SPREAD_DAMP   = 0.4
+        _N_ACTIVATORS  = min(3, len(scored))
+        _SPREAD_TOP_K  = 5
+        spread_seen: set = {c.memory_id for _, c in scored}
+        spread_pool: List[Tuple[float, MemoryCandidateLite]] = []
+
+        # Build id→entry map once so spreading activation can reuse stored embeddings
+        # instead of calling embed_query (model inference) per activator.
+        _entry_map: Dict[str, MemoryEntry] = {e.id: e for e, _, _ in hydrated}
+
+        if self.vector is not None:
+            for act_score, act_cand in scored[:_N_ACTIVATORS]:
+                # Use stored embedding — avoids 3 extra embed_query model calls.
+                _act_entry = _entry_map.get(act_cand.memory_id)
+                _stored_emb = getattr(_act_entry, "embedding", None) if _act_entry else None
+                if _stored_emb is None:
+                    continue
+                act_qv = np.asarray(_stored_emb, dtype=np.float32).reshape(-1)
+                if act_qv.size == 0:
+                    continue
+                try:
+                    spread_hits = self.vector.search(
+                        query_vector=act_qv,
+                        top_k=_SPREAD_TOP_K,
+                        include_deleted=False,
+                        query_text=act_cand.content,
+                        mode=mode,
+                        rerank_mode="none",
+                    )
+                except Exception:
+                    continue
+
+                for spread_mid, spread_sim in spread_hits:
+                    if spread_mid in spread_seen:
+                        continue
+                    spread_e = self.sqlite.get_memory(spread_mid)
+                    if spread_e is None:
+                        continue
+                    spread_seen.add(spread_mid)
+                    _touch_ids.append(spread_mid)
+                    spread_final = _SPREAD_DAMP * float(act_score) * float(spread_sim)
+                    spread_pool.append((
+                        spread_final,
+                        MemoryCandidateLite(
+                            memory_id=spread_mid,
+                            semantic_score=float(spread_sim),
+                            rerank_score=spread_final,
+                            summary=_summarize(spread_e.text),
+                            content=str(spread_e.text),
+                            source=None,
+                            created_at_iso=_iso(getattr(spread_e, "created_at", None)),
+                            memory_type=str(
+                                getattr(spread_e, "memory_type", "flash") or "flash"
+                            ),
+                        ),
+                    ))
+
+        if spread_pool:
+            scored = sorted(scored + spread_pool, key=lambda x: x[0], reverse=True)
+            self._dbg("spreading_activation | added=%d new candidates", len(spread_pool))
+
+        out = [c for _, c in scored[:top_k]]
+
+        # Batch touch all accessed memories (primary + spread) in one pass
+        for _mid in _touch_ids:
+            try:
+                sqlite_touch(_mid)
+            except Exception:
+                pass
 
         if self.debug:
             logger.info(

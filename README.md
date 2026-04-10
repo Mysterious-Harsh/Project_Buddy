@@ -132,46 +132,59 @@ Buddy models human memory the way it actually works: information enters as raw e
 │               │ candidate        │                      │
 ├───────────────┴──────────────────┴──────────────────────┤
 │  Storage: SQLite (metadata + text)  +  Qdrant (vectors) │
-│  Retrieval: Semantic search  +  Reranking               │
+│  Retrieval: Semantic + consolidation_strength + arousal │
 └─────────────────────────────────────────────────────────┘
 ```
 
-Every memory carries: an importance score, access count, recency weight, and a semantic embedding. Retrieval is context-aware — Buddy pulls what is _relevant_, not just what is _recent_. A fact you mentioned once six months ago surfaces when it matters, and fades when it doesn't.
+Every memory carries: an importance score, a `consolidation_strength` that sleep cycles build over time, an encoding arousal signal from the original message, and a semantic embedding. Retrieval is context-aware — Buddy pulls what is _relevant_, not just what is _recent_. A fact you mentioned once six months ago surfaces when it matters, and fades when it doesn't. Memories recalled frequently reinforce themselves: each access bumps `consolidation_strength` by +0.05, making them even more likely to surface next time.
 
 ---
 
 ## `$ consolidation --show-sleep-cycle`
 
-When Buddy is idle, a background consolidation engine runs automatically — the same way the human brain consolidates memories during sleep.
+When Buddy is idle, a background consolidation engine (v5) runs automatically — the same way the human brain consolidates memories during sleep.
 
 ```
-┌──────────────────────────────────────────────────────┐
-│               SLEEP  CONSOLIDATION  CYCLE            │
-├──────────────────────────────────────────────────────┤
-│                                                      │
-│  SCAN      →  Load flash + short-term memories       │
-│  CLUSTER   →  Group semantically related entries     │
-│  SCORE     →  ACT-R activation + arousal + salience  │
-│  SUMMARIZE →  LLM condenses clusters → new entries   │
-│  PROMOTE   →  High-strength entries → long-term      │
-│  DEMOTE    →  Low-strength entries → flash / deleted │
-│  PRUNE     →  Duplicates, dead traces, interference  │
-│                                                      │
-│  RESULT: Smaller, denser, higher-quality memory      │
-│                                                      │
-└──────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────┐
+│            SLEEP  CONSOLIDATION  CYCLE  v5               │
+├──────────────────────────────────────────────────────────┤
+│                                                          │
+│  SCAN       →  Load flash + short-term memories          │
+│  SCORE      →  BLA + arousal + fan + interference + TG   │
+│               → writes consolidation_strength to SQLite  │
+│  CLUSTER    →  BFS connected-components over sim graph   │
+│               → episodic (<14d) vs schema (≥14d) label   │
+│  SUMMARIZE  →  LLM condenses clusters → new entries      │
+│               → depth cap: depth≥3 requires conf≥0.70    │
+│  PROMOTE    →  M≥0.62 (age>3h) → short                   │
+│               → M≥0.72 AND dup==0 → long (direct)        │
+│               → M≥0.72 AND dup≥2 → long (via summary)    │
+│  DEMOTE     →  Low-strength entries → flash / deleted    │
+│  PRUNE      →  Duplicates (keep ≥1 rep), interference    │
+│               → every deletion written to forgotten_log  │
+│                                                          │
+│  RESULT: Smaller, denser, higher-quality memory          │
+│          consolidation_strength feeds recall at query time│
+│                                                          │
+└──────────────────────────────────────────────────────────┘
 ```
 
 **When you wake Buddy up** — the consolidation cancels immediately and Buddy responds without delay. No waiting for a background job to finish.
 
-The engine is research-grounded:
+The engine is research-grounded (v5 adds the closed recall loop):
 
 - **ACT-R activation** — importance slows memory decay (Anderson & Lebiere 1998)
 - **CLS per-tier decay** — flash/short/long have biologically distinct decay rates
-- **Arousal amplification** — emotionally significant memories persist longer
+- **Arousal amplification** — emotionally significant memories persist longer (68 EN + 24 Hindi/Hinglish keywords)
 - **Prediction error boost** — surprising/contradictory memories get higher salience
-- **Reflective consolidation** — low-confidence summaries don't destroy originals
-- **Interference pruning** — near-duplicate memories that compete in retrieval are resolved
+- **Reflective consolidation** — low-confidence summaries don't destroy originals (14-day provisional window)
+- **Interference pruning** — near-duplicate memories are resolved; at least one representative always survives
+- **BFS clustering** — order-independent connected-components; same cluster every run regardless of seed
+- **Temporal coherence** — episodic (same time window) vs schema (cross-time knowledge) clusters handled differently
+- **Recall integration** — `consolidation_strength` written to SQLite after every sleep cycle; retrieval weights it at 25%
+- **Spreading activation** — top recalled memories activate their semantic neighbors at query time
+- **Encoding arousal** — emotional intensity of the original message is captured before Brain compression and used in both sleep scoring and retrieval weighting
+- **Protection tiers** — `critical` and `immortal` memories are permanently shielded from all deletion paths
 
 ---
 
@@ -301,20 +314,23 @@ Muting is not just pausing — the mic is physically released back to the OS and
 
 ## `$ features --list`
 
-|     | Feature                    | Description                                             |
-| --- | -------------------------- | ------------------------------------------------------- |
-| 🧠  | **Multi-tier memory**      | Flash → Short → Long, persisted across sessions         |
-| 🌙  | **Sleep consolidation**    | Auto-runs on idle, cancels instantly on wake            |
-| ⚡️  | **ACT mode**               | Real OS-level action execution with retry logic         |
-| 🔒  | **Fully offline**          | Local LLM via llama.cpp — zero cloud calls              |
-| 🎤  | **Always-listening voice** | No wake word — continuous dual-VAD STT pipeline         |
-| 🔍  | **Semantic retrieval**     | Vector embeddings + reranking for memory search         |
-| 📐  | **Modular prompts**        | Per-module minimal prompts, no monolithic bloat         |
-| 🔁  | **JSON-enforced output**   | All LLM outputs are structured and validated            |
-| 📊  | **ACT-R memory scoring**   | Research-grade memory strength calculation              |
-| 🧹  | **Auto memory pruning**    | Deduplication, interference removal, dead trace cleanup |
-| 🛡️  | **Integrity checks**       | Boot-time prompt hash verification                      |
-| 🖥️  | **Terminal UI**            | Aurora-themed CLI with voice, hotkeys, status toolbar   |
+|     | Feature                     | Description                                                          |
+| --- | --------------------------- | -------------------------------------------------------------------- |
+| 🧠  | **Multi-tier memory**       | Flash → Short → Long, persisted across sessions                      |
+| 🌙  | **Sleep consolidation v5**  | BFS clustering, temporal coherence, depth cap, audit log             |
+| 📈  | **Consolidation strength**  | Sleep cycle scores flow into retrieval — memory improves over time   |
+| 🌊  | **Spreading activation**    | Top recalled memories activate their semantic neighbors              |
+| 🔥  | **Encoding arousal**        | Emotional intensity captured at encoding; English + Hindi keywords   |
+| 🛡️  | **Protection tiers**        | normal / critical / immortal — LLM-assigned, enforced at all stages  |
+| ⚡️  | **ACT mode**                | Real OS-level action execution with retry logic                      |
+| 🔒  | **Fully offline**           | Local LLM via llama.cpp — zero cloud calls                           |
+| 🎤  | **Always-listening voice**  | No wake word — continuous dual-VAD STT pipeline                      |
+| 🔍  | **Semantic retrieval**      | Vector embeddings + reranking + composite scoring                    |
+| 📐  | **Modular prompts**         | Per-module minimal prompts, no monolithic bloat                      |
+| 🔁  | **JSON-enforced output**    | All LLM outputs are structured and validated                         |
+| 📊  | **ACT-R memory scoring**    | Research-grade memory strength: BLA, fan, arousal, PI, TG            |
+| 🧹  | **Auto memory pruning**     | Deduplication (≥1 rep always kept), interference, forgotten_log      |
+| 🖥️  | **Terminal UI**             | Aurora-themed CLI with voice, hotkeys, status toolbar                |
 
 ---
 

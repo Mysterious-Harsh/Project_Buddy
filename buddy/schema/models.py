@@ -81,9 +81,9 @@ class Decision(BuddyBaseModel):
     """
 
     intent_type: IntentType
-    intent: str
-    response: str
-    afterthought: str
+    intent: str = Field(default="")
+    response: str = Field(default="")
+    afterthought: str = Field(default="")
     model_config = {"populate_by_name": True}
 
 
@@ -96,27 +96,26 @@ class Decision(BuddyBaseModel):
 
 class RetrievalGateResult(BuddyBaseModel):
 
-    search_query: str
-    ack_message: str
-    deep_recall: bool
+    search_queries: List[str] = Field(default_factory=list)
+    ack_message: str = Field(default="")
+    deep_recall: bool = Field(default=False)
 
 
 class MemoryIngestionResult(BuddyBaseModel):
     """
-    Prompt-aligned Brain ingestion output (brain_prompt v1).
-    Matches ingestion JSON in the Brain prompt.
+    Prompt-aligned Brain memory output (brain_prompt v1).
+    Matches memories[] JSON in the Brain prompt.
     """
 
     memory_type: Literal["flash", "short", "long", "discard"]
     memory_text: str
     salience: float = Field(ge=0.0, le=1.0)
-    reason: str
+    protection_tier: str = "normal"  # normal | critical | immortal
 
 
 class MemorySummaryResult(BuddyBaseModel):
     """
-    Prompt-aligned Brain ingestion output (brain_prompt v1).
-    Matches ingestion JSON in the Brain prompt.
+    Prompt-aligned Brain memory summary output (brain_prompt v1).
     """
 
     memory_summary: str
@@ -132,11 +131,11 @@ class MemorySummaryResult(BuddyBaseModel):
 class BrainResult(BuddyBaseModel):
     """
     Strict output of brain_prompt:
-    { "decision": {...}, "ingestion": {...} }
+    { "decision": {...}, "memories": [{...}, ...] }
     """
 
     decision: Decision
-    ingestion: MemoryIngestionResult
+    memories: List[MemoryIngestionResult]
 
 
 # ==========================================================
@@ -147,11 +146,11 @@ class BrainResult(BuddyBaseModel):
 class PlannerStep(BuddyBaseModel):
     step_id: int = Field(ge=1)
     tool: str = Field(min_length=1)
-    ack_message: str = Field(default="")
+    goal: str = Field(min_length=1)
     instruction: str = Field(min_length=1)
+    hints: str = Field(default="")
     input_steps: List[int] = Field(default_factory=list)
     output: str = Field(min_length=1)
-    confidence: float = Field(ge=0.0, le=1.0, default=0.0)
 
 
 class PlannerResult(BuddyBaseModel):

@@ -1,4 +1,6 @@
 __pycache__/
 .env
+.claude/
 buddy/data/
 buddy/scripts/
+CLAUDE.md

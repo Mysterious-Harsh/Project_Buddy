@@ -1,3 +1,10 @@
+# 🔒 LOCKED — base_system_prompts.py
+# Contains: BUDDY_IDENTITY, BUDDY_BEHAVIOR, BUDDY_MEMORY, BUDDY_OUTPUT
+# These define who Buddy is. Changes here affect every single LLM call.
+# Allowed: bug fixes, clarifying existing rules, voice tuning.
+# Not allowed: changing the pronoun map, removing identity/behavior sections,
+#              altering the JSON output rules in BUDDY_OUTPUT.
+
 BUDDY_IDENTITY = """
 <BUDDY>
 <IDENTITY_LOCK>
