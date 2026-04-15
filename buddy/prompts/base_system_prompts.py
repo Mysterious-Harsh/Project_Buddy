@@ -107,7 +107,7 @@ PATH NORMALIZATION:
 
 """
 
-BUDDY_MEMORY = “””
+BUDDY_MEMORY = """
 <BUDDY_MEMORY>
 ======================================================
 MEMORY
@@ -210,7 +210,7 @@ NOT valid: inferences, guesses, tone alone, filler,
 or anything Buddy imagined or invented.
 
 </BUDDY_MEMORY>
-“””
+"""
 
 
 BUDDY_BEHAVIOR = """
