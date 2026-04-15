@@ -101,6 +101,9 @@ class BootstrapOptions:
     download_models: bool = True
     force_model_reselect: bool = False
     force_vision_reselect: bool = False
+    # Passed by run_textual() when first-boot wizard ran pre-Textual.
+    # bootstrap() uses this to skip re-running the wizard inside the thread.
+    pre_wizard_result: Optional[Dict[str, Any]] = None
 
 
 @dataclass
@@ -1021,7 +1024,16 @@ def _load_runtime_config() -> Dict[str, Any]:
                 boot_cfg.get("force_vision_reselect"), False
             ),
         },
-        "llama": llama_cfg,
+        "llama": {
+            "base_url": _as_str(llama_cfg.get("base_url"), "http://127.0.0.1:8080"),
+            "host": _as_str(llama_cfg.get("host"), "127.0.0.1"),
+            "port": int(llama_cfg.get("port") or 8080),
+            "model_gguf": _as_str(llama_cfg.get("model_gguf"), ""),
+            "model_name": _as_str(llama_cfg.get("model_name"), "local-model"),
+            "ready_timeout_s": float(llama_cfg.get("ready_timeout_s") or 180.0),
+            "scan_ports": llama_cfg.get("scan_ports") or [8080, 8081, 8082, 8088, 8888, 11434],
+            "server_args": llama_cfg.get("server_args") or [],
+        },
         "fs": {
             "config_dir": paths["config_dir"],
             "data_dir": paths["data_dir"],
@@ -1854,6 +1866,118 @@ searxng_url = "http://127.0.0.1:8888"
 
 
 # ═══════════════════════════════════════════════════════════
+# run_pre_textual_setup()  — called from run_textual() BEFORE BuddyApp
+# ═══════════════════════════════════════════════════════════
+
+
+def run_pre_textual_setup() -> Optional[Dict[str, Any]]:
+    """
+    Run ALL interactive terminal I/O that cannot happen inside Textual.
+
+    Textual takes ownership of the terminal after BuddyApp.run(), so any
+    input() calls must happen here, before that point.
+
+    Handles:
+      • First-boot birth animation, matrix reveal
+      • First-boot wizard (name / language / web engine / STT / TTS)
+      • LLM model selection  (if no saved choice exists in buddy.toml)
+      • Vision selection     (if no saved choice exists; runs after model selection)
+
+    Returns the wizard_result dict on first boot (pass it to
+    BootstrapOptions(pre_wizard_result=...)), or None if everything was
+    already configured and no interaction was needed.
+    """
+    from buddy.buddy_core.model_selector import (
+        _load_saved_choice as _ms_load,
+        _run_interactive_selection,
+    )
+    from buddy.buddy_core.vision_selector import (
+        _load_saved_choice as _vs_load,
+        get_or_select_vision,
+    )
+
+    runtime = _load_runtime_config()
+    fs = runtime["fs"]
+    config_dir: Path = fs["config_dir"]
+    assets_dir: Path = fs["assets_dir"]
+    data_dir: Path = fs["data_dir"]
+    os_profile_file: Path = fs["os_profile_file"]
+
+    needs_first_boot = _is_first_boot(os_profile_file)
+    needs_model = _ms_load(config_dir) is None
+    needs_vision = _vs_load(config_dir) is None
+
+    if not needs_first_boot and not needs_model and not needs_vision:
+        return None  # fully configured — Textual can boot silently
+
+    if needs_first_boot:
+        # Birth animation + matrix reveal in clean terminal (pre-Textual)
+        _birth_animation()
+        _matrix_stream_reveal(duration=4)
+        _term_clear()
+        # Name is collected once inside the wizard (Q1) — no separate prompt here.
+
+    default_name = (
+        os.environ.get("USER")
+        or os.environ.get("USERNAME")
+        or "boss"
+    )
+
+    # Build a lightweight OS profile so wizard/model-selector shows accurate hardware info.
+    os_profile = _build_os_profile(
+        assets_dir=assets_dir,
+        data_dir=data_dir,
+        user_preferred_name=default_name,
+    )
+
+    wizard_result: Optional[Dict[str, Any]] = None
+
+    if needs_first_boot:
+        _term_clear()
+        wizard_result = _run_first_boot_wizard(
+            os_profile=os_profile,
+            show_ui=True,
+            default_name=default_name,
+        )
+        # Write config now so bootstrap finds it — bootstrap skips this when
+        # pre_wizard_result is set.
+        _write_first_boot_config(
+            config_dir,
+            user_name=wizard_result["user_name"],
+            language=wizard_result["language"],
+            web_engine=wizard_result["web_engine"],
+            stt=wizard_result["stt"],
+            tts=wizard_result["tts"],
+        )
+        _term_clear()
+
+    # ── Model selection ────────────────────────────────────────────────────────
+    # Run interactively if no saved choice; otherwise just load it.
+    # Vision selection needs the LLMOption so we always resolve chosen_model.
+    if needs_model:
+        chosen_model = _run_interactive_selection(os_profile, config_dir)
+        _term_clear()
+    else:
+        chosen_model = _ms_load(config_dir)
+
+    # ── Vision selection ───────────────────────────────────────────────────────
+    # Must run after model selection (depends on model's vision_capable flag).
+    # Runs interactively here; bootstrap's Step 7.5 finds the saved choice and
+    # skips prompting.
+    if needs_vision and chosen_model is not None:
+        get_or_select_vision(
+            chosen_model,
+            os_profile,
+            config_dir=config_dir,
+            show_ui=True,
+            force_reselect=False,
+        )
+        _term_clear()
+
+    return wizard_result  # None if only model/vision selection was needed
+
+
+# ═══════════════════════════════════════════════════════════
 # bootstrap()  — PUBLIC ENTRY POINT
 # ═══════════════════════════════════════════════════════════
 
@@ -1886,8 +2010,10 @@ def bootstrap(
     boot_report_file: Path = fs["boot_report_file"]
     llama_server_log: Path = fs["llama_server_log"]
 
+    # Only map fields that live in boot_cfg (toml-derived).
+    # Fields like pre_wizard_result have no toml key and must default to None.
     opts = options or BootstrapOptions(
-        **{k: boot_cfg[k] for k in BootstrapOptions.__dataclass_fields__}
+        **{k: boot_cfg[k] for k in BootstrapOptions.__dataclass_fields__ if k in boot_cfg}
     )
 
     # ── Progress callback helper (Textual BootScreen integration) ────────────
@@ -1898,10 +2024,12 @@ def bootstrap(
             except Exception:
                 pass
 
-    # When running under Textual (progress_cb provided), shadow the module-level
-    # _ui_ok / _ui_warn / _ui_fail / _ui_info so their results also reach the
-    # BootLog.  In terminal mode (progress_cb is None) the originals are used.
+    # When running under Textual (progress_cb provided):
+    #  · shadow _ui_* so messages reach the BootLog
+    #  · disable tqdm / HF progress bars (they write to stdout Textual owns)
     if progress_cb:
+        os.environ.setdefault("TQDM_DISABLE", "1")
+        os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
 
         def _ui_ok(msg: str) -> None:  # noqa: F811
             _pcb(msg, "ok")
@@ -1929,15 +2057,20 @@ def bootstrap(
     # ── STEP 2 · First-boot name prompt (legacy — full wizard runs at Step 6.6) ──
     # Fires ONCE, after matrix reveal so the terminal is clean.
     # On every subsequent boot this block is completely skipped.
+    # When pre_wizard_result is provided the prompt already ran pre-Textual.
     user_preferred_name: Optional[str] = None
 
     if _is_first_boot(os_profile_file):
-        if opts.show_boot_ui:
-            name_sp = Spinner(False, "")  # disabled — we only need the prompt method
-            user_preferred_name = name_sp.prompt_preferred_name(
-                default_if_empty=os.environ.get("USER") or "boss",
+        if opts.pre_wizard_result is not None:
+            # run_pre_textual_setup() already collected the name — no input() here.
+            user_preferred_name = opts.pre_wizard_result.get("user_name") or (
+                os.environ.get("USER") or os.environ.get("USERNAME") or "boss"
             )
-            _term_clear()
+        elif opts.show_boot_ui:
+            # Name is collected once in the wizard (Step 6.6, Q1) — skip here.
+            user_preferred_name = (
+                os.environ.get("USER") or os.environ.get("USERNAME") or "boss"
+            )
         else:
             # Headless first boot — use OS username as the default
             user_preferred_name = (
@@ -2044,26 +2177,37 @@ def bootstrap(
     # ── STEP 6.6 · First-boot wizard ─────────────────────────────────────────
     _wizard_result: Optional[Dict[str, Any]] = None
     if first_boot:
-        if opts.show_boot_ui:
-            _term_clear()
-        _wizard_result = _run_first_boot_wizard(
-            os_profile=os_profile,
-            show_ui=opts.show_boot_ui,
-            default_name=user_preferred_name
-            or (os.environ.get("USER") or os.environ.get("USERNAME") or "boss"),
-        )
-        user_preferred_name = _wizard_result["user_name"]
-        os_profile["user_preferred_name"] = user_preferred_name
-        pref_name = user_preferred_name
-        _write_first_boot_config(
-            config_dir,
-            user_name=_wizard_result["user_name"],
-            language=_wizard_result["language"],
-            web_engine=_wizard_result["web_engine"],
-            stt=_wizard_result["stt"],
-            tts=_wizard_result["tts"],
-        )
-        # Re-run OS profile write with confirmed name
+        if opts.pre_wizard_result is not None:
+            # run_pre_textual_setup() already ran the wizard and wrote the config.
+            # Re-use the collected results without prompting again.
+            _wizard_result = opts.pre_wizard_result
+            user_preferred_name = _wizard_result.get("user_name") or user_preferred_name
+            os_profile["user_preferred_name"] = user_preferred_name
+            pref_name = user_preferred_name or pref_name
+            _pcb(f"First-boot setup: welcome, {pref_name}!", "ok")
+        else:
+            if opts.show_boot_ui:
+                _term_clear()
+            _wizard_result = _run_first_boot_wizard(
+                os_profile=os_profile,
+                show_ui=opts.show_boot_ui,
+                default_name=user_preferred_name
+                or (os.environ.get("USER") or os.environ.get("USERNAME") or "boss"),
+            )
+            user_preferred_name = _wizard_result["user_name"]
+            os_profile["user_preferred_name"] = user_preferred_name
+            pref_name = user_preferred_name
+            _write_first_boot_config(
+                config_dir,
+                user_name=_wizard_result["user_name"],
+                language=_wizard_result["language"],
+                web_engine=_wizard_result["web_engine"],
+                stt=_wizard_result["stt"],
+                tts=_wizard_result["tts"],
+            )
+            if opts.show_boot_ui:
+                _term_clear()
+        # Re-run OS profile write with confirmed name (always — captures name from wizard)
         _ensure_os_profile(
             integrity,
             os_profile_file=os_profile_file,
@@ -2071,8 +2215,6 @@ def bootstrap(
             data_dir=data_dir,
             user_preferred_name=user_preferred_name,
         )
-        if opts.show_boot_ui:
-            _term_clear()
 
     # Resolve web / voice settings from wizard or config
     _feat_cfg = _sec(buddy_cfg, "features")
@@ -2095,12 +2237,25 @@ def bootstrap(
         show_ui=opts.show_boot_ui,
         force_reselect=opts.force_model_reselect,
     )
-    # Bake chosen model into llama_cfg
-    if not llama_cfg["model_gguf"]:
+    # [model_choice] is the single source of truth for the LLM filename.
+    # [llama].model_gguf is a manual escape hatch only — leave it empty in normal use.
+    # Priority: model_choice (chosen) > manual [llama].model_gguf override > hardware auto-pick
+    _manual_override = (llama_cfg.get("model_gguf") or "").strip()
+    if chosen.filename:
+        # Selection succeeded (interactive or auto-recommended) — use it
+        if _manual_override and _manual_override != chosen.filename:
+            _pcb(f"[llama].model_gguf override: {_manual_override}", "warn")
+            chosen.filename = _manual_override
+            chosen.hf_filename = _manual_override
         llama_cfg["model_gguf"] = chosen.filename
         llama_cfg["model_name"] = chosen.filename
-    else:
-        chosen.filename = llama_cfg["model_gguf"]
+    elif _manual_override:
+        # No selection result but a manual override is set — respect it
+        chosen.filename = _manual_override
+        chosen.hf_filename = _manual_override
+        llama_cfg["model_gguf"] = _manual_override
+        llama_cfg["model_name"] = _manual_override
+        _pcb(f"Using manual model override: {_manual_override}", "warn")
 
     # ── STEP 7.5 · Vision capability selection ───────────────────────────────
     _vision_cfg = _sec(buddy_cfg, "vision")
@@ -2130,13 +2285,20 @@ def bootstrap(
             _ui_ok("Vision: disabled (text-only mode)")
 
     # ── STEP 8 · LLM GGUF download ───────────────────────────────────────────
-    _pcb("Ensuring LLM model file")
+    _size_lbl = f"{chosen.size_gb:.1f} GB" if chosen.size_gb else ""
+    _pcb(f"LLM model: {chosen.label}  {_size_lbl}".strip(), "running")
+    if not _gguf_present(models_dir, chosen.filename):
+        _pcb(f"Downloading {chosen.filename} — this may take a while…", "running")
     llm_status = _ensure_llm_gguf(
         integrity,
         chosen=chosen,
         models_dir=models_dir,
         download_enabled=opts.download_models,
     )
+    if llm_status.get("ok"):
+        _pcb(f"LLM ready: {chosen.filename}", "ok")
+    else:
+        _pcb(f"LLM model not available: {chosen.filename}", "fail")
 
     # ── STEP 8.5 · mmproj download (vision only) ─────────────────────────────
     mmproj_path: Optional[Path] = None
@@ -2156,9 +2318,11 @@ def bootstrap(
             _ui_warn("mmproj not available — vision disabled for this session")
             vision_choice = VisionChoice(enabled=False)
 
-    # ── STEP 9 · ST model downloads (no Spinner — tqdm owns terminal) ─────────
-    _pcb("Checking embedding models")
+    # ── STEP 9 · ST model downloads (tqdm suppressed under Textual) ──────────
+    _pcb("Checking sentence-transformer models", "running")
     _ui_info("Checking sentence-transformer models…")
+    if not _st_present(embedder_model, data_dir):
+        _pcb(f"Downloading embedder: {embedder_model}…", "running")
     embedder_path = _ensure_st_model(
         embedder_model,
         data_dir=data_dir,
@@ -2166,6 +2330,10 @@ def bootstrap(
         label="embedder",
         download_enabled=opts.download_models,
     )
+    _pcb(f"Embedder {'ready' if embedder_path else 'unavailable'}: {embedder_model}",
+         "ok" if embedder_path else "warn")
+    if not _st_present(reranker_model, data_dir):
+        _pcb(f"Downloading reranker: {reranker_model}…", "running")
     reranker_path = _ensure_st_model(
         reranker_model,
         data_dir=data_dir,
@@ -2173,6 +2341,8 @@ def bootstrap(
         label="reranker",
         download_enabled=opts.download_models,
     )
+    _pcb(f"Reranker {'ready' if reranker_path else 'unavailable'}: {reranker_model}",
+         "ok" if reranker_path else "warn")
 
     # ── STEP 10 · Set env vars BEFORE first instantiation ────────────────────
     # EmbeddingProvider singleton reads BUDDY_EMBED_MODEL on first __new__().

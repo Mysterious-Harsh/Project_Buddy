@@ -2,11 +2,13 @@
 #
 # Hardware-aware LLM model selection.
 #
-# First boot  → interactive prompt (hardware summary + curated options) → saved to buddy.toml [model_choice]
+# First boot  → interactive prompt (hardware summary + all viable model+quant combos) → saved
 # Subsequent  → loads saved choice silently, no prompt
 # force_reselect=True → re-prompts even if a choice exists
 #
-# Model catalog priority within same tier: Qwen3.5 > Qwen3 > Qwen2.5
+# Model catalog: Qwen3.5 (newest, vision) > Qwen3 > Qwen2.5
+# Each model size is shown with ALL quantizations that fit the hardware.
+# Recommendation: largest model where Q5_K_M fits comfortably.
 #
 # Public API:
 #   get_or_select_llm_model(os_profile, config_dir, show_ui, force_reselect) -> LLMOption
@@ -18,7 +20,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from buddy.logger.logger import get_logger
 
@@ -40,6 +42,17 @@ class HardwareTier(str, Enum):
 # Family priority — higher = preferred when hardware allows
 _FAMILY_PRIORITY = {"Qwen3.5": 3, "Qwen3": 2, "Qwen2.5": 1}
 
+# Quant preference order for recommendation (balance of quality vs speed)
+# Q5_K_M = sweet spot, Q6_K = quality, Q4_K_M = minimum, Q8_0 = max quality
+_QUANT_QUALITY: Dict[str, int] = {
+    "Q8_0":   4,
+    "Q6_K":   3,
+    "Q5_K_M": 2,
+    "Q4_K_M": 1,
+    "IQ4_XS": 0,
+}
+_QUANT_DISPLAY_ORDER = ["Q4_K_M", "Q5_K_M", "Q6_K", "Q8_0"]
+
 
 @dataclass
 class LLMOption:
@@ -52,268 +65,296 @@ class LLMOption:
     size_gb: float        # approximate disk size
     min_ram_gb: float     # minimum RAM to run comfortably
     description: str = ""
-    vision_capable: bool = False  # True for Qwen3.5 (native multimodal, no VL suffix needed)
-    # mmproj (multimodal projector) — required for vision with llama-server
-    mmproj_hf_repo: str = ""       # HuggingFace repo for mmproj GGUF
-    mmproj_hf_filename: str = ""   # mmproj filename inside HF repo
-    mmproj_size_gb: float = 0.0    # approximate mmproj disk size (F16 ~0.67 GB)
+    vision_capable: bool = False
+    mmproj_hf_repo: str = ""
+    mmproj_hf_filename: str = ""
+    mmproj_size_gb: float = 0.0
+    # Internal: display_name groups quants together in the UI
+    display_name: str = ""   # e.g. "Qwen3.5-9B"
+    quant: str = ""          # e.g. "Q5_K_M"
 
 
 # ==========================================================
-# Quantization catalog  (Qwen3.5 — approximate sizes in GB)
-# Used by vision selector to show RAM comparison per quant.
+# Compact base-model + quant-spec definitions
 # ==========================================================
+
 
 @dataclass
-class QuantOption:
-    quant: str          # "Q4_K_M" | "Q5_K_M" | "Q6_K" | "Q8_0"
-    size_gb: float      # approximate GGUF size on disk
-    min_ram_gb: float   # minimum RAM to run comfortably
-    hf_filename: str    # filename inside the HF repo
+class _ModelBase:
+    """Family/size metadata, quant-agnostic."""
+    family: str
+    display_name: str          # "Qwen3.5-9B"
+    hf_repo: str
+    description: str
+    tier: HardwareTier
+    vision_capable: bool = False
+    mmproj_hf_repo: str = ""
+    mmproj_hf_filename: str = ""
+    mmproj_size_gb: float = 0.0
 
 
-# Model-size → quant options  (4B, 9B, 27B, 35B-A3B)
-QUANT_CATALOG: Dict[str, List[QuantOption]] = {
+@dataclass
+class _QuantSpec:
+    quant: str           # "Q4_K_M" | "Q5_K_M" | "Q6_K" | "Q8_0"
+    size_gb: float       # GGUF size on disk
+    min_ram_gb: float    # min RAM to run comfortably (model + KV cache + OS)
+    hf_filename: str     # exact filename in the HF repo
+
+
+# ── Quant specs per model ──────────────────────────────────────────────────────
+# min_ram_gb = size_gb + ~3 GB overhead (OS + KV cache at default ctx)
+
+_QUANT_SPECS: Dict[str, List[_QuantSpec]] = {
+
+    # ── Qwen3.5 (unsloth repos, CamelCase filenames) ────────────────────────
     "Qwen3.5-4B": [
-        QuantOption("Q4_K_M", 2.8,  5.0,  "Qwen3.5-4B-Q4_K_M.gguf"),
-        QuantOption("Q5_K_M", 3.4,  6.0,  "Qwen3.5-4B-Q5_K_M.gguf"),
-        QuantOption("Q6_K",   3.9,  6.5,  "Qwen3.5-4B-Q6_K.gguf"),
-        QuantOption("Q8_0",   5.2,  8.0,  "Qwen3.5-4B-Q8_0.gguf"),
+        _QuantSpec("Q4_K_M", 2.8,  5.5,  "Qwen3.5-4B-Q4_K_M.gguf"),
+        _QuantSpec("Q5_K_M", 3.4,  6.5,  "Qwen3.5-4B-Q5_K_M.gguf"),
+        _QuantSpec("Q6_K",   3.9,  7.0,  "Qwen3.5-4B-Q6_K.gguf"),
+        _QuantSpec("Q8_0",   5.2,  8.5,  "Qwen3.5-4B-Q8_0.gguf"),
     ],
     "Qwen3.5-9B": [
-        QuantOption("Q4_K_M", 5.5,  10.0, "Qwen3.5-9B-Q4_K_M.gguf"),
-        QuantOption("Q5_K_M", 6.2,  11.0, "Qwen3.5-9B-Q5_K_M.gguf"),
-        QuantOption("Q6_K",   7.4,  12.0, "Qwen3.5-9B-Q6_K.gguf"),
-        QuantOption("Q8_0",   9.8,  14.0, "Qwen3.5-9B-Q8_0.gguf"),
+        _QuantSpec("Q4_K_M", 5.5,  10.0, "Qwen3.5-9B-Q4_K_M.gguf"),
+        _QuantSpec("Q5_K_M", 6.2,  11.0, "Qwen3.5-9B-Q5_K_M.gguf"),
+        _QuantSpec("Q6_K",   7.4,  12.0, "Qwen3.5-9B-Q6_K.gguf"),
+        _QuantSpec("Q8_0",   9.8,  14.0, "Qwen3.5-9B-Q8_0.gguf"),
     ],
     "Qwen3.5-27B": [
-        QuantOption("Q4_K_M", 16.5, 20.0, "Qwen3.5-27B-Q4_K_M.gguf"),
-        QuantOption("Q5_K_M", 19.8, 24.0, "Qwen3.5-27B-Q5_K_M.gguf"),
-        QuantOption("Q6_K",   23.4, 28.0, "Qwen3.5-27B-Q6_K.gguf"),
-        QuantOption("Q8_0",   29.0, 34.0, "Qwen3.5-27B-Q8_0.gguf"),
+        _QuantSpec("Q4_K_M", 16.5, 20.0, "Qwen3.5-27B-Q4_K_M.gguf"),
+        _QuantSpec("Q5_K_M", 19.8, 24.0, "Qwen3.5-27B-Q5_K_M.gguf"),
+        _QuantSpec("Q6_K",   23.4, 28.0, "Qwen3.5-27B-Q6_K.gguf"),
+        _QuantSpec("Q8_0",   29.0, 34.0, "Qwen3.5-27B-Q8_0.gguf"),
     ],
     "Qwen3.5-35B-A3B": [
-        QuantOption("Q4_K_M", 22.0, 26.0, "Qwen3.5-35B-A3B-Q4_K_M.gguf"),
-        QuantOption("Q5_K_M", 26.0, 30.0, "Qwen3.5-35B-A3B-Q5_K_M.gguf"),
-        QuantOption("Q6_K",   30.0, 35.0, "Qwen3.5-35B-A3B-Q6_K.gguf"),
-        QuantOption("Q8_0",   40.0, 46.0, "Qwen3.5-35B-A3B-Q8_0.gguf"),
+        _QuantSpec("Q4_K_M", 22.0, 26.0, "Qwen3.5-35B-A3B-Q4_K_M.gguf"),
+        _QuantSpec("Q5_K_M", 26.0, 30.0, "Qwen3.5-35B-A3B-Q5_K_M.gguf"),
+        _QuantSpec("Q6_K",   30.0, 35.0, "Qwen3.5-35B-A3B-Q6_K.gguf"),
+        _QuantSpec("Q8_0",   40.0, 46.0, "Qwen3.5-35B-A3B-Q8_0.gguf"),
+    ],
+
+    # ── Qwen3 (official Qwen repos, CamelCase filenames) ───────────────────
+    "Qwen3-4B": [
+        _QuantSpec("Q4_K_M", 2.5,  5.5,  "Qwen3-4B-Q4_K_M.gguf"),
+        _QuantSpec("Q5_K_M", 3.0,  6.5,  "Qwen3-4B-Q5_K_M.gguf"),
+        _QuantSpec("Q6_K",   3.6,  7.0,  "Qwen3-4B-Q6_K.gguf"),
+        _QuantSpec("Q8_0",   4.7,  8.5,  "Qwen3-4B-Q8_0.gguf"),
+    ],
+    "Qwen3-8B": [
+        _QuantSpec("Q4_K_M", 4.9,  8.5,  "Qwen3-8B-Q4_K_M.gguf"),
+        _QuantSpec("Q5_K_M", 5.6,  9.5,  "Qwen3-8B-Q5_K_M.gguf"),
+        _QuantSpec("Q6_K",   6.6,  10.5, "Qwen3-8B-Q6_K.gguf"),
+        _QuantSpec("Q8_0",   8.8,  13.0, "Qwen3-8B-Q8_0.gguf"),
+    ],
+    "Qwen3-14B": [
+        _QuantSpec("Q4_K_M", 8.6,  13.0, "Qwen3-14B-Q4_K_M.gguf"),
+        _QuantSpec("Q5_K_M", 10.2, 15.0, "Qwen3-14B-Q5_K_M.gguf"),
+        _QuantSpec("Q6_K",   12.0, 17.0, "Qwen3-14B-Q6_K.gguf"),
+        _QuantSpec("Q8_0",   15.7, 20.0, "Qwen3-14B-Q8_0.gguf"),
+    ],
+    "Qwen3-30B-A3B": [
+        _QuantSpec("Q4_K_M", 17.5, 22.0, "Qwen3-30B-A3B-Q4_K_M.gguf"),
+        _QuantSpec("Q5_K_M", 20.5, 26.0, "Qwen3-30B-A3B-Q5_K_M.gguf"),
+        _QuantSpec("Q6_K",   24.0, 30.0, "Qwen3-30B-A3B-Q6_K.gguf"),
+    ],
+    "Qwen3-32B": [
+        _QuantSpec("Q4_K_M", 19.8, 24.0, "Qwen3-32B-Q4_K_M.gguf"),
+        _QuantSpec("Q5_K_M", 23.5, 28.0, "Qwen3-32B-Q5_K_M.gguf"),
+        _QuantSpec("Q6_K",   27.5, 33.0, "Qwen3-32B-Q6_K.gguf"),
+        _QuantSpec("Q8_0",   34.0, 40.0, "Qwen3-32B-Q8_0.gguf"),
+    ],
+
+    # ── Qwen2.5 (official Qwen repos, lowercase filenames) ─────────────────
+    "Qwen2.5-3B": [
+        _QuantSpec("Q4_K_M", 2.0,  5.0,  "qwen2.5-3b-instruct-q4_k_m.gguf"),
+        _QuantSpec("Q5_K_M", 2.4,  6.0,  "qwen2.5-3b-instruct-q5_k_m.gguf"),
+        _QuantSpec("Q6_K",   2.8,  6.5,  "qwen2.5-3b-instruct-q6_k.gguf"),
+        _QuantSpec("Q8_0",   3.7,  7.5,  "qwen2.5-3b-instruct-q8_0.gguf"),
+    ],
+    "Qwen2.5-7B": [
+        _QuantSpec("Q4_K_M", 4.4,  8.0,  "qwen2.5-7b-instruct-q4_k_m.gguf"),
+        _QuantSpec("Q5_K_M", 5.1,  9.0,  "qwen2.5-7b-instruct-q5_k_m.gguf"),
+        _QuantSpec("Q6_K",   6.0,  10.0, "qwen2.5-7b-instruct-q6_k.gguf"),
+        _QuantSpec("Q8_0",   7.7,  12.0, "qwen2.5-7b-instruct-q8_0.gguf"),
+    ],
+    "Qwen2.5-14B": [
+        _QuantSpec("Q4_K_M", 8.6,  13.0, "qwen2.5-14b-instruct-q4_k_m.gguf"),
+        _QuantSpec("Q5_K_M", 10.2, 15.0, "qwen2.5-14b-instruct-q5_k_m.gguf"),
+        _QuantSpec("Q6_K",   12.0, 17.0, "qwen2.5-14b-instruct-q6_k.gguf"),
+        _QuantSpec("Q8_0",   15.7, 20.0, "qwen2.5-14b-instruct-q8_0.gguf"),
+    ],
+    "Qwen2.5-32B": [
+        _QuantSpec("Q4_K_M", 19.8, 24.0, "qwen2.5-32b-instruct-q4_k_m.gguf"),
+        _QuantSpec("Q5_K_M", 23.5, 28.0, "qwen2.5-32b-instruct-q5_k_m.gguf"),
+        _QuantSpec("Q6_K",   27.5, 33.0, "qwen2.5-32b-instruct-q6_k.gguf"),
+    ],
+    "Qwen2.5-72B": [
+        _QuantSpec("Q4_K_M", 43.0, 48.0, "qwen2.5-72b-instruct-q4_k_m.gguf"),
     ],
 }
 
-# mmproj sizes per Qwen3.5 model (F16 variant, each model has its own mmproj):
-#   4B  → 0.67 GB  (672 MB)
-#   9B  → 0.90 GB  (918 MB)
-#   27B → 0.93 GB  (928 MB)
-#   35B-A3B → 0.88 GB  (899 MB)
-# Each model's mmproj_size_gb is set in its LLMOption entry above.
-# This default is used as a fallback only (e.g. unknown/custom model).
-QWEN35_MMPROJ_SIZE_GB = 0.67        # fallback default — use LLMOption.mmproj_size_gb
-QWEN35_MMPROJ_HF_FILENAME = "mmproj-F16.gguf"
+# ── Base model definitions (order = display preference within each family) ────
 
+_MODEL_BASES: List[_ModelBase] = [
 
-# ==========================================================
-# Curated model catalog
-# Order within each tier: Qwen3.5 first, then Qwen3, then Qwen2.5
-# ==========================================================
-
-QWEN_MODEL_CATALOG: List[LLMOption] = [
-
-    # ── LOW tier  (≤ 8 GB effective RAM) ──────────────────────────────────
-
-    LLMOption(
-        tier=HardwareTier.LOW,
-        family="Qwen3.5",
-        filename="Qwen3.5-4B-Q4_K_M.gguf",
+    # ── Qwen3.5 (newest, vision-capable) ───────────────────────────────────
+    _ModelBase(
+        family="Qwen3.5", display_name="Qwen3.5-4B",
         hf_repo="unsloth/Qwen3.5-4B-GGUF",
-        hf_filename="Qwen3.5-4B-Q4_K_M.gguf",
-        label="Qwen3.5-4B   Q4_K_M    latest·vision  (5 GB RAM min)",
-        size_gb=2.8,
-        min_ram_gb=5.0,
-        description="Newest family. Vision-capable. Good for 6–8 GB systems.",
+        description="Newest family, vision-capable. Ideal for 6–10 GB systems.",
+        tier=HardwareTier.LOW,
         vision_capable=True,
         mmproj_hf_repo="unsloth/Qwen3.5-4B-GGUF",
         mmproj_hf_filename="mmproj-F16.gguf",
         mmproj_size_gb=0.67,
     ),
-    LLMOption(
-        tier=HardwareTier.LOW,
-        family="Qwen3",
-        filename="Qwen3-4B-Q4_K_M.gguf",
-        hf_repo="Qwen/Qwen3-4B-GGUF",
-        hf_filename="Qwen3-4B-Q4_K_M.gguf",
-        label="Qwen3-4B   Q4_K_M    lightweight    (6 GB RAM min)",
-        size_gb=2.5,
-        min_ram_gb=6.0,
-        description="Compact. Good for 6–8 GB systems. Reasonable quality.",
-    ),
-    LLMOption(
-        tier=HardwareTier.LOW,
-        family="Qwen3",
-        filename="Qwen3-8B-Q4_K_M.gguf",
-        hf_repo="Qwen/Qwen3-8B-GGUF",
-        hf_filename="Qwen3-8B-Q4_K_M.gguf",
-        label="Qwen3-8B   Q4_K_M    fast response  (8 GB RAM min)",
-        size_gb=4.9,
-        min_ram_gb=8.0,
-        description="Best Qwen3 for 8 GB systems. Snappy, solid quality.",
-    ),
-    LLMOption(
-        tier=HardwareTier.LOW,
-        family="Qwen2.5",
-        filename="Qwen2.5-7B-Instruct-Q4_K_M.gguf",
-        hf_repo="Qwen/Qwen2.5-7B-Instruct-GGUF",
-        hf_filename="qwen2.5-7b-instruct-q4_k_m.gguf",
-        label="Qwen2.5-7B Q4_K_M    fallback       (8 GB RAM min)",
-        size_gb=4.4,
-        min_ram_gb=8.0,
-        description="Qwen2.5 fallback for 8 GB. Solid instruction following.",
-    ),
-    LLMOption(
-        tier=HardwareTier.LOW,
-        family="Qwen2.5",
-        filename="Qwen2.5-3B-Instruct-Q4_K_M.gguf",
-        hf_repo="Qwen/Qwen2.5-3B-Instruct-GGUF",
-        hf_filename="qwen2.5-3b-instruct-q4_k_m.gguf",
-        label="Qwen2.5-3B Q4_K_M    minimal        (4 GB RAM min)",
-        size_gb=2.0,
-        min_ram_gb=4.0,
-        description="Absolute minimum. 4 GB RAM. Limited capability.",
-    ),
-
-    # ── MID tier  (9–16 GB effective RAM) ─────────────────────────────────
-
-    LLMOption(
-        tier=HardwareTier.MID,
-        family="Qwen3.5",
-        filename="Qwen3.5-9B-Q4_K_M.gguf",
+    _ModelBase(
+        family="Qwen3.5", display_name="Qwen3.5-9B",
         hf_repo="unsloth/Qwen3.5-9B-GGUF",
-        hf_filename="Qwen3.5-9B-Q4_K_M.gguf",
-        label="Qwen3.5-9B  Q4_K_M   latest·fast    (10 GB RAM min)",
-        size_gb=5.5,
-        min_ram_gb=10.0,
-        description="Newest family. Great for 10–16 GB. Fast and capable.",
+        description="Best balance of quality and speed for 10–18 GB systems.",
+        tier=HardwareTier.MID,
         vision_capable=True,
         mmproj_hf_repo="unsloth/Qwen3.5-9B-GGUF",
         mmproj_hf_filename="mmproj-F16.gguf",
         mmproj_size_gb=0.90,
     ),
-    LLMOption(
-        tier=HardwareTier.MID,
-        family="Qwen3",
-        filename="Qwen3-14B-Q4_K_M.gguf",
-        hf_repo="Qwen/Qwen3-14B-GGUF",
-        hf_filename="Qwen3-14B-Q4_K_M.gguf",
-        label="Qwen3-14B  Q4_K_M    balanced       (16 GB RAM min)",
-        size_gb=8.6,
-        min_ram_gb=16.0,
-        description="Best quality/speed for 16 GB unified memory.",
-    ),
-    LLMOption(
-        tier=HardwareTier.MID,
-        family="Qwen2.5",
-        filename="Qwen2.5-14B-Instruct-Q4_K_M.gguf",
-        hf_repo="Qwen/Qwen2.5-14B-Instruct-GGUF",
-        hf_filename="qwen2.5-14b-instruct-q4_k_m.gguf",
-        label="Qwen2.5-14B Q4_K_M   fallback       (16 GB RAM min)",
-        size_gb=8.6,
-        min_ram_gb=16.0,
-        description="Qwen2.5 fallback for 16 GB. Strong instruction quality.",
-    ),
-
-    # ── HIGH tier  (17–40 GB effective RAM) ───────────────────────────────
-
-    LLMOption(
-        tier=HardwareTier.HIGH,
-        family="Qwen3.5",
-        filename="Qwen3.5-27B-Q4_K_M.gguf",
+    _ModelBase(
+        family="Qwen3.5", display_name="Qwen3.5-27B",
         hf_repo="unsloth/Qwen3.5-27B-GGUF",
-        hf_filename="Qwen3.5-27B-Q4_K_M.gguf",
-        label="Qwen3.5-27B Q4_K_M   latest·capable (32 GB RAM min)",
-        size_gb=16.5,
-        min_ram_gb=32.0,
-        description="Newest family at 27B. Excellent reasoning for 32 GB systems.",
+        description="Excellent reasoning and vision for 20–36 GB systems.",
+        tier=HardwareTier.HIGH,
         vision_capable=True,
         mmproj_hf_repo="unsloth/Qwen3.5-27B-GGUF",
         mmproj_hf_filename="mmproj-F16.gguf",
         mmproj_size_gb=0.93,
     ),
-    LLMOption(
-        tier=HardwareTier.HIGH,
-        family="Qwen3",
-        filename="Qwen3-32B-Q4_K_M.gguf",
-        hf_repo="Qwen/Qwen3-32B-GGUF",
-        hf_filename="Qwen3-32B-Q4_K_M.gguf",
-        label="Qwen3-32B  Q4_K_M    powerful       (32 GB RAM min)",
-        size_gb=19.8,
-        min_ram_gb=32.0,
-        description="32B Qwen3. Near-GPT4 reasoning for high-memory Macs.",
-    ),
-    LLMOption(
-        tier=HardwareTier.HIGH,
-        family="Qwen3",
-        filename="Qwen3-14B-Q8_0.gguf",
-        hf_repo="Qwen/Qwen3-14B-GGUF",
-        hf_filename="Qwen3-14B-Q8_0.gguf",
-        label="Qwen3-14B  Q8_0      high precision (32 GB RAM min)",
-        size_gb=15.7,
-        min_ram_gb=32.0,
-        description="Higher precision 14B. Sharper reasoning on 32 GB systems.",
-    ),
-    LLMOption(
-        tier=HardwareTier.HIGH,
-        family="Qwen2.5",
-        filename="Qwen2.5-32B-Instruct-Q4_K_M.gguf",
-        hf_repo="Qwen/Qwen2.5-32B-Instruct-GGUF",
-        hf_filename="qwen2.5-32b-instruct-q4_k_m.gguf",
-        label="Qwen2.5-32B Q4_K_M   fallback       (32 GB RAM min)",
-        size_gb=19.8,
-        min_ram_gb=32.0,
-        description="Qwen2.5 32B fallback. Strong baseline for 32 GB.",
-    ),
-
-    # ── ULTRA tier  (40 GB+ effective RAM) ────────────────────────────────
-
-    LLMOption(
-        tier=HardwareTier.ULTRA,
-        family="Qwen3.5",
-        filename="Qwen3.5-35B-A3B-Q4_K_M.gguf",
+    _ModelBase(
+        family="Qwen3.5", display_name="Qwen3.5-35B-A3B",
         hf_repo="unsloth/Qwen3.5-35B-A3B-GGUF",
-        hf_filename="Qwen3.5-35B-A3B-Q4_K_M.gguf",
-        label="Qwen3.5-35B-A3B Q4   latest·MoE     (24 GB RAM min)",
-        size_gb=22.0,
-        min_ram_gb=24.0,
-        description="MoE 35B — active params 3B. Fast inference, high capability.",
+        description="MoE 35B (3B active). Fast inference, high capability. Needs 26 GB+.",
+        tier=HardwareTier.ULTRA,
         vision_capable=True,
         mmproj_hf_repo="unsloth/Qwen3.5-35B-A3B-GGUF",
         mmproj_hf_filename="mmproj-F16.gguf",
         mmproj_size_gb=0.88,
     ),
-    LLMOption(
-        tier=HardwareTier.ULTRA,
-        family="Qwen3",
-        filename="Qwen3-30B-A3B-Q4_K_M.gguf",
-        hf_repo="Qwen/Qwen3-30B-A3B-GGUF",
-        hf_filename="Qwen3-30B-A3B-Q4_K_M.gguf",
-        label="Qwen3-30B-A3B Q4    MoE·efficient  (32 GB RAM min)",
-        size_gb=17.5,
-        min_ram_gb=32.0,
-        description="MoE 30B — active params 3B. Fast, smart, memory efficient.",
+
+    # ── Qwen3 ───────────────────────────────────────────────────────────────
+    _ModelBase(
+        family="Qwen3", display_name="Qwen3-4B",
+        hf_repo="Qwen/Qwen3-4B-GGUF",
+        description="Compact and capable. Good for 6–10 GB systems.",
+        tier=HardwareTier.LOW,
     ),
-    LLMOption(
-        tier=HardwareTier.ULTRA,
-        family="Qwen2.5",
-        filename="Qwen2.5-72B-Instruct-Q4_K_M.gguf",
+    _ModelBase(
+        family="Qwen3", display_name="Qwen3-8B",
+        hf_repo="Qwen/Qwen3-8B-GGUF",
+        description="Strong reasoning for 9–14 GB systems.",
+        tier=HardwareTier.LOW,
+    ),
+    _ModelBase(
+        family="Qwen3", display_name="Qwen3-14B",
+        hf_repo="Qwen/Qwen3-14B-GGUF",
+        description="Best quality/speed Qwen3 for 13–22 GB systems.",
+        tier=HardwareTier.MID,
+    ),
+    _ModelBase(
+        family="Qwen3", display_name="Qwen3-30B-A3B",
+        hf_repo="Qwen/Qwen3-30B-A3B-GGUF",
+        description="MoE 30B (3B active). Efficient for 22–32 GB systems.",
+        tier=HardwareTier.HIGH,
+    ),
+    _ModelBase(
+        family="Qwen3", display_name="Qwen3-32B",
+        hf_repo="Qwen/Qwen3-32B-GGUF",
+        description="Near-GPT-4 reasoning. For 24–42 GB systems.",
+        tier=HardwareTier.HIGH,
+    ),
+
+    # ── Qwen2.5 (stable, strong baseline) ──────────────────────────────────
+    _ModelBase(
+        family="Qwen2.5", display_name="Qwen2.5-3B",
+        hf_repo="Qwen/Qwen2.5-3B-Instruct-GGUF",
+        description="Minimal. For very constrained systems (4–6 GB).",
+        tier=HardwareTier.LOW,
+    ),
+    _ModelBase(
+        family="Qwen2.5", display_name="Qwen2.5-7B",
+        hf_repo="Qwen/Qwen2.5-7B-Instruct-GGUF",
+        description="Solid instruction following for 8–13 GB systems.",
+        tier=HardwareTier.LOW,
+    ),
+    _ModelBase(
+        family="Qwen2.5", display_name="Qwen2.5-14B",
+        hf_repo="Qwen/Qwen2.5-14B-Instruct-GGUF",
+        description="Strong Qwen2.5 baseline for 13–22 GB systems.",
+        tier=HardwareTier.MID,
+    ),
+    _ModelBase(
+        family="Qwen2.5", display_name="Qwen2.5-32B",
+        hf_repo="Qwen/Qwen2.5-32B-Instruct-GGUF",
+        description="Maximum Qwen2.5 quality for 24–36 GB systems.",
+        tier=HardwareTier.HIGH,
+    ),
+    _ModelBase(
+        family="Qwen2.5", display_name="Qwen2.5-72B",
         hf_repo="Qwen/Qwen2.5-72B-Instruct-GGUF",
-        hf_filename="qwen2.5-72b-instruct-q4_k_m.gguf",
-        label="Qwen2.5-72B Q4_K_M  maximum        (48 GB RAM min)",
-        size_gb=43.0,
-        min_ram_gb=48.0,
-        description="Largest model. Mac Pro/Studio Ultra only. Maximum capability.",
+        description="Largest model. Mac Pro / Studio Ultra only (48 GB+).",
+        tier=HardwareTier.ULTRA,
     ),
 ]
 
-# Backward-compat alias (boot.py uses QWEN3_OPTIONS in _load_saved_choice)
+
+def _make_option(base: _ModelBase, spec: _QuantSpec) -> LLMOption:
+    label = (
+        f"{base.display_name:<20s} {spec.quant:<8s}"
+        f"  {spec.size_gb:>4.1f} GB disk  min {spec.min_ram_gb:.0f} GB RAM"
+    )
+    return LLMOption(
+        tier=base.tier,
+        family=base.family,
+        filename=spec.hf_filename,
+        hf_repo=base.hf_repo,
+        hf_filename=spec.hf_filename,
+        label=label,
+        size_gb=spec.size_gb,
+        min_ram_gb=spec.min_ram_gb,
+        description=base.description,
+        vision_capable=base.vision_capable,
+        mmproj_hf_repo=base.mmproj_hf_repo,
+        mmproj_hf_filename=base.mmproj_hf_filename,
+        mmproj_size_gb=base.mmproj_size_gb,
+        display_name=base.display_name,
+        quant=spec.quant,
+    )
+
+
+# Full flat catalog — all models × all quants. Generated once at import.
+QWEN_MODEL_CATALOG: List[LLMOption] = [
+    _make_option(base, spec)
+    for base in _MODEL_BASES
+    for spec in _QUANT_SPECS.get(base.display_name, [])
+]
+
+# Backward-compat alias
 QWEN3_OPTIONS = QWEN_MODEL_CATALOG
+
+# QUANT_CATALOG: kept for vision_selector (Qwen3.5 quant sizes for RAM comparison).
+# Maps "Qwen3.5-{size}" → list of QuantOption (same data as _QUANT_SPECS above).
+@dataclass
+class QuantOption:
+    quant: str
+    size_gb: float
+    min_ram_gb: float
+    hf_filename: str
+
+QUANT_CATALOG: Dict[str, List[QuantOption]] = {
+    key: [QuantOption(s.quant, s.size_gb, s.min_ram_gb, s.hf_filename) for s in specs]
+    for key, specs in _QUANT_SPECS.items()
+    if key.startswith("Qwen3.5")
+}
+
+QWEN35_MMPROJ_SIZE_GB = 0.67       # fallback default
+QWEN35_MMPROJ_HF_FILENAME = "mmproj-F16.gguf"
 
 
 # ==========================================================
@@ -321,28 +362,22 @@ QWEN3_OPTIONS = QWEN_MODEL_CATALOG
 # ==========================================================
 
 
-def score_hardware(os_profile: Dict[str, Any]) -> HardwareTier:
-    """
-    Derive a HardwareTier from the OS profile.
-
-    Apple Silicon  → unified memory = both RAM and VRAM → use total RAM.
-    Discrete GPU   → use VRAM; fall back to system RAM if not reported.
-    CPU-only       → use system RAM.
-    """
-    gpu = os_profile.get("gpu", {}) or {}
-    ram = os_profile.get("ram", {}) or {}
-
+def _effective_ram(os_profile: Dict[str, Any]) -> float:
+    """Return effective RAM in GB for model sizing decisions."""
+    gpu  = os_profile.get("gpu",  {}) or {}
+    ram  = os_profile.get("ram",  {}) or {}
     total_ram_gb: float = float(ram.get("total_gb") or 0)
     backend: str = str(gpu.get("backend") or "cpu_only")
-
     if backend == "metal":
-        effective_gb = total_ram_gb
-    elif backend in ("cuda", "rocm"):
+        return total_ram_gb                       # Apple Silicon — unified memory
+    if backend in ("cuda", "rocm"):
         vram_gb = float(gpu.get("total_vram_gb") or 0)
-        effective_gb = vram_gb if vram_gb > 0 else total_ram_gb
-    else:
-        effective_gb = total_ram_gb
+        return vram_gb if vram_gb > 0 else total_ram_gb
+    return total_ram_gb                           # CPU-only
 
+
+def score_hardware(os_profile: Dict[str, Any]) -> HardwareTier:
+    effective_gb = _effective_ram(os_profile)
     if effective_gb >= 40:
         return HardwareTier.ULTRA
     if effective_gb >= 17:
@@ -354,59 +389,85 @@ def score_hardware(os_profile: Dict[str, Any]) -> HardwareTier:
 
 def recommend_llm(os_profile: Dict[str, Any]) -> LLMOption:
     """
-    Return the best LLMOption the hardware can run.
+    Return the best-balanced LLMOption for this hardware.
 
-    Within each tier, prefers newest family: Qwen3.5 > Qwen3 > Qwen2.5.
-    Walks from detected tier downward until a fitting option is found.
+    Strategy:
+      1. Compute usable RAM = effective_ram - overhead (3 GB min, or 12%).
+      2. Among options that fit (min_ram_gb ≤ effective_ram), prefer:
+           - Newest family (Qwen3.5 > Qwen3 > Qwen2.5)
+           - Largest model that fits with headroom
+           - Q5_K_M if it fits comfortably, otherwise Q4_K_M
     """
-    ram_gb = float(os_profile.get("ram", {}).get("total_gb") or 0)
-    tier = score_hardware(os_profile)
-    tier_order = [
-        HardwareTier.ULTRA,
-        HardwareTier.HIGH,
-        HardwareTier.MID,
-        HardwareTier.LOW,
-    ]
-    start = tier_order.index(tier)
+    effective_gb = _effective_ram(os_profile)
+    overhead_gb  = max(3.0, effective_gb * 0.12)
+    usable_gb    = effective_gb - overhead_gb
 
-    for t in tier_order[start:]:
-        candidates = [
-            opt for opt in QWEN_MODEL_CATALOG
-            if opt.tier == t and ram_gb >= opt.min_ram_gb
-        ]
-        if candidates:
-            # Sort by family priority descending — Qwen3.5 first
-            candidates.sort(
-                key=lambda o: _FAMILY_PRIORITY.get(o.family, 0),
-                reverse=True,
-            )
-            return candidates[0]
+    # All options that will actually run (may be tight)
+    viable = [o for o in QWEN_MODEL_CATALOG if o.min_ram_gb <= effective_gb]
+    if not viable:
+        return QWEN_MODEL_CATALOG[0]
 
-    return QWEN_MODEL_CATALOG[0]  # absolute fallback
+    # Preferred quants in order: Q5_K_M (balanced), Q6_K (quality), Q4_K_M (fast)
+    preferred_quants = ["Q5_K_M", "Q6_K", "Q4_K_M", "Q8_0"]
+
+    # Group by (family_priority, model_size_score) descending, pick best quant per model
+    best: Optional[LLMOption] = None
+    best_score: Tuple = (-1, -1, -1)
+
+    for opt in viable:
+        family_score = _FAMILY_PRIORITY.get(opt.family, 0)
+        # Use size_gb as a proxy for model quality (bigger = better capability)
+        # Use Q4_K_M size as the canonical model size (strip quant variation)
+        q4_size = next(
+            (o.size_gb for o in QWEN_MODEL_CATALOG
+             if o.display_name == opt.display_name and o.quant == "Q4_K_M"),
+            opt.size_gb,
+        )
+        quant_quality = _QUANT_QUALITY.get(opt.quant, 0)
+        # Prefer options that fit comfortably (within usable_gb)
+        comfortable = 1 if opt.min_ram_gb <= usable_gb else 0
+        # Prefer specific quants in our preferred order
+        quant_pref = len(preferred_quants) - preferred_quants.index(opt.quant) \
+            if opt.quant in preferred_quants else 0
+
+        score = (comfortable, family_score, q4_size, quant_pref, quant_quality)
+        if score > best_score:
+            best_score = score
+            best = opt
+
+    return best or viable[0]
 
 
 def viable_options(os_profile: Dict[str, Any]) -> List[LLMOption]:
     """
-    Return all models the hardware can run, sorted for display.
-    Order: tier (HIGH→LOW), then family priority (Qwen3.5→Qwen3→Qwen2.5).
+    Return all model+quant combinations the hardware can run, sorted for display.
+
+    Sort order: family priority (Qwen3.5→Qwen3→Qwen2.5),
+                then model size descending within family,
+                then quant quality ascending within model (Q4→Q5→Q6→Q8).
     """
-    ram_gb = float(os_profile.get("ram", {}).get("total_gb") or 0)
-    tier_rank = {
-        HardwareTier.ULTRA: 3,
-        HardwareTier.HIGH: 2,
-        HardwareTier.MID: 1,
-        HardwareTier.LOW: 0,
-    }
-    opts = [o for o in QWEN_MODEL_CATALOG if ram_gb >= o.min_ram_gb]
+    effective_gb = _effective_ram(os_profile)
+    opts = [o for o in QWEN_MODEL_CATALOG if o.min_ram_gb <= effective_gb]
     if not opts:
-        opts = [QWEN_MODEL_CATALOG[0]]
-    opts.sort(
-        key=lambda o: (
-            tier_rank.get(o.tier, 0),
-            _FAMILY_PRIORITY.get(o.family, 0),
-        ),
-        reverse=True,
-    )
+        # Absolute fallback: show the smallest model at Q4_K_M
+        fallback = next(
+            (o for o in QWEN_MODEL_CATALOG if o.quant == "Q4_K_M"),
+            QWEN_MODEL_CATALOG[0],
+        )
+        return [fallback]
+
+    def _sort_key(o: LLMOption):
+        family_score = _FAMILY_PRIORITY.get(o.family, 0)
+        q4_size = next(
+            (x.size_gb for x in QWEN_MODEL_CATALOG
+             if x.display_name == o.display_name and x.quant == "Q4_K_M"),
+            o.size_gb,
+        )
+        quant_order = _QUANT_DISPLAY_ORDER.index(o.quant) \
+            if o.quant in _QUANT_DISPLAY_ORDER else len(_QUANT_DISPLAY_ORDER)
+        return (family_score, q4_size, -quant_order)  # quants ascending within model
+
+    opts.sort(key=_sort_key, reverse=True)
     return opts
 
 
@@ -414,8 +475,8 @@ def viable_options(os_profile: Dict[str, Any]) -> List[LLMOption]:
 # Persistence
 # ==========================================================
 
+
 def _toml_val(v: Any) -> str:
-    """Serialize a scalar value to inline TOML."""
     if isinstance(v, bool):
         return "true" if v else "false"
     if isinstance(v, (int, float)):
@@ -431,7 +492,6 @@ def _write_toml_section(toml_path: Path, section: str, data: Dict[str, Any]) -> 
         text = toml_path.read_text(encoding="utf-8")
     except FileNotFoundError:
         text = ""
-    # Remove existing section (from [section] up to the next [header] or EOF)
     text = _re.sub(rf"\n*(# auto-managed\n)?\[{_re.escape(section)}\][^\[]*", "", text)
     text = text.rstrip() + "\n"
     lines = [f"\n# auto-managed\n[{section}]"]
@@ -453,10 +513,10 @@ def _load_saved_choice(config_dir: Path) -> Optional[LLMOption]:
         saved = raw.get("model_choice", {})
         if not isinstance(saved, dict) or not saved.get("filename"):
             return None
-        # Match against full catalog
+        # Match by filename against full catalog
         for opt in QWEN_MODEL_CATALOG:
             if opt.filename == saved["filename"]:
-                logger.info("Loaded saved model choice: %s", opt.label)
+                logger.info("Loaded saved model choice: %s  %s", opt.display_name, opt.quant)
                 return opt
         # Unknown / custom GGUF — reconstruct synthetic option
         return LLMOption(
@@ -469,6 +529,8 @@ def _load_saved_choice(config_dir: Path) -> Optional[LLMOption]:
             size_gb=0.0,
             min_ram_gb=0.0,
             description="Custom model (user-defined)",
+            display_name=saved.get("label", saved["filename"]),
+            quant="",
         )
     except Exception as ex:
         logger.warning("Could not load model_choice from buddy.toml: %r", ex)
@@ -478,18 +540,20 @@ def _load_saved_choice(config_dir: Path) -> Optional[LLMOption]:
 def _save_choice(config_dir: Path, option: LLMOption) -> None:
     toml_path = config_dir / "buddy.toml"
     data = {
-        "filename": option.filename,
-        "hf_repo": option.hf_repo,
+        "filename":  option.filename,
+        "hf_repo":   option.hf_repo,
         "hf_filename": option.hf_filename,
-        "label": option.label,
-        "family": option.family,
-        "tier": option.tier.value,
-        "saved_at": datetime.utcnow().isoformat() + "Z",
+        "label":     option.label,
+        "family":    option.family,
+        "display_name": option.display_name,
+        "quant":     option.quant,
+        "tier":      option.tier.value,
+        "saved_at":  datetime.utcnow().isoformat() + "Z",
     }
     try:
         toml_path.parent.mkdir(parents=True, exist_ok=True)
         _write_toml_section(toml_path, "model_choice", data)
-        logger.info("Saved model choice: %s", option.filename)
+        logger.info("Saved model choice: %s %s", option.display_name, option.quant)
     except Exception as ex:
         logger.warning("Could not save model_choice to buddy.toml: %r", ex)
 
@@ -507,19 +571,13 @@ def _c_local(s: str, color: str) -> str:
         return s
 
 
-def _center_local(s: str, w: int) -> str:
-    try:
-        from buddy.ui.boot_ui import _center_visible
-        return _center_visible(s, w)
-    except Exception:
-        return s
-
-
-_W = 72  # box inner width
+_W = 76  # box inner width
 
 
 def _box(text: str = "") -> str:
-    return f"  ║  {text:<{_W}}║"
+    visible = len(text.encode("ascii", errors="ignore"))
+    pad = max(0, _W - visible)
+    return f"  ║  {text}{' ' * pad}║"
 
 
 def _box_top() -> str:
@@ -534,10 +592,11 @@ def _box_bot() -> str:
     return f"  ╚{'═' * (_W + 2)}╝"
 
 
-def _box_family(name: str) -> str:
-    label = f"  ─── {name} "
-    pad = _W + 2 - len(label)
-    return f"  ║{label}{'─' * max(1, pad)}║"
+def _box_model(name: str, description: str) -> str:
+    label = f"  ─── {name}  "
+    desc  = _c_local(description, "dim")
+    pad   = _W + 2 - len(label) - len(description)
+    return f"  ║{label}{desc}{' ' * max(0, pad)}║"
 
 
 def _print_selection_ui(
@@ -545,11 +604,12 @@ def _print_selection_ui(
     options: List[LLMOption],
     recommended: LLMOption,
 ) -> None:
-    gpu  = os_profile.get("gpu",   {}) or {}
-    ram  = os_profile.get("ram",   {}) or {}
-    cpu  = os_profile.get("cpu",   {}) or {}
+    gpu   = os_profile.get("gpu",   {}) or {}
+    ram   = os_profile.get("ram",   {}) or {}
+    cpu   = os_profile.get("cpu",   {}) or {}
     macos = os_profile.get("macos", {}) or {}
 
+    effective_gb = _effective_ram(os_profile)
     ram_gb   = ram.get("total_gb", "?")
     cores    = cpu.get("logical_cores", "?")
     gpu_name = gpu.get("name", "unknown")
@@ -564,31 +624,56 @@ def _print_selection_ui(
     print(_box_div())
     print(_box(f"  GPU      {_c_local(str(gpu_name), 'warn')}"))
     print(_box(f"  Backend  {_c_local(gpu_back, 'dim')}  ({vram_str})"))
-    print(_box(f"  RAM      {_c_local(str(ram_gb) + ' GB', 'warn')}"))
+    print(_box(f"  RAM      {_c_local(str(ram_gb) + ' GB total', 'warn')}"
+               f"  ·  {_c_local(str(round(effective_gb, 1)) + ' GB effective', 'ok')}"))
     print(_box(f"  Cores    {cores}"))
     if mac_ver:
         print(_box(f"  macOS    {mac_ver}"))
     print(_box_div())
-    print(_box("  " + _c_local("Choose your LLM model:", "tagline")))
+    print(_box("  " + _c_local("Choose your LLM:", "tagline")
+               + "  " + _c_local("(↑ better quality / ↑ higher quant = more RAM used)", "dim")))
     print(_box())
 
-    # Group by family for display
+    # Group by model display_name — show quants as sub-entries
+    seen_models: List[str] = []
     seen_families: List[str] = []
+
     for i, opt in enumerate(options, start=1):
+        # Family divider
         if opt.family not in seen_families:
             seen_families.append(opt.family)
-            print(_box_family(_c_local(opt.family, "accent")))
+            fam_label = opt.family
+            if opt.family == "Qwen3.5":
+                fam_label += "  " + _c_local("(newest · vision-capable)", "dim")
+            elif opt.family == "Qwen3":
+                fam_label += "  " + _c_local("(strong reasoning)", "dim")
+            else:
+                fam_label += "  " + _c_local("(stable baseline)", "dim")
+            pad = _W + 2 - 4 - len(opt.family) - 2
+            print(f"  ║  {_c_local('─── ' + fam_label, 'accent')}"
+                  f"{'─' * max(1, _W - 5 - len(opt.family) - 2 - (20 if opt.family == 'Qwen3.5' else 18 if opt.family == 'Qwen3' else 16))}║")
+
+        # Model-size separator (first quant of a new model size)
+        if opt.display_name not in seen_models:
+            seen_models.append(opt.display_name)
+            print(_box())
+            print(_box(f"     {_c_local(opt.display_name, 'key')}"
+                       f"  {_c_local(opt.description, 'dim')}"))
 
         is_rec = opt.filename == recommended.filename
-        tag = "  " + _c_local("★ RECOMMENDED", "ok") if is_rec else ""
-        print(_box(f"  [{i}]  {_c_local(opt.label, 'key')}{tag}"))
-        print(_box(f"       {_c_local(opt.description, 'dim')}"))
-        print(_box(
-            f"       ~{opt.size_gb} GB on disk  ·  min {opt.min_ram_gb} GB RAM"
-        ))
-        if i < len(options):
-            print(_box())
+        rec_tag = "  " + _c_local("★ RECOMMENDED", "ok") if is_rec else ""
+        quant_color = (
+            "ok" if opt.quant in ("Q6_K", "Q8_0") else
+            "warn" if opt.quant == "Q5_K_M" else "dim"
+        )
+        line = (
+            f"    [{i:>2}]  {_c_local(opt.quant, quant_color):<8}"
+            f"  {opt.size_gb:>4.1f} GB disk  min {opt.min_ram_gb:.0f} GB RAM"
+            f"{rec_tag}"
+        )
+        print(_box(line))
 
+    print(_box())
     print(_box_bot())
     print()
 
@@ -605,7 +690,7 @@ def _prompt_user_choice(
         try:
             raw = input(
                 _c_local("  ▸ ", "accent")
-                + f"Enter [1–{len(options)}] or press Enter to accept "
+                + f"Enter [1–{len(options)}] or press Enter for recommended "
                 + _c_local(f"[{rec_idx}]", "ok")
                 + ": "
             ).strip()
@@ -616,7 +701,16 @@ def _prompt_user_choice(
         if raw == "":
             return recommended
         if raw.isdigit() and 1 <= int(raw) <= len(options):
-            return options[int(raw) - 1]
+            chosen = options[int(raw) - 1]
+            print()
+            print(
+                f"  {_c_local('✓', 'ok')}  Selected: "
+                f"{_c_local(chosen.display_name, 'key')}  "
+                f"{_c_local(chosen.quant, 'warn')}"
+                f"  ({chosen.size_gb:.1f} GB)"
+            )
+            print()
+            return chosen
         print(f"  Please enter a number between 1 and {len(options)}.")
 
 
@@ -629,14 +723,6 @@ def _run_interactive_selection(
 
     _print_selection_ui(os_profile, options, recommended)
     chosen = _prompt_user_choice(options, recommended)
-
-    print()
-    print(
-        f"  {_c_local('✓', 'ok')}  Selected:"
-        f" {_c_local(chosen.label, 'key')}"
-    )
-    print()
-
     _save_choice(config_dir, chosen)
     return chosen
 
@@ -674,7 +760,7 @@ def get_or_select_llm_model(
     if show_ui:
         return _run_interactive_selection(os_profile, config_dir)
 
-    # Headless / no UI — use hardware recommendation directly
+    # Headless / no UI — use hardware recommendation directly and save it
     chosen = recommend_llm(os_profile)
     _save_choice(config_dir, chosen)
     return chosen

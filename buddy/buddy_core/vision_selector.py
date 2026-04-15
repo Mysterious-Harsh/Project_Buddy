@@ -6,9 +6,10 @@
 # Asked once at first boot (or on force_vision_reselect=True).
 # Saved to ~/.buddy/config/buddy.toml [vision_choice].
 #
-# Shows a RAM comparison table: model_quant + mmproj = total
-# for all quantizations (Q4_K_M, Q5_K_M, Q6_K, Q8_0) of the
-# selected model, so the user can make an informed choice.
+# Only Qwen3.5 models support vision. If the selected LLM is
+# Qwen3.5, the user is asked: enable vision? (Y/n).
+# The mmproj quant is always F16; the model quant reuses
+# whatever quant was already chosen for the LLM.
 #
 # Public API:
 #   get_or_select_vision(model, os_profile, config_dir,
@@ -17,16 +18,15 @@
 from __future__ import annotations
 
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 from buddy.logger.logger import get_logger
 
 logger = get_logger("vision_selector")
-_MMPROJ_QUANT = "F16"          # only F16 available from unsloth
-_MMPROJ_SIZE_GB = 0.67         # fallback only — actual size read from LLMOption.mmproj_size_gb
+_MMPROJ_QUANT = "F16"
 
 
 # ==========================================================
@@ -36,13 +36,12 @@ _MMPROJ_SIZE_GB = 0.67         # fallback only — actual size read from LLMOpti
 @dataclass
 class VisionChoice:
     enabled: bool
-    # filled when enabled=True
     mmproj_quant: str = "F16"
     mmproj_hf_repo: str = ""
     mmproj_hf_filename: str = ""
     mmproj_size_gb: float = 0.0
-    model_quant: str = ""        # quant chosen for the model (e.g. Q4_K_M)
-    model_hf_filename: str = ""  # updated hf_filename if quant changed
+    model_quant: str = ""
+    model_hf_filename: str = ""
 
     @property
     def mmproj_filename(self) -> str:
@@ -54,7 +53,6 @@ class VisionChoice:
 # ==========================================================
 
 def _toml_val(v: Any) -> str:
-    """Serialize a scalar value to inline TOML."""
     if isinstance(v, bool):
         return "true" if v else "false"
     if isinstance(v, (int, float)):
@@ -64,7 +62,6 @@ def _toml_val(v: Any) -> str:
 
 
 def _write_toml_section(toml_path: Path, section: str, data: Dict[str, Any]) -> None:
-    """Upsert a flat [section] block in a TOML file."""
     import re as _re
     try:
         text = toml_path.read_text(encoding="utf-8")
@@ -93,7 +90,9 @@ def _load_saved_choice(config_dir: Path) -> Optional[VisionChoice]:
         with p.open("rb") as f:
             raw = _t.load(f)
         d = raw.get("vision_choice", {})
-        if not isinstance(d, dict):
+        # "enabled" key is always written by _save_choice.
+        # If it's absent the section was never saved — treat as unconfigured.
+        if not isinstance(d, dict) or "enabled" not in d:
             return None
         return VisionChoice(
             enabled=bool(d.get("enabled", False)),
@@ -141,133 +140,12 @@ def _c(s: str, color: str) -> str:
         return s
 
 
-_W = 72
-
-
-def _box(text: str = "") -> str:
-    return f"  ║  {text:<{_W}}║"
-
-
-def _box_top() -> str:
-    return f"  ╔{'═' * (_W + 2)}╗"
-
-
-def _box_div() -> str:
-    return f"  ╠{'═' * (_W + 2)}╣"
-
-
-def _box_bot() -> str:
-    return f"  ╚{'═' * (_W + 2)}╝"
-
-
-def _box_section(name: str) -> str:
-    label = f"  ─── {name} "
-    pad = _W + 2 - len(label)
-    return f"  ║{label}{'─' * max(1, pad)}║"
-
-
-# ==========================================================
-# Quant comparison table
-# ==========================================================
-
-def _model_key(model_filename: str) -> str:
-    """Map a model filename to a QUANT_CATALOG key."""
-    fn = model_filename.lower()
-    if "35b-a3b" in fn or "35b_a3b" in fn:
-        return "Qwen3.5-35B-A3B"
-    if "27b" in fn:
-        return "Qwen3.5-27B"
-    if "9b" in fn:
-        return "Qwen3.5-9B"
-    if "4b" in fn:
-        return "Qwen3.5-4B"
-    return ""
-
-
-def _print_vision_ui(
-    *,
-    model_filename: str,
-    ram_gb: float,
-    quant_opts: List[Any],   # List[QuantOption]
-    mmproj_size_gb: float,
-    recommended_quant: str,
-) -> None:
-    from buddy.buddy_core.model_selector import QuantOption
-
-    print()
-    print(_box_top())
-    print(_box("  " + _c("BUDDY — VISION CAPABILITY SETUP", "accent")))
-    print(_box_div())
-    print(_box(f"  Model      {_c(model_filename, 'warn')}"))
-    print(_box(f"  System RAM {_c(str(ram_gb) + ' GB', 'warn')}"))
-    print(_box(f"  mmproj     {_c(f'F16  ({mmproj_size_gb:.2f} GB)', 'dim')}"))
-    print(_box_div())
-    print(_box("  " + _c("Quantization   Model     + mmproj  = Total     Viable?", "tagline")))
-    print(_box("  " + "─" * 62))
-
-    for opt in quant_opts:
-        total = opt.size_gb + mmproj_size_gb
-        viable = ram_gb >= total
-        viable_str = _c("✓  fits", "ok") if viable else _c("✗  need more RAM", "dim")
-        rec_tag = "  " + _c("★ RECOMMENDED", "ok") if opt.quant == recommended_quant else ""
-        row = (
-            f"  {_c(opt.quant, 'key'):<20}"
-            f"  {opt.size_gb:>4.1f} GB"
-            f"  + {mmproj_size_gb:.2f} GB"
-            f"  = {total:>5.2f} GB"
-            f"  {viable_str}"
-            f"{rec_tag}"
-        )
-        print(_box(row))
-
-    print(_box_div())
-    print(_box("  " + _c("Does this model support vision (image understanding)?", "tagline")))
-    print(_box())
-    print(_box("  Note: vision requires downloading the mmproj file (~0.67 GB extra)."))
-    print(_box("  Without vision, Buddy works text-only (less RAM, faster boot)."))
-    print(_box_bot())
-    print()
-
-
-def _recommend_quant(quant_opts: List[Any], ram_gb: float, mmproj_size_gb: float) -> str:
-    """
-    Pick the highest quality quant that comfortably fits in system RAM.
-    Falls back to Q4_K_M if nothing fits.
-    """
-    # Prefer quality descending: Q8_0 > Q6_K > Q5_K_M > Q4_K_M
-    quality_order = ["Q8_0", "Q6_K", "Q5_K_M", "Q4_K_M"]
-    available = {opt.quant: opt for opt in quant_opts}
-
-    for quant in quality_order:
-        opt = available.get(quant)
-        if opt and ram_gb >= (opt.size_gb + mmproj_size_gb):
-            return quant
-
-    # Nothing fits with vision — return lowest quant anyway (user can decline)
-    return quant_opts[0].quant if quant_opts else "Q4_K_M"
-
-
-# ==========================================================
-# Non-vision model notice
-# ==========================================================
-
-def _print_no_vision_notice(model_filename: str) -> None:
-    print()
-    print(f"  {_c('ℹ', 'dim')}  Model {_c(model_filename, 'warn')} does not support vision.")
-    print(f"  {_c('ℹ', 'dim')}  To enable vision, select a Qwen3.5 model (4B, 9B, 27B, or 35B-A3B).")
-    print()
-
-
-# ==========================================================
-# Interactive prompt
-# ==========================================================
-
 def _prompt_vision_yn(default_yes: bool = True) -> bool:
     default_str = "[Y/n]" if default_yes else "[y/N]"
     while True:
         try:
             raw = input(
-                f"  {_c('▸', 'accent')} Enable vision capability? {default_str}: "
+                f"  {_c('▸', 'accent')} Enable vision (image understanding)? {default_str}: "
             ).strip().lower()
         except (EOFError, KeyboardInterrupt):
             print()
@@ -277,35 +155,6 @@ def _prompt_vision_yn(default_yes: bool = True) -> bool:
         if raw in ("n", "no"):
             return False
         print("  Please enter y or n.")
-
-
-def _prompt_quant_choice(quant_opts: List[Any], recommended: str) -> str:
-    """Let the user pick a quant, defaulting to the recommended one."""
-    opts_map = {str(i + 1): opt.quant for i, opt in enumerate(quant_opts)}
-    rec_idx = next(
-        (str(i + 1) for i, opt in enumerate(quant_opts) if opt.quant == recommended),
-        "1",
-    )
-
-    quant_list = "  ".join(
-        f"[{i + 1}] {opt.quant}" for i, opt in enumerate(quant_opts)
-    )
-    print(f"\n  Quantization options: {quant_list}")
-
-    while True:
-        try:
-            raw = input(
-                f"  {_c('▸', 'accent')} Choose quantization "
-                f"or press Enter for {_c(recommended, 'ok')} [{rec_idx}]: "
-            ).strip()
-        except (EOFError, KeyboardInterrupt):
-            print()
-            return recommended
-        if raw == "":
-            return recommended
-        if raw in opts_map:
-            return opts_map[raw]
-        print(f"  Please enter a number between 1 and {len(quant_opts)}.")
 
 
 # ==========================================================
@@ -323,26 +172,27 @@ def get_or_select_vision(
     """
     Return the VisionChoice for this session.
 
-    - First boot (no saved choice) → interactive selection → saved
+    Vision is only available for Qwen3.5 models. If the selected
+    LLM is vision-capable, the user is asked once whether to enable
+    it. The model quant and hf_filename are inherited from the
+    already-chosen LLMOption — no separate quant selection needed.
+
+    - First boot (no saved choice) → interactive Y/n → saved
     - Subsequent boots → loads saved choice silently
     - force_reselect=True → always prompts even if a choice exists
-
-    Args:
-        model:          The selected LLMOption (from model_selector).
-        os_profile:     Full OS profile dict (for RAM info).
-        config_dir:     ~/.buddy/config  (where buddy.toml lives)
-        show_ui:        Whether to print the selection UI
-        force_reselect: Force the interactive prompt
     """
-    # ── Not a vision-capable model → always disabled ──────
+    # ── Not a vision-capable model → always disabled ──────────────
     if not getattr(model, "vision_capable", False):
         if show_ui:
-            _print_no_vision_notice(model.filename)
+            print(
+                f"\n  {_c('ℹ', 'dim')}  {_c(model.filename, 'warn')} does not support vision."
+                f"\n  {_c('ℹ', 'dim')}  Select a Qwen3.5 model to enable image understanding.\n"
+            )
         choice = VisionChoice(enabled=False)
         _save_choice(config_dir, choice)
         return choice
 
-    # ── Load saved choice ──────────────────────────────────
+    # ── Load saved choice ──────────────────────────────────────────
     if not force_reselect:
         saved = _load_saved_choice(config_dir)
         if saved is not None:
@@ -353,74 +203,41 @@ def get_or_select_vision(
             )
             return saved
 
-    # ── Interactive selection ──────────────────────────────
-    from buddy.buddy_core.model_selector import QUANT_CATALOG
-
-    ram_gb: float = float((os_profile.get("ram") or {}).get("total_gb") or 0)
+    # ── Interactive Y/n ────────────────────────────────────────────
     mmproj_size_gb: float = float(getattr(model, "mmproj_size_gb", 0.67))
     mmproj_hf_repo: str = str(getattr(model, "mmproj_hf_repo", ""))
     mmproj_hf_filename: str = str(getattr(model, "mmproj_hf_filename", "mmproj-F16.gguf"))
-
-    model_key = _model_key(model.filename)
-    quant_opts = QUANT_CATALOG.get(model_key, [])
-
-    if not quant_opts:
-        # Unknown model size — fallback to current quant, no table
-        if show_ui:
-            print(f"\n  {_c('ℹ', 'dim')}  Vision is available for {model.filename}.")
-        want = _prompt_vision_yn(default_yes=True) if show_ui else False
-        choice = VisionChoice(
-            enabled=want,
-            mmproj_quant=_MMPROJ_QUANT,
-            mmproj_hf_repo=mmproj_hf_repo,
-            mmproj_hf_filename=mmproj_hf_filename,
-            mmproj_size_gb=mmproj_size_gb,
-            model_quant=model.filename.split("-")[-1].replace(".gguf", ""),
-            model_hf_filename=model.hf_filename,
-        )
-        _save_choice(config_dir, choice)
-        return choice
-
-    recommended_quant = _recommend_quant(quant_opts, ram_gb, mmproj_size_gb)
+    model_quant: str = str(getattr(model, "quant", ""))
+    model_hf_filename: str = str(getattr(model, "hf_filename", ""))
 
     if show_ui:
-        _print_vision_ui(
-            model_filename=model.filename,
-            ram_gb=ram_gb,
-            quant_opts=quant_opts,
-            mmproj_size_gb=mmproj_size_gb,
-            recommended_quant=recommended_quant,
+        ram_gb: float = float((os_profile.get("ram") or {}).get("total_gb") or 0)
+        total_gb = float(getattr(model, "size_gb", 0)) + mmproj_size_gb
+        print(
+            f"\n  {_c('VISION SETUP', 'accent')}"
+            f"  ·  {_c(model.filename, 'warn')}"
+            f"  ·  mmproj F16 +{mmproj_size_gb:.2f} GB"
+            f"  ·  total ~{total_gb:.1f} GB  (system RAM {ram_gb:.0f} GB)"
         )
-        want = _prompt_vision_yn(default_yes=True)
+        print(
+            f"  {_c('ℹ', 'dim')}  Adds image understanding. Requires ~{mmproj_size_gb:.2f} GB extra RAM.\n"
+        )
+        want = _prompt_vision_yn(default_yes=ram_gb >= total_gb)
     else:
         # Headless — auto-enable if RAM allows
-        min_opt = quant_opts[0]
-        want = ram_gb >= (min_opt.size_gb + mmproj_size_gb)
+        ram_gb = float((os_profile.get("ram") or {}).get("total_gb") or 0)
+        total_gb = float(getattr(model, "size_gb", 0)) + mmproj_size_gb
+        want = ram_gb >= total_gb
 
     if not want:
-        print(
-            f"\n  {_c('✓', 'ok')}  Vision disabled. Buddy will run text-only.\n"
-        ) if show_ui else None
+        if show_ui:
+            print(f"\n  {_c('✓', 'ok')}  Vision disabled. Buddy will run text-only.\n")
         choice = VisionChoice(enabled=False)
         _save_choice(config_dir, choice)
         return choice
 
-    # Pick quant
-    chosen_quant = (
-        _prompt_quant_choice(quant_opts, recommended_quant)
-        if show_ui
-        else recommended_quant
-    )
-
-    chosen_opt = next((o for o in quant_opts if o.quant == chosen_quant), quant_opts[0])
-
     if show_ui:
-        print(
-            f"\n  {_c('✓', 'ok')}  Vision enabled"
-            f"  ·  model {_c(chosen_quant, 'key')}"
-            f"  ·  mmproj {_c('F16', 'key')}"
-            f"  ·  total ~{chosen_opt.size_gb + mmproj_size_gb:.1f} GB\n"
-        )
+        print(f"\n  {_c('✓', 'ok')}  Vision enabled  ·  model {_c(model_quant, 'key')}  ·  mmproj {_c('F16', 'key')}\n")
 
     choice = VisionChoice(
         enabled=True,
@@ -428,8 +245,8 @@ def get_or_select_vision(
         mmproj_hf_repo=mmproj_hf_repo,
         mmproj_hf_filename=mmproj_hf_filename,
         mmproj_size_gb=mmproj_size_gb,
-        model_quant=chosen_quant,
-        model_hf_filename=chosen_opt.hf_filename,
+        model_quant=model_quant,
+        model_hf_filename=model_hf_filename,
     )
     _save_choice(config_dir, choice)
     return choice

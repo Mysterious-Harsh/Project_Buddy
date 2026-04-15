@@ -2,14 +2,14 @@
   "count": 12,
   "files": {
     "base_system_prompts.py": {
-      "bytes": 13922,
+      "bytes": 16848,
       "path": "prompts/base_system_prompts.py",
-      "sha256": "901aa5323a00ce219479a38dbdb571963cb5c7a291894c0dcce7687f34947b26"
+      "sha256": "c04a0854b6cfd6e28d2ef88dce8644e287124f059a76a3100aa2b05a3521eae4"
     },
     "brain_prompts.py": {
-      "bytes": 29901,
+      "bytes": 33523,
       "path": "prompts/brain_prompts.py",
-      "sha256": "05ed20f2c83bb78118d510efb6bec8600daa8256861d4385fd23b377631510b3"
+      "sha256": "75a9821de524e498afa0fdad341ad3ed0fdef9ef9e1fb239c623305fe50289c5"
     },
     "executor_prompts.py": {
       "bytes": 10987,
@@ -27,9 +27,9 @@
       "sha256": "27af010c10aecae93eb8fd2538e2c79bc3f6cf21f8b8a81c718878b5e9534480"
     },
     "planner_prompts.py": {
-      "bytes": 15444,
+      "bytes": 15946,
       "path": "prompts/planner_prompts.py",
-      "sha256": "ad0fe55dc709caf3562995e4b8b88d488bb735e0405e730aa3605ed71d9d73af"
+      "sha256": "1b5c7ff64ba79fd96012acfefab327c3c140ceab224c88b77ca5fd02d1dac872"
     },
     "reader_prompts.py": {
       "bytes": 3061,
@@ -37,9 +37,9 @@
       "sha256": "7867f93741d9861f9638db6531c08230dbf82caf588efd054caa2e596c723b3f"
     },
     "respond_prompts.py": {
-      "bytes": 10501,
+      "bytes": 10986,
       "path": "prompts/respond_prompts.py",
-      "sha256": "893cad1b057e5625585b1948b727ad56dfb2453d50748eca51ab4df95b4fd312"
+      "sha256": "1ce69028c7806bceedd50f075b2f9276e6215b3538274539537cf8c951d557ad"
     },
     "terminal_prompts.py": {
       "bytes": 31095,
@@ -62,7 +62,7 @@
       "sha256": "c38fc1fa1e6116939822440d3f6047fd18f871415acd931b28d1c2e79520592b"
     }
   },
-  "generated_at": "2026-04-15T18:28:45.537187Z",
+  "generated_at": "2026-04-15T22:50:17.212076Z",
   "root": "prompts",
   "version": 1
 }

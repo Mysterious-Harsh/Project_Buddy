@@ -130,7 +130,8 @@ class BootScreen(Screen):
         try:
             from buddy.buddy_core.boot import bootstrap, BootstrapOptions
 
-            opts = BootstrapOptions(show_boot_ui=False)
+            pre_wizard = getattr(self.app, "_pre_wizard_result", None)
+            opts = BootstrapOptions(show_boot_ui=False, pre_wizard_result=pre_wizard)
             state = await asyncio.to_thread(bootstrap, opts, progress_cb)
         except asyncio.CancelledError:
             if queue is not None:
@@ -702,8 +703,9 @@ class BuddyApp(App):
     """
     BINDINGS = []
 
-    def __init__(self, **kwargs: Any) -> None:
+    def __init__(self, pre_wizard_result: Optional[Any] = None, **kwargs: Any) -> None:
         super().__init__(**kwargs)
+        self._pre_wizard_result = pre_wizard_result  # from run_pre_textual_setup()
         self._iq = InputQueue()
         self._sys_state = SystemState()
         self._state_lock = threading.Lock()
@@ -883,8 +885,19 @@ def run_textual() -> None:
     _textual_log = Path.home() / ".buddy" / "logs" / "textual_crash.log"
     os.environ.setdefault("TEXTUAL_LOG", str(_textual_log))
 
+    # ── Pre-Textual interactive setup ─────────────────────────────────────────
+    # First-boot wizard and LLM model selection need a plain terminal (input()
+    # works).  Textual takes over the terminal after BuddyApp.run(), so we MUST
+    # do all interactive I/O here, before that call.
+    _pre_wizard_result: Optional[Any] = None
+    try:
+        from buddy.buddy_core.boot import run_pre_textual_setup
+        _pre_wizard_result = run_pre_textual_setup()
+    except Exception as _e:
+        logger.warning("run_pre_textual_setup failed (non-fatal): %r", _e)
+
     _prewarm_whisper_before_textual()
-    app = BuddyApp()
+    app = BuddyApp(pre_wizard_result=_pre_wizard_result)
     try:
         app.run()
     except Exception:
