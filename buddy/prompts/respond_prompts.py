@@ -124,6 +124,15 @@ Before writing candidates, run this reflection on the EXECUTION_RESULTS:
     YES → store as a user fact (second person, short tier).
     NO  → skip.
 
+  Q3 — PERSONAL SIGNAL IN USER MESSAGE:
+    Does the USER_MESSAGE contain personal information about the user —
+    a preference, habit, standing context, or stated intention — that is
+    independent of the action outcome and not already captured in MEMORIES?
+    This catches personal signals that were present in the action request
+    itself and were not stored during the brain phase.
+    YES → store as a user fact (second person, short or long tier).
+    NO  → skip.
+
   Do NOT reflect on mistakes or process errors — those are ephemeral to this execution
   and carry no future value. Do NOT store what you tried and failed; store what is
   now confirmed true about the user's world.

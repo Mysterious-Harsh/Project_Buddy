@@ -105,10 +105,11 @@ class WebSearch:
             "name": TOOL_NAME,
             "version": "3.0.0",
             "description": (
-                "Search the web. Returns title, URL, and a short snippet (≤400 chars) "
-                "per result. Snippets are enough for weather, prices, scores, and simple facts. "
-                "For full article or documentation content, use web_fetch after this step "
-                "and pass these results as input."
+                "Search the web. Returns title, URL, and a short snippet (≤400 chars) per result. "
+                "Snippets are ONLY sufficient for: weather, prices, scores, and one-sentence facts. "
+                "For everything else (articles, documentation, explanations, how-to, code, news details) "
+                "you MUST add a web_fetch step AFTER this step and pass these URLs as input. "
+                "Do NOT skip web_fetch when the user needs actual content."
             ),
             "engine": cfg.get("engine", "duckduckgo"),
             "prompt": WEB_SEARCH_TOOL_PROMPT,

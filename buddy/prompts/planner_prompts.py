@@ -81,6 +81,15 @@ web_search → for any information from the internet (news, facts, documentation
 Never use terminal for file tasks when filesystem is available.
 Never make up facts — use web_search when the answer requires real-world or current knowledge.
 
+WEB SEARCH CHAIN RULE (mandatory):
+web_search returns only short snippets — NOT full content.
+Snippets are ONLY enough for: weather, prices, scores, one-sentence facts.
+For any query that needs article body, documentation, explanations, how-to guides,
+code examples, or news details — you MUST plan TWO steps:
+  step N  : web_search  (get URLs + snippets)
+  step N+1: web_fetch   (fetch full content from the URLs in step N)
+Skipping web_fetch for content queries is a plan defect. Always add it.
+
 PRINCIPLE 8 — MINIMUM VIABLE PLAN:
 Use the fewest steps that can robustly achieve the goal.
 Do not add steps for their own sake.
