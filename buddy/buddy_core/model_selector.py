@@ -2,7 +2,7 @@
 #
 # Hardware-aware LLM model selection.
 #
-# First boot  → interactive prompt (hardware summary + curated options) → saved to model_choice.json
+# First boot  → interactive prompt (hardware summary + curated options) → saved to buddy.toml [model_choice]
 # Subsequent  → loads saved choice silently, no prompt
 # force_reselect=True → re-prompts even if a choice exists
 #
@@ -13,7 +13,7 @@
 
 from __future__ import annotations
 
-import json
+import sys
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
@@ -414,16 +414,43 @@ def viable_options(os_profile: Dict[str, Any]) -> List[LLMOption]:
 # Persistence
 # ==========================================================
 
-_CHOICE_FILE = "model_choice.json"
+def _toml_val(v: Any) -> str:
+    """Serialize a scalar value to inline TOML."""
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    if isinstance(v, (int, float)):
+        return str(v)
+    escaped = str(v).replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
+
+
+def _write_toml_section(toml_path: Path, section: str, data: Dict[str, Any]) -> None:
+    """Upsert a flat [section] block in a TOML file."""
+    import re as _re
+    try:
+        text = toml_path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        text = ""
+    # Remove existing section (from [section] up to the next [header] or EOF)
+    text = _re.sub(rf"\n*(# auto-managed\n)?\[{_re.escape(section)}\][^\[]*", "", text)
+    text = text.rstrip() + "\n"
+    lines = [f"\n# auto-managed\n[{section}]"]
+    lines += [f"{k} = {_toml_val(v)}" for k, v in data.items()]
+    toml_path.write_text(text + "\n".join(lines) + "\n", encoding="utf-8")
 
 
 def _load_saved_choice(config_dir: Path) -> Optional[LLMOption]:
-    p = config_dir / _CHOICE_FILE
+    p = config_dir / "buddy.toml"
     if not p.exists():
         return None
     try:
-        with p.open("r", encoding="utf-8") as f:
-            saved = json.load(f)
+        if sys.version_info >= (3, 11):
+            import tomllib as _t  # type: ignore
+        else:
+            import tomli as _t  # type: ignore  # noqa: PLC0415
+        with p.open("rb") as f:
+            raw = _t.load(f)
+        saved = raw.get("model_choice", {})
         if not isinstance(saved, dict) or not saved.get("filename"):
             return None
         # Match against full catalog
@@ -444,12 +471,12 @@ def _load_saved_choice(config_dir: Path) -> Optional[LLMOption]:
             description="Custom model (user-defined)",
         )
     except Exception as ex:
-        logger.warning("Could not load model_choice.json: %r", ex)
+        logger.warning("Could not load model_choice from buddy.toml: %r", ex)
         return None
 
 
 def _save_choice(config_dir: Path, option: LLMOption) -> None:
-    p = config_dir / _CHOICE_FILE
+    toml_path = config_dir / "buddy.toml"
     data = {
         "filename": option.filename,
         "hf_repo": option.hf_repo,
@@ -460,12 +487,11 @@ def _save_choice(config_dir: Path, option: LLMOption) -> None:
         "saved_at": datetime.utcnow().isoformat() + "Z",
     }
     try:
-        p.parent.mkdir(parents=True, exist_ok=True)
-        with p.open("w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2)
+        toml_path.parent.mkdir(parents=True, exist_ok=True)
+        _write_toml_section(toml_path, "model_choice", data)
         logger.info("Saved model choice: %s", option.filename)
     except Exception as ex:
-        logger.warning("Could not save model_choice.json: %r", ex)
+        logger.warning("Could not save model_choice to buddy.toml: %r", ex)
 
 
 # ==========================================================
@@ -630,13 +656,13 @@ def get_or_select_llm_model(
     """
     Return the LLMOption to use this session.
 
-    - First boot (no saved choice) → interactive selection → saved to model_choice.json
+    - First boot (no saved choice) → interactive selection → saved to buddy.toml [model_choice]
     - Subsequent boots → loads saved choice silently
     - force_reselect=True → always prompts even if a choice exists
 
     Args:
         os_profile:     Full OS profile dict from bootstrap.
-        config_dir:     ~/.buddy/config  (where model_choice.json lives)
+        config_dir:     ~/.buddy/config  (where buddy.toml lives)
         show_ui:        Whether to print the selection UI
         force_reselect: Force the interactive prompt
     """

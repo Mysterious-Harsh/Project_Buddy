@@ -1,57 +1,32 @@
 # =========================================
-# BUDDY CONFIGURATION (LOCKED v1)
+# BUDDY CONFIGURATION
 # =========================================
 
 [general]
 name = "Buddy"
-sleep_after_idle_sec = 5 # min
+sleep_after_idle_sec = 5
+
 # -----------------------------------------
 # Bootstrap
 # -----------------------------------------
 [bootstrap]
 show_boot_ui = true
-strict_integrity = true
-auto_install = false
-
-# First-run model download via huggingface_hub
-# Set to false if you have already placed the GGUF manually in ~/.buddy/data/models/
 download_models = true
-
-# Set to true to re-run the interactive model selection prompt on next boot
-force_model_reselect = true
-
-verify_prompts_lock = true
-verify_os_profile_lock = true
-write_boot_report = true
-
-db_path = "buddy/data/mem.sqlite3"
-assets_dir = "buddy/data/assets"
-prompts_dir = "buddy/prompts"
-data_dir = "buddy/data"
+force_model_reselect = false
+force_vision_reselect = false
 
 # -----------------------------------------
-# LLM  (llama.cpp — llama-server)
-# Note: model_gguf is now set by hardware-aware model selection on first boot.
-# The selected model is saved to ~/.buddy/config/model_choice.json and loaded
-# automatically on every subsequent boot. model_gguf below is only used as a
-# fallback when model_choice.json does not exist AND download_models = false.
+# LLM (llama.cpp — llama-server)
+# model_gguf: fallback only — overridden by model selection on first boot
 # -----------------------------------------
 [llama]
 base_url = "http://127.0.0.1:8080"
 host = "127.0.0.1"
 port = 8080
-
-model_gguf = "Qwen3-14B-Q4_K_M.gguf"     # fallback only — see note above
+model_gguf = "Qwen3-14B-Q4_K_M.gguf"
 model_name = "local-model"
 ready_timeout_s = 180.0
-
-# Ports to scan for an already-running llama-server (checked before spawning a new one).
-# If found on a different port, Buddy will use that instance instead.
 scan_ports = [8080, 8081, 8082, 8088, 8888, 11434]
-
-# Server flags injected at boot.
-# Do NOT include: llama-server, -m, --host, --port (bootstrap injects those).
-# --mmproj is injected automatically when vision is enabled.
 server_args = [
   "--ctx-size", "16384",
   "--threads", "8",
@@ -63,142 +38,72 @@ server_args = [
 ]
 
 # -----------------------------------------
-# Vision (Qwen3.5 native multimodal)
-# Set by first-boot wizard → saved to ~/.buddy/config/vision_choice.json
-# enabled / mmproj_path are overridden at runtime from vision_choice.json.
-# -----------------------------------------
-[vision]
-enabled = false
-force_vision_reselect = false   # set true to re-run vision setup on next boot
-mmproj_path = ""                # absolute path to mmproj GGUF — auto-set after download
-
-
-# -----------------------------------------
 # Voice & Audio
+# speech_trigger_mult: raise for noisy rooms, lower for quiet ones
+# beam_size: 1 = fastest, 5 = more accurate
 # -----------------------------------------
 [voice]
-
-tts_engines = ["pyttsx3", "tts"]
-
-microphone_index = 0  # MacBook Pro Microphone (global device index)
-
 enabled = true
-
+microphone_index = 0
 whisper_model_size = "small"
 language = "en"
+silence_timeout = 1.4
 calibration_sec = 2.0
 speech_trigger_mult = 3.0
-silence_timeout = 1.4
 whisper_vad_filter = true
 use_silero_vad = true
 enable_beep = true
 beam_size = 5
-debug = true
 
 # -----------------------------------------
 # Memory
-# embedding_model is used by EmbeddingProvider (via BUDDY_EMBED_MODEL env var).
-# Bootstrap downloads it to ~/.buddy/data/models/st/ on first run.
 # -----------------------------------------
 [memory]
 flash_seconds = 60
 short_term_hours = 6
 long_term_enabled = true
-retention_policy = "default"
-vector_db = "qdrant"
 embedding_model = "Qwen/Qwen3-Embedding-0.6B"
 
 # -----------------------------------------
 # Tools
 # -----------------------------------------
 [tools]
-default_shell = "bash"
-app_launch_timeout = 10
 permissions_auto_approve = false
-
-# -----------------------------------------
-# Browser
-# -----------------------------------------
-[browser]
-headless = true
-default_profile = "default"
-timeout_seconds = 15
-default_search_engine = "duckduckgo"
-
-# -----------------------------------------
-# Accounts
-# -----------------------------------------
-[accounts]
-gmail_enabled = false
-outlook_enabled = false
-calendar_enabled = false
-
-# -----------------------------------------
-# Media
-# -----------------------------------------
-[media]
-default_player = "vlc"
-volume = 80
-
-# -----------------------------------------
-# Scheduler
-# -----------------------------------------
-[scheduler]
-enabled = true
-max_threads = 5
-
-# -----------------------------------------
-# User (set by first-boot wizard)
-# -----------------------------------------
-[user]
-language = "en"
 
 # -----------------------------------------
 # Web Search
 # engine: "searxng" | "duckduckgo"
-# searxng_url: local SearXNG instance (set up by first-boot wizard)
 # -----------------------------------------
 [web_search]
 engine = "duckduckgo"
 searxng_url = "http://127.0.0.1:8888"
-
-# Ports to scan for an already-running SearXNG instance.
-# If found on a different port, Buddy will use that URL instead.
 searxng_scan_ports = [8888, 8889, 8890, 4000, 5000]
 
 # -----------------------------------------
-# Feature Flags
+# Features
 # -----------------------------------------
 [features]
-enable_reflection = true
 enable_consolidation = true
-enable_notifications = true
 enable_audio_stt = true
 enable_audio_tts = true
-# Aliases written by first-boot wizard:
-enable_stt = true
-enable_tts = true
 
 # -----------------------------------------
-# Brain Policy
+# Brain
 # -----------------------------------------
 [brain]
 min_context_score = 1.25
 ambiguity_margin = 0.35
-allow_merge_if_within_margin = 0.20
 max_memories = 6
-prefer_local_search = true
 
 # -----------------------------------------
-# Context
+# Conversation
 # -----------------------------------------
 [context]
 max_conversation_turn = 12
 
 # -----------------------------------------
 # Dynamic Context Budget
-# Auto-computed from hardware at boot.
-# Set override = true to pin manual values.
+# Auto-computed from hardware. Set override = true to pin manual values.
 # -----------------------------------------
 [context_budget]
 override = false
@@ -207,43 +112,22 @@ recent_turns = 14
 top_k_memories = 10
 pre_rerank_k = 20
 
-# -----------------------------------------
-# CLI
-# -----------------------------------------
-[cli]
-stream = true
-stream_delay = 0.02
-stream_by = "words"
-prompt = "▌ "
-theme = "dark"
-
 # ============================================================
 # Vector Store
 # ============================================================
-
 [vector_store]
 backend = "local"
-
-[vector_store.server]
-url = "http://127.0.0.1:6333"
-api_key = ""
-timeout = 10
 
 [vector_store.rerank]
 enabled = true
 method = "qwen3"
-always_on = true
-pre_rerank_k = 20
-max_chars_per_doc = 700
-device = "auto"
-batch_size = 8
-max_length = 2048
-
-# Reranker model used by VectorStore (via BUDDY_RERANKER_MODEL env var).
-# Bootstrap downloads it to ~/.buddy/data/models/st/ on first run.
 qwen_model = "Qwen/Qwen3-Reranker-0.6B"
-cross_encoder_model = "cross-encoder/ms-marco-MiniLM-L-6-v2"
-
 dense_threshold = 0.24
 rerank_threshold = 0.24
 rerank_min_keep = 4
+
+# -----------------------------------------
+# User (set by first-boot wizard)
+# -----------------------------------------
+[user]
+language = "en"

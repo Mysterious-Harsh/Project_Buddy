@@ -4,7 +4,7 @@
 # ═══════════════════════════════════════════════════════════
 #
 # Asked once at first boot (or on force_vision_reselect=True).
-# Saved to ~/.buddy/config/vision_choice.json.
+# Saved to ~/.buddy/config/buddy.toml [vision_choice].
 #
 # Shows a RAM comparison table: model_quant + mmproj = total
 # for all quantizations (Q4_K_M, Q5_K_M, Q6_K, Q8_0) of the
@@ -16,7 +16,7 @@
 
 from __future__ import annotations
 
-import json
+import sys
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -25,8 +25,6 @@ from typing import Any, Dict, List, Optional
 from buddy.logger.logger import get_logger
 
 logger = get_logger("vision_selector")
-
-_CHOICE_FILE = "vision_choice.json"
 _MMPROJ_QUANT = "F16"          # only F16 available from unsloth
 _MMPROJ_SIZE_GB = 0.67         # fallback only — actual size read from LLMOption.mmproj_size_gb
 
@@ -52,16 +50,49 @@ class VisionChoice:
 
 
 # ==========================================================
+# TOML helpers
+# ==========================================================
+
+def _toml_val(v: Any) -> str:
+    """Serialize a scalar value to inline TOML."""
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    if isinstance(v, (int, float)):
+        return str(v)
+    escaped = str(v).replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
+
+
+def _write_toml_section(toml_path: Path, section: str, data: Dict[str, Any]) -> None:
+    """Upsert a flat [section] block in a TOML file."""
+    import re as _re
+    try:
+        text = toml_path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        text = ""
+    text = _re.sub(rf"\n*(# auto-managed\n)?\[{_re.escape(section)}\][^\[]*", "", text)
+    text = text.rstrip() + "\n"
+    lines = [f"\n# auto-managed\n[{section}]"]
+    lines += [f"{k} = {_toml_val(v)}" for k, v in data.items()]
+    toml_path.write_text(text + "\n".join(lines) + "\n", encoding="utf-8")
+
+
+# ==========================================================
 # Persistence
 # ==========================================================
 
 def _load_saved_choice(config_dir: Path) -> Optional[VisionChoice]:
-    p = config_dir / _CHOICE_FILE
+    p = config_dir / "buddy.toml"
     if not p.exists():
         return None
     try:
-        with p.open("r", encoding="utf-8") as f:
-            d = json.load(f)
+        if sys.version_info >= (3, 11):
+            import tomllib as _t  # type: ignore
+        else:
+            import tomli as _t  # type: ignore  # noqa: PLC0415
+        with p.open("rb") as f:
+            raw = _t.load(f)
+        d = raw.get("vision_choice", {})
         if not isinstance(d, dict):
             return None
         return VisionChoice(
@@ -74,12 +105,12 @@ def _load_saved_choice(config_dir: Path) -> Optional[VisionChoice]:
             model_hf_filename=str(d.get("model_hf_filename", "")),
         )
     except Exception as ex:
-        logger.warning("Could not load vision_choice.json: %r", ex)
+        logger.warning("Could not load vision_choice from buddy.toml: %r", ex)
         return None
 
 
 def _save_choice(config_dir: Path, choice: VisionChoice) -> None:
-    p = config_dir / _CHOICE_FILE
+    toml_path = config_dir / "buddy.toml"
     data = {
         "enabled": choice.enabled,
         "mmproj_quant": choice.mmproj_quant,
@@ -91,12 +122,11 @@ def _save_choice(config_dir: Path, choice: VisionChoice) -> None:
         "saved_at": datetime.utcnow().isoformat() + "Z",
     }
     try:
-        p.parent.mkdir(parents=True, exist_ok=True)
-        with p.open("w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2)
+        toml_path.parent.mkdir(parents=True, exist_ok=True)
+        _write_toml_section(toml_path, "vision_choice", data)
         logger.info("Saved vision choice: enabled=%s quant=%s", choice.enabled, choice.model_quant)
     except Exception as ex:
-        logger.warning("Could not save vision_choice.json: %r", ex)
+        logger.warning("Could not save vision_choice to buddy.toml: %r", ex)
 
 
 # ==========================================================
@@ -300,7 +330,7 @@ def get_or_select_vision(
     Args:
         model:          The selected LLMOption (from model_selector).
         os_profile:     Full OS profile dict (for RAM info).
-        config_dir:     ~/.buddy/config  (where vision_choice.json lives)
+        config_dir:     ~/.buddy/config  (where buddy.toml lives)
         show_ui:        Whether to print the selection UI
         force_reselect: Force the interactive prompt
     """

@@ -38,7 +38,15 @@ _USER_AGENT = (
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/124.0.0.0 Safari/537.36"
 )
-_TOML_PATH = Path(__file__).parent.parent.parent / "config" / "buddy.toml"
+def _user_config_path() -> Path:
+    """Resolve ~/.buddy/config/buddy.toml (user data dir, platform-aware)."""
+    import os as _os
+    if _os.name == "nt":
+        base = _os.environ.get("LOCALAPPDATA") or _os.environ.get("APPDATA")
+        root = (Path(base) / "Buddy") if base else (Path.home() / "Buddy")
+    else:
+        root = Path.home() / ".buddy"
+    return root / "config" / "buddy.toml"
 
 
 # ==========================================================
@@ -52,7 +60,7 @@ def _load_config() -> Dict[str, Any]:
         "searxng_url": "http://127.0.0.1:8888",
     }
     try:
-        with _TOML_PATH.open("rb") as f:
+        with _user_config_path().open("rb") as f:
             cfg = tomllib.load(f)
         defaults.update(cfg.get("web_search", {}))
     except Exception:
