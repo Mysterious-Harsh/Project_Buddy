@@ -440,6 +440,23 @@ class SQLiteStore:
         )
         return [self._row_to_entry(r) for r in cur.fetchall()]
 
+    def tier_counts(self) -> dict:
+        """Return {flash, short, long} live counts. Single fast query."""
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            SELECT memory_type, COUNT(*) FROM memories
+            WHERE deleted=0
+            GROUP BY memory_type;
+            """
+        )
+        counts = {"flash": 0, "short": 0, "long": 0}
+        for row in cur.fetchall():
+            mt = row[0]
+            if mt in counts:
+                counts[mt] = row[1]
+        return counts
+
     def list_pending_upserts(self, limit: int = 50) -> List[MemoryEntry]:
         """Optimized pending upserts listing."""
         limit = min(int(limit), 1000)

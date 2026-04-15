@@ -1,4 +1,4 @@
-# buddy/buddy_core/bootstrap.py
+# buddy/buddy_core/boot.py
 # ═══════════════════════════════════════════════════════════
 # BUDDY BOOTSTRAP  —  v2
 # ═══════════════════════════════════════════════════════════
@@ -49,6 +49,7 @@ from buddy.logger.logger import get_logger
 from buddy.ui.boot_ui import (
     Spinner,
     _banner_centered,
+    _birth_animation,
     _c,
     _center_visible,
     _color_frame,
@@ -65,6 +66,14 @@ from buddy.ui.boot_ui import (
     print_banner_centered,
 )
 from buddy.buddy_core.model_selector import LLMOption, get_or_select_llm_model
+from buddy.buddy_core.llama_installer import ensure_llama_binary
+from buddy.buddy_core.vision_selector import VisionChoice, get_or_select_vision
+from buddy.buddy_core.searxng_setup import (
+    is_installed as _searxng_installed,
+    setup_searxng,
+    start_searxng,
+    stop_searxng,
+)
 
 logger = get_logger("bootstrap")
 
@@ -91,6 +100,7 @@ class BootstrapOptions:
     write_boot_report: bool = True
     download_models: bool = True
     force_model_reselect: bool = False
+    force_vision_reselect: bool = False
 
 
 @dataclass
@@ -1007,6 +1017,9 @@ def _load_runtime_config() -> Dict[str, Any]:
             "force_model_reselect": _as_bool(
                 boot_cfg.get("force_model_reselect"), False
             ),
+            "force_vision_reselect": _as_bool(
+                boot_cfg.get("force_vision_reselect"), False
+            ),
         },
         "llama": llama_cfg,
         "fs": {
@@ -1027,6 +1040,112 @@ def _load_runtime_config() -> Dict[str, Any]:
         },
         "copied_defaults": copied,
     }
+
+
+# ═══════════════════════════════════════════════════════════
+# Port scanning helpers — detect existing servers
+# ═══════════════════════════════════════════════════════════
+
+
+def _scan_llama_ports(host: str, scan_ports: List[int]) -> Optional[int]:
+    """
+    Scan a list of ports for a running llama-server.
+    Returns the first port where a ready llama-server is found, or None.
+    """
+    for p in scan_ports:
+        try:
+            with socket.create_connection((host, p), timeout=0.3):
+                pass
+        except Exception:
+            continue
+        bu = f"http://{host}:{p}"
+        for path in ("/health", "/v1/models"):
+            try:
+                r = _HTTP.get(bu + path, timeout=(0.3, 1.0))
+                if r.status_code == 200:
+                    logger.info("Found existing llama-server on port %d", p)
+                    return p
+            except Exception:
+                continue
+    return None
+
+
+def _scan_searxng_ports(host: str, scan_ports: List[int]) -> Optional[int]:
+    """
+    Scan a list of ports for a running SearXNG instance.
+    Returns the first port where SearXNG is responding, or None.
+    """
+    for p in scan_ports:
+        try:
+            with socket.create_connection((host, p), timeout=0.3):
+                pass
+        except Exception:
+            continue
+        bu = f"http://{host}:{p}"
+        for path in ("/search", "/", "/healthz"):
+            try:
+                r = _HTTP.get(bu + path, timeout=(0.3, 1.5))
+                if r.status_code in (200, 302, 405):
+                    logger.info("Found existing SearXNG on port %d", p)
+                    return p
+            except Exception:
+                continue
+    return None
+
+
+# ═══════════════════════════════════════════════════════════
+# mmproj (vision) download helper
+# ═══════════════════════════════════════════════════════════
+
+
+def _ensure_mmproj(
+    vision: "VisionChoice",
+    *,
+    models_dir: Path,
+    download_enabled: bool,
+) -> Optional[Path]:
+    """
+    Ensure the mmproj GGUF is present in models_dir.
+    Downloads from HuggingFace if missing and download_enabled=True.
+    Returns path to mmproj or None on failure.
+    """
+    if not vision.enabled or not vision.mmproj_hf_filename:
+        return None
+
+    dest = models_dir / vision.mmproj_hf_filename
+    if dest.exists() and dest.stat().st_size > 0:
+        logger.info("mmproj already present: %s", dest)
+        return dest
+
+    if not download_enabled:
+        logger.warning("mmproj missing and download_models=false: %s", dest)
+        return None
+
+    repo = vision.mmproj_hf_repo
+    filename = vision.mmproj_hf_filename
+    if not repo or not filename:
+        logger.warning("mmproj hf_repo/hf_filename not set in vision choice")
+        return None
+
+    logger.info("Downloading mmproj %s from %s", filename, repo)
+    _ui_info(f"Downloading mmproj: {filename}  (~{vision.mmproj_size_gb:.2f} GB)")
+    try:
+        from huggingface_hub import hf_hub_download  # type: ignore
+
+        path = hf_hub_download(
+            repo_id=repo,
+            filename=filename,
+            local_dir=str(models_dir),
+            local_dir_use_symlinks=False,
+        )
+        dest = Path(path)
+        logger.info("mmproj downloaded → %s", dest)
+        _ui_ok(f"mmproj downloaded → {dest.name}")
+        return dest
+    except Exception as ex:
+        logger.error("mmproj download failed: %r", ex)
+        _ui_warn(f"mmproj download failed: {ex}")
+        return None
 
 
 # ═══════════════════════════════════════════════════════════
@@ -1525,11 +1644,224 @@ def _fetch_llama_server_props(base_url: str) -> Dict[str, Any]:
 
 
 # ═══════════════════════════════════════════════════════════
+# First-boot wizard
+# ═══════════════════════════════════════════════════════════
+
+
+def _wizard_line(msg: str = "") -> None:
+    print(_c("  │  ", "border") + msg)
+
+
+def _wizard_ask(prompt: str, default: str) -> str:
+    """Single-line input with AURORA prompt. Returns stripped value or default."""
+    label = _c("  ▸ ", "accent") + prompt
+    if default:
+        label += _c(f"  [{default}]", "dim")
+    label += _c("  › ", "border")
+    try:
+        val = input(label).strip()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return default
+    return val or default
+
+
+def _wizard_yn(question: str, *, default: bool = False) -> bool:
+    """Yes/No prompt. Returns bool."""
+    hint = _c("Y/n" if default else "y/N", "dim")
+    label = (
+        _c("  ▸ ", "accent")
+        + question
+        + _c("  ", "reset")
+        + hint
+        + _c("  › ", "border")
+    )
+    try:
+        raw = input(label).strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return default
+    if raw in ("y", "yes"):
+        return True
+    if raw in ("n", "no"):
+        return False
+    return default
+
+
+def _wizard_header(title: str) -> None:
+    cols, _ = _term_size()
+    inner = min(70, max(50, cols - 6))
+    print()
+    print(_c("  ╔" + "═" * (inner + 2) + "╗", "border"))
+    print(
+        _c("  ║  ", "border") + _c(f"{title:^{inner}}", "accent") + _c("  ║", "border")
+    )
+    print(_c("  ╚" + "═" * (inner + 2) + "╝", "border"))
+    print()
+
+
+def _show_wizard_hardware(os_profile: Dict[str, Any]) -> None:
+    """Print a compact hardware summary for the first-boot wizard."""
+    gpu = os_profile.get("gpu", {}) or {}
+    ram = os_profile.get("ram", {}) or {}
+    cpu = os_profile.get("cpu", {}) or {}
+    macos = os_profile.get("macos", {}) or {}
+
+    ram_gb = ram.get("total_gb", "?")
+    cores = cpu.get("logical_cores", "?")
+    gpu_name = gpu.get("name") or "unknown"
+    backend = gpu.get("backend") or "cpu_only"
+    mac_ver = macos.get("product_version", "")
+
+    print()
+    _wizard_line(_c("Hardware detected:", "dim"))
+    _wizard_line(
+        f"  GPU     {_c(str(gpu_name), 'warn')}  {_c('(' + backend + ')', 'dim')}"
+    )
+    _wizard_line(
+        f"  RAM     {_c(str(ram_gb) + ' GB', 'warn')}  · "
+        f" {_c(str(cores) + ' cores', 'dim')}"
+    )
+    if mac_ver:
+        _wizard_line(f"  macOS   {_c(mac_ver, 'dim')}")
+    print()
+
+
+def _run_first_boot_wizard(
+    *,
+    os_profile: Dict[str, Any],
+    show_ui: bool,
+    default_name: str,
+) -> Dict[str, Any]:
+    """
+    Interactive first-boot wizard. Runs once, stores results to buddy.toml.
+    Returns dict: {user_name, language, web_engine, stt, tts}
+    """
+    defaults = {
+        "user_name": default_name,
+        "language": "en",
+        "web_engine": "duckduckgo",
+        "stt": False,
+        "tts": False,
+    }
+
+    if not show_ui:
+        return defaults
+
+    _wizard_header("BUDDY — FIRST AWAKENING")
+
+    # Hardware summary
+    _show_wizard_hardware(os_profile)
+
+    # Q1: Name
+    _wizard_line(_c("What should I call you?", "tagline"))
+    user_name = _wizard_ask("Your name", default=default_name)
+    print()
+
+    # Q2: Language
+    _wizard_line(_c("Primary language?", "tagline"))
+    _wizard_line(
+        f"  {_c('[1]', 'key')} English    {_c('[2]', 'key')} Hindi   "
+        f" {_c('[3]', 'key')} Hinglish"
+    )
+    lang_raw = _wizard_ask("Choice", default="1")
+    language = {"1": "en", "2": "hi", "3": "hinglish"}.get(lang_raw.strip(), "en")
+    print()
+
+    # Q3: Web search
+    _wizard_line(_c("Web search engine?", "tagline"))
+    _wizard_line(
+        f"  {_c('[S]', 'key')} SearXNG  "
+        + _c("(local, private, no rate limits — requires one-time setup)", "dim")
+    )
+    _wizard_line(
+        f"  {_c('[D]', 'key')} DuckDuckGo  "
+        + _c("(no setup required, works immediately)", "dim")
+    )
+    web_raw = _wizard_ask("Choice", default="D").upper()
+    web_engine = "searxng" if web_raw.startswith("S") else "duckduckgo"
+    print()
+
+    # Q4: STT
+    stt = _wizard_yn("Voice input — speak to Buddy via mic?", default=False)
+    print()
+
+    # Q5: TTS
+    tts = _wizard_yn("Voice output — Buddy speaks responses?", default=False)
+    print()
+
+    return {
+        "user_name": user_name,
+        "language": language,
+        "web_engine": web_engine,
+        "stt": stt,
+        "tts": tts,
+    }
+
+
+def _write_first_boot_config(
+    config_dir: Path,
+    *,
+    user_name: str,
+    language: str,
+    web_engine: str,
+    stt: bool,
+    tts: bool,
+) -> None:
+    """
+    Persist first-boot wizard choices to buddy.toml.
+    - Patches enable_audio_stt / enable_audio_tts in [features] via regex.
+    - Appends [user] and [web_search] sections if not present.
+    """
+    import re as _re
+
+    toml_path = config_dir / "buddy.toml"
+    try:
+        text = toml_path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        text = ""
+
+    # Patch existing [features] voice flags
+    stt_val = "true" if stt else "false"
+    tts_val = "true" if tts else "false"
+    text = _re.sub(r"enable_audio_stt\s*=\s*\w+", f"enable_audio_stt = {stt_val}", text)
+    text = _re.sub(r"enable_audio_tts\s*=\s*\w+", f"enable_audio_tts = {tts_val}", text)
+
+    # Append new [user] section
+    if "[user]" not in text:
+        text += f"""
+# ─────────────────────────────────────────────────────────────
+# User preferences — set by first-boot wizard
+# ─────────────────────────────────────────────────────────────
+[user]
+name = "{user_name}"
+language = "{language}"
+"""
+
+    # Append new [web_search] section
+    if "[web_search]" not in text:
+        text += f"""
+[web_search]
+engine = "{web_engine}"
+searxng_url = "http://127.0.0.1:8888"
+"""
+
+    try:
+        _atomic_write(toml_path, text)
+        logger.info("First-boot config saved: %s", toml_path)
+    except Exception as ex:
+        logger.warning("Failed to write first-boot config: %r", ex)
+
+
+# ═══════════════════════════════════════════════════════════
 # bootstrap()  — PUBLIC ENTRY POINT
 # ═══════════════════════════════════════════════════════════
 
 
-def bootstrap(options: Optional[BootstrapOptions] = None) -> BootstrapState:
+def bootstrap(
+    options: Optional[BootstrapOptions] = None,
+    progress_cb: Optional[Callable[[str, str], None]] = None,
+) -> BootstrapState:
     now_iso = _utc_now_iso()
     runtime = _load_runtime_config()
 
@@ -1558,15 +1890,43 @@ def bootstrap(options: Optional[BootstrapOptions] = None) -> BootstrapState:
         **{k: boot_cfg[k] for k in BootstrapOptions.__dataclass_fields__}
     )
 
+    # ── Progress callback helper (Textual BootScreen integration) ────────────
+    def _pcb(msg: str, status: str = "running") -> None:
+        if progress_cb:
+            try:
+                progress_cb(msg, status)
+            except Exception:
+                pass
+
+    # When running under Textual (progress_cb provided), shadow the module-level
+    # _ui_ok / _ui_warn / _ui_fail / _ui_info so their results also reach the
+    # BootLog.  In terminal mode (progress_cb is None) the originals are used.
+    if progress_cb:
+
+        def _ui_ok(msg: str) -> None:  # noqa: F811
+            _pcb(msg, "ok")
+
+        def _ui_warn(msg: str) -> None:  # noqa: F811
+            _pcb(msg, "warn")
+
+        def _ui_fail(msg: str) -> None:  # noqa: F811
+            _pcb(msg, "fail")
+
+        def _ui_info(msg: str) -> None:  # noqa: F811
+            _pcb(msg, "running")
+
     integrity = BootstrapIntegrity()
     installed: List[str] = []
 
-    # ── STEP 1 · Matrix reveal ────────────────────────────────────────────────
+    # ── STEP 1 · Animation ───────────────────────────────────────────────────
+    first_boot = _is_first_boot(os_profile_file)
     if opts.show_boot_ui:
+        if first_boot:
+            _birth_animation()
         _matrix_stream_reveal(duration=4)
         _term_clear()
 
-    # ── STEP 2 · First-boot name prompt ───────────────────────────────────────
+    # ── STEP 2 · First-boot name prompt (legacy — full wizard runs at Step 6.6) ──
     # Fires ONCE, after matrix reveal so the terminal is clean.
     # On every subsequent boot this block is completely skipped.
     user_preferred_name: Optional[str] = None
@@ -1589,6 +1949,7 @@ def bootstrap(options: Optional[BootstrapOptions] = None) -> BootstrapState:
         print(_c("\n  ◈  Buddy Cognitive System  ·  Initializing…\n", "bright_cyan"))
 
     # ── STEP 4 · Python dependencies ──────────────────────────────────────────
+    _pcb("Checking Python dependencies")
     sp = _ui_step(opts.show_boot_ui, "Checking Python dependencies")
     missing, present = _check_imports(_REQUIRED_IMPORTS)
     sp.stop()
@@ -1631,6 +1992,7 @@ def bootstrap(options: Optional[BootstrapOptions] = None) -> BootstrapState:
                 integrity.warnings.append(f"optional_missing:{import_name}")
 
     # ── STEP 5 · SQLite DB ────────────────────────────────────────────────────
+    _pcb("Preparing SQLite database")
     sp = _ui_step(opts.show_boot_ui, "Preparing SQLite database")
     try:
         _ensure_db(db_path)
@@ -1642,6 +2004,7 @@ def bootstrap(options: Optional[BootstrapOptions] = None) -> BootstrapState:
         integrity.violations.append(f"db_failed:{ex!r}")
 
     # ── STEP 6 · OS profile refresh (every boot) ──────────────────────────────
+    _pcb("Collecting system profile")
     sp = _ui_step(opts.show_boot_ui, "Collecting system profile")
     os_profile = _ensure_os_profile(
         integrity,
@@ -1666,7 +2029,65 @@ def bootstrap(options: Optional[BootstrapOptions] = None) -> BootstrapState:
 
     _ui_ok(f"System: {cores} cores · {ram_gb} GB RAM · {gpu_lbl}")
 
+    # ── STEP 6.5 · llama-server binary ───────────────────────────────────────
+    _root_dir = _runtime_root()
+    _bin_dir = _root_dir / "bin"
+    _state_dir = _root_dir / "state"
+    _llama_bin = ensure_llama_binary(
+        _bin_dir,
+        on_progress=lambda m, _d: _ui_info(m),
+    )
+    if _llama_bin:
+        _new_path = str(_llama_bin.parent) + os.pathsep + os.environ.get("PATH", "")
+        os.environ["PATH"] = _new_path
+
+    # ── STEP 6.6 · First-boot wizard ─────────────────────────────────────────
+    _wizard_result: Optional[Dict[str, Any]] = None
+    if first_boot:
+        if opts.show_boot_ui:
+            _term_clear()
+        _wizard_result = _run_first_boot_wizard(
+            os_profile=os_profile,
+            show_ui=opts.show_boot_ui,
+            default_name=user_preferred_name
+            or (os.environ.get("USER") or os.environ.get("USERNAME") or "boss"),
+        )
+        user_preferred_name = _wizard_result["user_name"]
+        os_profile["user_preferred_name"] = user_preferred_name
+        pref_name = user_preferred_name
+        _write_first_boot_config(
+            config_dir,
+            user_name=_wizard_result["user_name"],
+            language=_wizard_result["language"],
+            web_engine=_wizard_result["web_engine"],
+            stt=_wizard_result["stt"],
+            tts=_wizard_result["tts"],
+        )
+        # Re-run OS profile write with confirmed name
+        _ensure_os_profile(
+            integrity,
+            os_profile_file=os_profile_file,
+            assets_dir=assets_dir,
+            data_dir=data_dir,
+            user_preferred_name=user_preferred_name,
+        )
+        if opts.show_boot_ui:
+            _term_clear()
+
+    # Resolve web / voice settings from wizard or config
+    _feat_cfg = _sec(buddy_cfg, "features")
+    _web_cfg = _sec(buddy_cfg, "web_search")
+    if _wizard_result:
+        _web_engine = _wizard_result["web_engine"]
+        _stt = _wizard_result["stt"]
+        _tts = _wizard_result["tts"]
+    else:
+        _web_engine = _as_str(_web_cfg.get("engine"), "duckduckgo")
+        _stt = _as_bool(_feat_cfg.get("enable_audio_stt"), False)
+        _tts = _as_bool(_feat_cfg.get("enable_audio_tts"), False)
+
     # ── STEP 7 · LLM model selection ─────────────────────────────────────────
+    _pcb("Selecting LLM model")
     # Spinner stopped before this — interactive prompt may print to terminal.
     chosen = get_or_select_llm_model(
         os_profile,
@@ -1681,7 +2102,35 @@ def bootstrap(options: Optional[BootstrapOptions] = None) -> BootstrapState:
     else:
         chosen.filename = llama_cfg["model_gguf"]
 
+    # ── STEP 7.5 · Vision capability selection ───────────────────────────────
+    _vision_cfg = _sec(buddy_cfg, "vision")
+    _force_vision = _as_bool(
+        _vision_cfg.get("force_vision_reselect"),
+        opts.force_vision_reselect,
+    )
+    vision_choice: VisionChoice = get_or_select_vision(
+        chosen,
+        os_profile,
+        config_dir=config_dir,
+        show_ui=opts.show_boot_ui,
+        force_reselect=_force_vision,
+    )
+    if vision_choice.enabled:
+        _ui_ok(
+            f"Vision: enabled  ·  model {vision_choice.model_quant}"
+            f"  ·  mmproj {vision_choice.mmproj_quant}"
+        )
+        # Update hf_filename in chosen if user picked a different quant
+        if vision_choice.model_hf_filename:
+            chosen.hf_filename = vision_choice.model_hf_filename
+            chosen.filename = vision_choice.model_hf_filename
+            llama_cfg["model_gguf"] = vision_choice.model_hf_filename
+    else:
+        if getattr(chosen, "vision_capable", False):
+            _ui_ok("Vision: disabled (text-only mode)")
+
     # ── STEP 8 · LLM GGUF download ───────────────────────────────────────────
+    _pcb("Ensuring LLM model file")
     llm_status = _ensure_llm_gguf(
         integrity,
         chosen=chosen,
@@ -1689,7 +2138,26 @@ def bootstrap(options: Optional[BootstrapOptions] = None) -> BootstrapState:
         download_enabled=opts.download_models,
     )
 
+    # ── STEP 8.5 · mmproj download (vision only) ─────────────────────────────
+    mmproj_path: Optional[Path] = None
+    if vision_choice.enabled:
+        sp = _ui_step(opts.show_boot_ui, "Checking mmproj (vision encoder)")
+        mmproj_path = _ensure_mmproj(
+            vision_choice,
+            models_dir=models_dir,
+            download_enabled=opts.download_models,
+        )
+        sp.stop()
+        if mmproj_path:
+            _ui_ok(f"mmproj ready: {mmproj_path.name}")
+            # Persist resolved path back to vision config
+            _vision_cfg["mmproj_path"] = str(mmproj_path)
+        else:
+            _ui_warn("mmproj not available — vision disabled for this session")
+            vision_choice = VisionChoice(enabled=False)
+
     # ── STEP 9 · ST model downloads (no Spinner — tqdm owns terminal) ─────────
+    _pcb("Checking embedding models")
     _ui_info("Checking sentence-transformer models…")
     embedder_path = _ensure_st_model(
         embedder_model,
@@ -1720,6 +2188,7 @@ def bootstrap(options: Optional[BootstrapOptions] = None) -> BootstrapState:
     logger.info("BUDDY_RERANKER_MODEL=%s", os.environ["BUDDY_RERANKER_MODEL"])
 
     # ── STEP 11 · Prompt integrity ────────────────────────────────────────────
+    _pcb("Verifying prompt integrity")
     sp = _ui_step(opts.show_boot_ui, "Verifying prompt integrity")
     if opts.verify_prompts_lock:
         _verify_prompts_lock(
@@ -1733,14 +2202,114 @@ def bootstrap(options: Optional[BootstrapOptions] = None) -> BootstrapState:
         "Prompts OK" if integrity.prompts_lock_ok else "Prompts FAILED"
     )
 
+    # ── STEP 11.5 · SearXNG (if configured) ──────────────────────────────────
+    _searxng_started = False
+    _searxng_dir = _root_dir / "searxng"
+    _searxng_host = "127.0.0.1"
+    _searxng_port = int(
+        _sec(buddy_cfg, "web_search")
+        .get("searxng_url", "http://127.0.0.1:8888")
+        .split(":")[-1]
+        .split("/")[0]
+        if ":" in str(_sec(buddy_cfg, "web_search").get("searxng_url", ""))
+        else 8888
+    )
+    _searxng_scan_ports: List[int] = [
+        int(p)
+        for p in (
+            _sec(buddy_cfg, "web_search").get("searxng_scan_ports")
+            or [8888, 8889, 8890, 4000, 5000]
+        )
+        if str(p).isdigit()
+    ]
+
+    if _web_engine == "searxng":
+        # ── Port scan: detect already-running SearXNG ─────────
+        sp = _ui_step(opts.show_boot_ui, "Scanning for existing SearXNG")
+        _found_searxng_port = _scan_searxng_ports(_searxng_host, _searxng_scan_ports)
+        sp.stop()
+        if _found_searxng_port and _found_searxng_port != _searxng_port:
+            _searxng_port = _found_searxng_port
+            _searxng_url = f"http://{_searxng_host}:{_searxng_port}"
+            _ui_ok(
+                f"SearXNG found on alternate port {_found_searxng_port}: {_searxng_url}"
+            )
+            _searxng_started = True
+        elif _found_searxng_port == _searxng_port:
+            _searxng_started = True  # already on configured port
+
+        if not _searxng_started:
+            sp = _ui_step(opts.show_boot_ui, "Starting SearXNG")
+            if not _searxng_installed(_searxng_dir):
+                sp.stop()
+                _ui_info("SearXNG not installed — running setup (first time only)...")
+
+                def _ask_python() -> bool:
+                    return _wizard_yn(
+                        "SearXNG needs Python 3.8+ but none was found on this system.\n"
+                        "  Download a bundled Python runtime now? (~30 MB)",
+                        default=True,
+                    )
+
+                _ok_setup = setup_searxng(
+                    _searxng_dir,
+                    port=_searxng_port,
+                    python_dir=_root_dir / "python",
+                    ask_install_python=_ask_python,
+                    on_progress=lambda m, _d: _ui_info(m),
+                )
+                if not _ok_setup:
+                    _ui_warn("SearXNG setup failed — falling back to DuckDuckGo")
+                    _web_engine = "duckduckgo"
+                sp = _ui_step(opts.show_boot_ui, "Starting SearXNG")
+
+            if _web_engine == "searxng":
+                _searxng_started = start_searxng(
+                    _searxng_dir,
+                    _state_dir,
+                    port=_searxng_port,
+                    on_progress=lambda m, _d: _ui_info(m),
+                )
+                sp.stop()
+                if _searxng_started:
+                    _ui_ok(f"SearXNG online: http://{_searxng_host}:{_searxng_port}")
+                else:
+                    _ui_warn("SearXNG failed to start — falling back to DuckDuckGo")
+                    _web_engine = "duckduckgo"
+            else:
+                sp.stop()
+        else:
+            _ui_ok(f"SearXNG READY: http://{_searxng_host}:{_searxng_port}")
+
     # ── STEP 12 · llama-server ────────────────────────────────────────────────
+    _pcb("Starting llama-server")
     _proc_ref: List[Optional[subprocess.Popen]] = [None]
     _owned_ref: List[bool] = [False]
 
-    base_url = llama_cfg["base_url"]
     host = llama_cfg["host"]
     port = int(llama_cfg["port"])
     timeout = float(llama_cfg["ready_timeout_s"])
+
+    # ── Port scan: detect already-running llama-server ────────────────────────
+    _llama_scan_ports: List[int] = [
+        int(p)
+        for p in (llama_cfg.get("scan_ports") or [8080, 8081, 8082, 8088, 8888, 11434])
+        if str(p).isdigit()
+    ]
+    # Ensure configured port is first in the list
+    if port not in _llama_scan_ports:
+        _llama_scan_ports = [port] + _llama_scan_ports
+
+    sp = _ui_step(opts.show_boot_ui, "Scanning for existing llama-server")
+    _found_port = _scan_llama_ports(host, _llama_scan_ports)
+    sp.stop()
+    if _found_port and _found_port != port:
+        _ui_ok(f"llama-server found on alternate port {_found_port} — using it")
+        port = _found_port
+        llama_cfg["port"] = port
+
+    base_url = f"http://{host}:{port}"
+    llama_cfg["base_url"] = base_url
 
     llama_info: Dict[str, Any] = {
         "base_url": base_url,
@@ -1795,9 +2364,11 @@ def bootstrap(options: Optional[BootstrapOptions] = None) -> BootstrapState:
             # ── Dynamic context budget ────────────────────────────
             try:
                 from buddy.buddy_core.context_budget import ContextBudget
+
                 os_profile_data = {}
                 try:
                     import json as _json
+
                     _op_path = paths.get("os_profile")
                     if _op_path and Path(_op_path).exists():
                         with open(_op_path, "r", encoding="utf-8") as _f:
@@ -1808,7 +2379,7 @@ def bootstrap(options: Optional[BootstrapOptions] = None) -> BootstrapState:
                 _budget = ContextBudget.from_hardware(os_profile_data)
 
                 # Apply toml override if configured
-                _cb_cfg = config.get("context_budget") or {}
+                _cb_cfg = buddy_cfg.get("context_budget") or {}
                 _budget = ContextBudget.from_override(_budget, _cb_cfg)
 
                 # Replace --ctx-size in server_args with computed n_ctx
@@ -1820,7 +2391,9 @@ def bootstrap(options: Optional[BootstrapOptions] = None) -> BootstrapState:
                     f"top_k={_budget.top_k_memories}"
                 )
             except Exception as _cb_err:
-                logger.warning("context_budget failed, using toml server_args: %r", _cb_err)
+                logger.warning(
+                    "context_budget failed, using toml server_args: %r", _cb_err
+                )
             # ─────────────────────────────────────────────────────
 
             clean, removed = _sanitize_args(srv_args)
@@ -1837,6 +2410,12 @@ def bootstrap(options: Optional[BootstrapOptions] = None) -> BootstrapState:
                 str(int(port)),
                 *clean,
             ]
+
+            # ── Inject --mmproj when vision is enabled ────────────────
+            if vision_choice.enabled and mmproj_path is not None:
+                cmd.extend(["--mmproj", str(mmproj_path)])
+                logger.info("Vision: injecting --mmproj %s", mmproj_path)
+            # ─────────────────────────────────────────────────────────
 
             sp = _ui_step(opts.show_boot_ui, "Starting llama-server")
             proc, cmd = _spawn(cmd=cmd, log=llama_server_log)
@@ -1902,8 +2481,12 @@ def bootstrap(options: Optional[BootstrapOptions] = None) -> BootstrapState:
             _terminate(proc)
             _proc_ref[0] = None
             _owned_ref[0] = False
+        if _searxng_started:
+            logger.info("Shutting down SearXNG")
+            stop_searxng(_state_dir)
 
     # ── STEP 13 · Core objects ────────────────────────────────────────────────
+    _pcb("Creating core objects")
     if llama_info["ready"]:
         sp = _ui_step(opts.show_boot_ui, "Creating core objects")
         artifacts = _create_artifacts(
@@ -1928,6 +2511,7 @@ def bootstrap(options: Optional[BootstrapOptions] = None) -> BootstrapState:
         artifacts = BootstrapArtifacts()
 
     # ── STEP 14 · Strict enforcement ──────────────────────────────────────────
+    _pcb("Checking integrity")
     if opts.strict_integrity and integrity.violations:
         _shutdown()
         _ui_fail("Bootstrap failed — see violations below")
@@ -1936,6 +2520,7 @@ def bootstrap(options: Optional[BootstrapOptions] = None) -> BootstrapState:
         raise RuntimeError(f"Buddy bootstrap failed. violations={integrity.violations}")
 
     # ── STEP 15 · Boot report (only on success) ───────────────────────────────
+    _pcb("Writing boot report")
     report = {
         "version": 2,
         "generated_at": now_iso,
@@ -1985,6 +2570,7 @@ def bootstrap(options: Optional[BootstrapOptions] = None) -> BootstrapState:
             integrity.warnings.append(f"boot_report_write_failed:{ex!r}")
 
     # ── STEP 16 · Online banner — live server data ──────────────────────────
+    _pcb("Buddy ready", "ok")
     if opts.show_boot_ui and llama_info.get("ready"):
         _term_clear()
 
@@ -2013,6 +2599,9 @@ def bootstrap(options: Optional[BootstrapOptions] = None) -> BootstrapState:
             gpu_label=gpu_banner,
             ram_gb=str(ram_gb),
             llm_label=f"llama.cpp  ·  {model_display}",
+            web_engine=_web_engine,
+            stt=_stt,
+            tts=_tts,
         )
 
         # ── Live server detail block ──────────────────────────────────────

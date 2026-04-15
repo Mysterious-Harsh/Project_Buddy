@@ -568,6 +568,20 @@ class MemoryManager:
         return e2
 
     # ------------------------------------------------------------------
+    # Stats / UI helpers
+    # ------------------------------------------------------------------
+
+    def tier_counts(self) -> dict:
+        """Return {flash, short, long} live counts from SQLite."""
+        try:
+            return self.sqlite.tier_counts()
+        except Exception:
+            return {"flash": 0, "short": 0, "long": 0}
+
+    # Most recent memory text surfaced by search_candidates — updated in-place.
+    last_retrieved_text: str = ""
+
+    # ------------------------------------------------------------------
     # Write path
     # ------------------------------------------------------------------
 
@@ -961,6 +975,10 @@ class MemoryManager:
             self._dbg("spreading_activation | added=%d new candidates", len(spread_pool))
 
         out = [c for _, c in scored[:top_k]]
+
+        # Record top result for UI display (InfoPane "last memory" line)
+        if out:
+            self.last_retrieved_text = out[0].content[:120]
 
         # Batch touch all accessed memories (primary + spread) in one pass
         for _mid in _touch_ids:

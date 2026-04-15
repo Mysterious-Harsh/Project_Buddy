@@ -1,6 +1,7 @@
 # buddy/actions/action_router.py
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from dataclasses import dataclass
@@ -211,17 +212,17 @@ class ActionRouter:
         *,
         turn_id: str,
         session_id: str,
-        intent: str,
+        planner_instructions: str,
         user_message: str,
         memories: str,
         on_token: Optional[Callable[[str, bool], None]] = None,
         llm_options: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         logger.info(
-            "ACTION start turn_id=%s session_id=%s intent=%s",
+            "ACTION start turn_id=%s session_id=%s planner_instructions=%s",
             turn_id,
             session_id,
-            intent,
+            planner_instructions,
         )
         now_iso, timezone = self._get_time_info()
 
@@ -230,7 +231,7 @@ class ActionRouter:
 
         registry = ToolRegistry()
         available_tools = registry.available_tools()
-        available_tools_str = json.dumps(available_tools, ensure_ascii=False)
+        available_tools_str = json.dumps(available_tools, ensure_ascii=False, indent=2)
 
         # ── log what the planner will see ────────────────────────────────────
         tool_names = [t["name"] for t in available_tools]
@@ -241,7 +242,7 @@ class ActionRouter:
             "└─────────────────────────────────────────────────────────",
             len(tool_names),
             ", ".join(tool_names),
-            intent[:120],
+            planner_instructions[:120],
         )
 
         # ======================================================
@@ -250,13 +251,16 @@ class ActionRouter:
         t0 = time.perf_counter()
         planner_parsed: Dict[str, Any] = {}
         if on_token:
-            preview = intent.replace("\r", " ").replace("\n", " ").strip()[:80]
+            preview = (
+                planner_instructions.replace("\r", " ").replace("\n", " ").strip()[:80]
+            )
             on_token(f"Planning {preview}", False)
         while True:
 
-            planner_payload = self.brain.run_planner(
-                user_current_message=user_message + self.stack.appendix,
-                intent=intent,
+            planner_payload = await asyncio.to_thread(
+                self.brain.run_planner,
+                active_task=self.stack.appendix,
+                planner_instructions=planner_instructions,
                 available_tools=available_tools_str,
                 memories=memories,
                 stream=True,
@@ -264,10 +268,11 @@ class ActionRouter:
                 llm_options=llm_options,
             )
             planner_parsed = planner_payload.get("parsed") or planner_payload or {}
+            _status = str(planner_parsed.get("status") or "").strip().lower()
 
             rerun = await self.stack.handle(
-                followup=bool(planner_parsed.get("followup")),
-                followup_question=str(planner_parsed.get("followup_question")),
+                followup=(_status == "followup"),
+                followup_question=str(planner_parsed.get("message") or ""),
                 stage="planner",
             )
             if not rerun:
@@ -278,21 +283,22 @@ class ActionRouter:
 
         # ── log the plan the planner produced ────────────────────────────────
         _steps_raw = planner_parsed.get("steps") or []
-        if planner_parsed.get("refusal"):
+        _plan_status = str(planner_parsed.get("status") or "").strip().lower()
+        if _plan_status == "refusal":
             logger.info(
                 "┌─ PLAN: REFUSED (%.2fs) ──────────────────────────────────\n"
                 "│  reason: %s\n"
                 "└─────────────────────────────────────────────────────────",
                 planner_dt,
-                str(planner_parsed.get("refusal_reason") or "")[:200],
+                str(planner_parsed.get("message") or "")[:200],
             )
-        elif planner_parsed.get("followup"):
+        elif _plan_status == "followup":
             logger.info(
                 "┌─ PLAN: FOLLOWUP (%.2fs) ─────────────────────────────────\n"
                 "│  question: %s\n"
                 "└─────────────────────────────────────────────────────────",
                 planner_dt,
-                str(planner_parsed.get("followup_question") or "")[:200],
+                str(planner_parsed.get("message") or "")[:200],
             )
         elif _steps_raw:
             step_lines = "\n".join(
@@ -316,6 +322,7 @@ class ActionRouter:
                 "planner returned no steps and no refusal/followup (%.2fs)", planner_dt
             )
 
+        responder_note = str(planner_parsed.get("responder_note") or "").strip()
         steps = (
             (planner_parsed.get("steps") or [])
             if isinstance(planner_parsed, dict)
@@ -326,6 +333,7 @@ class ActionRouter:
                 "now_iso": now_iso,
                 "timezone": timezone,
                 "planner": planner_parsed,
+                "responder_note": responder_note,
                 "step_execution_map": {},
             }
 
@@ -459,9 +467,12 @@ class ActionRouter:
 
                 # 1) Ask executor for tool_call (or followup/abort)
                 t0 = time.perf_counter()
-                exec_payload = self.brain.run_executor(
-                    instruction=json.dumps(instruction),
-                    prior_outputs=json.dumps(prior_outputs, ensure_ascii=False),
+                exec_payload = await asyncio.to_thread(
+                    self.brain.run_executor,
+                    instruction=json.dumps(instruction, indent=2, ensure_ascii=False),
+                    prior_outputs=json.dumps(
+                        prior_outputs, indent=2, ensure_ascii=False
+                    ),
                     step_followups=self.stack.appendix,
                     step_errors=self.errors.appendix,
                     tool_info=tool_prompt,
@@ -598,7 +609,12 @@ class ActionRouter:
                     attempt += 1
                     continue
 
-                tool_exec_result = tool.execute(call_obj, on_progress=on_token)
+                tool_exec_result = tool.execute(
+                    call_obj,
+                    on_progress=on_token,
+                    goal=user_message,
+                    brain=self.brain,
+                )
 
                 # 4) Evaluate tool result
                 ok = (
@@ -613,15 +629,24 @@ class ActionRouter:
                     if "ACTION" in tool_exec_result:
                         _summary_parts.append(f"action={tool_exec_result['ACTION']}")
                     if "TOTAL_FOUND" in tool_exec_result:
-                        _summary_parts.append(f"found={tool_exec_result['TOTAL_FOUND']}")
-                    if "SIZE_BYTES" in tool_exec_result and tool_exec_result["SIZE_BYTES"] is not None:
+                        _summary_parts.append(
+                            f"found={tool_exec_result['TOTAL_FOUND']}"
+                        )
+                    if (
+                        "SIZE_BYTES" in tool_exec_result
+                        and tool_exec_result["SIZE_BYTES"] is not None
+                    ):
                         _summary_parts.append(f"size={tool_exec_result['SIZE_BYTES']}B")
                     if "EXIT_CODE" in tool_exec_result:
                         _summary_parts.append(f"exit={tool_exec_result['EXIT_CODE']}")
                     if not ok and tool_exec_result.get("ERROR"):
-                        _summary_parts.append(f"error={str(tool_exec_result['ERROR'])[:120]}")
+                        _summary_parts.append(
+                            f"error={str(tool_exec_result['ERROR'])[:120]}"
+                        )
                     elif not ok and tool_exec_result.get("STDERR"):
-                        _summary_parts.append(f"stderr={str(tool_exec_result['STDERR'])[:120]}")
+                        _summary_parts.append(
+                            f"stderr={str(tool_exec_result['STDERR'])[:120]}"
+                        )
                     _result_summary = "  ".join(_summary_parts) or "(no summary fields)"
                 else:
                     _result_summary = str(tool_exec_result)[:120]
@@ -675,6 +700,7 @@ class ActionRouter:
             "now_iso": now_iso,
             "timezone": timezone,
             "planner": planner_parsed,
+            "responder_note": responder_note,
             "step_execution_map": step_execution_map,
         }
 

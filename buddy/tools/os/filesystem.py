@@ -493,18 +493,27 @@ class Filesystem:
             "name": self.tool_name,
             "version": self.version,
             "description": (
-                "Use for ALL file and directory operations: "
-                "find files (search), find text in files (grep), "
-                "read ANY file — text, CSV/Excel/Parquet (tabular), PDF, DOCX (read), "
-                "read a line range (read_lines), "
-                "write or create files (write / append), "
-                "browse directories (list / tree), "
-                "delete / copy / move / rename files, "
-                "check file info (info), open with default app (open), compare files (diff). "
-                "For tabular files use pandas_query='col > val' or search_pattern='text' to filter. "
-                "ALWAYS name the intended action + file type in hints — "
-                "e.g. 'use read action on csv file' or 'use write action'. "
-                "Do NOT use terminal for file operations."
+                "ALL file and directory operations. Never use terminal for file work.\n"
+                "\n"
+                "ACTIONS — always write the action name in your step hints:\n"
+                "  FIND   → search (file by name/glob) | grep (lines matching text, returns line numbers)\n"
+                "  READ   → read (text/CSV/Excel/Parquet/PDF/DOCX) | read_lines (by line range)\n"
+                "           list (dir contents) | tree (recursive structure) | info (size/type/exists) | diff\n"
+                "  WRITE  → write (create or overwrite) | append (add to end) | patch (replace exact text)\n"
+                "  MANAGE → mkdir | copy | move | delete | open (launch with default app)\n"
+                "\n"
+                "SEARCH vs GREP:\n"
+                "  search → which FILES match a name pattern or contain text (file-level)\n"
+                "  grep   → which LINES match + line numbers (use when you need a line number for read_lines or patch)\n"
+                "\n"
+                "TABULAR (.csv/.xlsx/.parquet): use pandas_query='col > val' or columns=['a','b'] to filter.\n"
+                "CONFIRMED GATE: write/patch/move/delete first call returns PREVIEW (no changes).\n"
+                "                Call again with confirmed=true to execute.\n"
+                "\n"
+                "HINT RULE: always include the action name in planner hints, e.g.:\n"
+                "  'use grep action to find def login in *.py files'\n"
+                "  'use write action to create config.toml'\n"
+                "  'use patch action to replace old_str in app.py'"
             ),
             "prompt": FILESYSTEM_TOOL_PROMPT,
             "error_prompt": FILESYSTEM_ERROR_RECOVERY_PROMPT,
@@ -533,6 +542,9 @@ class Filesystem:
         self,
         call: FilesystemCall,
         on_progress: Optional[Callable[[str, bool], None]] = None,
+        goal: str = "",
+        brain: Optional[Any] = None,
+        **_kwargs: Any,
     ) -> Dict[str, Any]:
         if on_progress:
             on_progress(f"{call.action}: {call.path}", False)
@@ -556,7 +568,21 @@ class Filesystem:
                 "grep":       self._grep,
                 "diff":       self._diff,
             }
-            return dispatch[call.action](call)
+            result = dispatch[call.action](call)
+
+            # Apply TextReader on large read/grep results when llm + goal available
+            if (
+                goal and brain
+                and call.action in ("read", "grep")
+                and result.get("OK")
+            ):
+                from buddy.brain.text_reader import maybe_read
+                content_key = "content" if "content" in result else "output"
+                raw = result.get(content_key, "")
+                if isinstance(raw, str):
+                    result[content_key] = maybe_read(raw, goal, brain, on_progress)
+
+            return result
         except Exception as exc:
             return _err(call.action, call.path, f"{type(exc).__name__}: {exc}")
 

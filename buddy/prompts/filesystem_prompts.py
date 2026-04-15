@@ -259,11 +259,33 @@ Read ERROR carefully. Never repeat the identical call. Fix first, then retry.
 
 
 tool_call_format = """
-{
-  "action": "search",
-  "path": "~",
-  "pattern": "*filename*",
-  "recursive": true,
-  "max_results": 20
-}
+FILESYSTEM TOOL CALL — pick exactly ONE block below. Include only the fields shown.
+
+── FIND ──────────────────────────────────────────────────────────────
+  {"action": "search",     "path": "/abs/path", "pattern": "*.py", "recursive": true, "max_results": 20}
+  {"action": "grep",       "path": "/abs/path", "content_query": "def login", "pattern": "*.py", "context_lines": 2}
+
+── READ ──────────────────────────────────────────────────────────────
+  {"action": "info",       "path": "/abs/path"}
+  {"action": "list",       "path": "/abs/path"}
+  {"action": "tree",       "path": "/abs/path", "depth": 3}
+  {"action": "read",       "path": "/abs/path", "max_chars": 8000}
+  {"action": "read",       "path": "/data.csv",  "pandas_query": "col > val", "columns": ["a","b"]}
+  {"action": "read_lines", "path": "/abs/path", "start_line": 10, "end_line": 50}
+  {"action": "diff",       "path": "/file1.txt", "destination": "/file2.txt"}
+
+── WRITE / MODIFY ────────────────────────────────────────────────────
+  {"action": "write",  "path": "/abs/path", "content": "full file text", "confirmed": false}
+  {"action": "append", "path": "/abs/path", "content": "text to add"}
+  {"action": "patch",  "path": "/abs/path", "old_str": "exact text", "new_str": "replacement", "replace_all": false, "confirmed": false}
+
+── MANAGE ────────────────────────────────────────────────────────────
+  {"action": "mkdir",  "path": "/abs/path"}
+  {"action": "copy",   "path": "/src",      "destination": "/dst"}
+  {"action": "move",   "path": "/src",      "destination": "/dst/newname", "confirmed": false}
+  {"action": "delete", "path": "/abs/path", "confirmed": false}
+  {"action": "open",   "path": "/abs/path"}
+
+RULES: action + path always required. confirmed=false → returns PREVIEW, no changes made.
+       Call again with confirmed=true to execute write/patch/move/delete.
 """

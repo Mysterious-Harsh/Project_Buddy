@@ -13,7 +13,7 @@ from buddy.buddy_core.context_budget import (
     _CPU_TIERS,
     _FLOOR_RECENT_TURNS,
 )
-from buddy.buddy_core.bootstrap_llama import _inject_ctx_size
+from buddy.buddy_core.boot import _inject_ctx_size
 from buddy.buddy_core.smart_truncator import (
     truncate_middle,
     truncate_proportional,

@@ -45,8 +45,13 @@ model_gguf = "Qwen3-14B-Q4_K_M.gguf"     # fallback only — see note above
 model_name = "local-model"
 ready_timeout_s = 180.0
 
+# Ports to scan for an already-running llama-server (checked before spawning a new one).
+# If found on a different port, Buddy will use that instance instead.
+scan_ports = [8080, 8081, 8082, 8088, 8888, 11434]
+
 # Server flags injected at boot.
 # Do NOT include: llama-server, -m, --host, --port (bootstrap injects those).
+# --mmproj is injected automatically when vision is enabled.
 server_args = [
   "--ctx-size", "16384",
   "--threads", "8",
@@ -56,6 +61,16 @@ server_args = [
   "--mlock",
   "--no-webui"
 ]
+
+# -----------------------------------------
+# Vision (Qwen3.5 native multimodal)
+# Set by first-boot wizard → saved to ~/.buddy/config/vision_choice.json
+# enabled / mmproj_path are overridden at runtime from vision_choice.json.
+# -----------------------------------------
+[vision]
+enabled = false
+force_vision_reselect = false   # set true to re-run vision setup on next boot
+mmproj_path = ""                # absolute path to mmproj GGUF — auto-set after download
 
 
 # -----------------------------------------
@@ -133,6 +148,25 @@ enabled = true
 max_threads = 5
 
 # -----------------------------------------
+# User (set by first-boot wizard)
+# -----------------------------------------
+[user]
+language = "en"
+
+# -----------------------------------------
+# Web Search
+# engine: "searxng" | "duckduckgo"
+# searxng_url: local SearXNG instance (set up by first-boot wizard)
+# -----------------------------------------
+[web_search]
+engine = "duckduckgo"
+searxng_url = "http://127.0.0.1:8888"
+
+# Ports to scan for an already-running SearXNG instance.
+# If found on a different port, Buddy will use that URL instead.
+searxng_scan_ports = [8888, 8889, 8890, 4000, 5000]
+
+# -----------------------------------------
 # Feature Flags
 # -----------------------------------------
 [features]
@@ -141,6 +175,9 @@ enable_consolidation = true
 enable_notifications = true
 enable_audio_stt = true
 enable_audio_tts = true
+# Aliases written by first-boot wizard:
+enable_stt = true
+enable_tts = true
 
 # -----------------------------------------
 # Brain Policy

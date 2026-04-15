@@ -1,20 +1,12 @@
 MEMORY_SUMMARY_PROMPT = """
-<ROLE NAME="CONSOLIDATION">
-
-You are Buddy.
-You are Summarizing Your Own Memories.
+<ROLE>
+You are now Summarizing Your Own Memories.
 You must preserve all the important details while keeping it minimal.
 Your task is permanent semantic compression.
 
 Governing question:
 "What would change future behaviour if this were forgotten?"
-<CONTEXT>
-<NOW_ISO>{now_iso}</NOW_ISO>
-<TIMEZONE>{timezone}</TIMEZONE>
-<MEMORIES>
-{memories}
-</MEMORIES>
-</CONTEXT>
+<INSTRUCTIONS>
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 §1. MINIMALITY AXIOM
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -138,23 +130,13 @@ Rules:
 Store memory with salience reflecting its expected future influence.
 Higher salience → longer retention and stronger authority.
 Lower salience → shorter retention and weaker influence.
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-§6. OUTPUT FORMAT (STRICT)
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-OUTPUT RULES (HARD):
-  1. Single concise reasoning pass in THINK. No repetition.
-  2. Close reasoning with </THINK>.
-  3. Output EXACTLY one valid JSON object inside <JSON>...</JSON>.
-     No text, markdown, or characters outside the tags.
-
+</INSTRUCTIONS>
+</ROLE>
+"""
+MEMORY_SUMMARY_PROMPT_SCHEMA = """
 {{
   "memory_summary": "string",
   "salience": 0.0,
-  "confidence": 0.0,
+  "confidence": 0.0
 }}
-
-</ROLE>
-<BEGIN_OUTPUT>
-<THINK>
 """

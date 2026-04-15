@@ -506,7 +506,7 @@ class LlamaClient:
     def chat(
         self,
         *,
-        messages: List[Dict[str, str]],
+        messages: List[Dict[str, Any]],
         system: Optional[str] = None,
         stream: bool = True,
         temperature: float = 0.0,
@@ -519,6 +519,10 @@ class LlamaClient:
         options: Optional[Dict[str, Any]] = None,
         on_delta: Optional[Callable[[str], None]] = None,
         interrupt_event: Optional[threading.Event] = None,
+        # Vision: data URIs for multimodal input ["data:image/jpeg;base64,...", ...]
+        # Injected into the last user message as OAI content array (image_url entries).
+        # Supports multiple images — one entry per image.
+        images: Optional[List[str]] = None,
     ) -> str:
         """
         Chat completion endpoint (/v1/chat/completions).
@@ -537,6 +541,8 @@ class LlamaClient:
             options: Additional model-specific options
             on_delta: Callback for streaming chunks
             interrupt_event: Event to cancel request (thread-safe)
+            images: Data URIs for vision input (["data:image/png;base64,...", ...]).
+                    Injected into the last user message as image_url content blocks.
 
         Returns:
             Generated text
@@ -556,6 +562,7 @@ class LlamaClient:
             seed=seed,
             stop=stop,
             options=options,
+            images=images,
         )
 
         text, _stats = self._call(
@@ -588,6 +595,8 @@ class LlamaClient:
         json_root: str = "object",
         json_max_chars: int = 120_000,
         interrupt_event: Optional[threading.Event] = None,
+        # Vision: list of {"data": "<base64>", "id": N} dicts (Qwen3.5 multimodal)
+        image_data: Optional[List[Dict[str, Any]]] = None,
     ) -> str:
         """
         Text completion endpoint (/v1/completions).
@@ -657,13 +666,20 @@ class LlamaClient:
 
         payload.update(user_opts)
 
+        # Vision: inject image_data for multimodal models (Qwen3.5).
+        # image_data uses the native /completion endpoint — NOT /v1/completions.
+        # Native format: {"content": "...", "stop": true} (no choices array).
+        if image_data:
+            payload["image_data"] = image_data
+
         # Streaming JSON extraction setup
         json_capture = None
         if stream and json_extract:
             json_capture = _JsonCapture(root=json_root, max_chars=int(json_max_chars))
 
+        endpoint = "/completion" if image_data else "/v1/completions"
         text, _stats = self._call(
-            endpoint="/v1/completions",
+            endpoint=endpoint,
             payload=payload,
             on_delta=on_delta,
             json_capture=json_capture,
@@ -726,7 +742,7 @@ class LlamaClient:
     def _build_chat_payload(
         self,
         *,
-        messages: List[Dict[str, str]],
+        messages: List[Dict[str, Any]],
         system: Optional[str],
         stream: bool,
         temperature: float,
@@ -737,11 +753,28 @@ class LlamaClient:
         seed: Optional[int],
         stop: Optional[Union[str, List[str]]],
         options: Optional[Dict[str, Any]],
+        images: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
-        """Build chat completion payload"""
-        final_msgs = messages
+        """Build chat completion payload.
+
+        When images (data URIs) are provided, the last user message's content is
+        converted from a plain string into an OAI multimodal content array:
+          [{"type": "text", "text": "..."}, {"type": "image_url", "image_url": {"url": "data:..."}}, ...]
+        """
+        final_msgs: List[Dict[str, Any]] = list(messages)
         if system:
-            final_msgs = [{"role": "system", "content": system}] + messages
+            final_msgs = [{"role": "system", "content": system}] + final_msgs
+
+        # Inject images into last user message as OAI multimodal content array
+        if images:
+            for i in range(len(final_msgs) - 1, -1, -1):
+                if final_msgs[i].get("role") == "user":
+                    original = final_msgs[i].get("content", "")
+                    content: List[Dict[str, Any]] = [{"type": "text", "text": str(original)}]
+                    for uri in images:
+                        content.append({"type": "image_url", "image_url": {"url": uri}})
+                    final_msgs[i] = {**final_msgs[i], "content": content}
+                    break
 
         payload: Dict[str, Any] = {
             "model": self.model,
@@ -1580,71 +1613,93 @@ class LlamaClient:
 
     @staticmethod
     def _extract_text_openai(obj: Dict[str, Any]) -> Tuple[str, Optional[str]]:
-        """Extract text from blocking response"""
+        """Extract text from blocking response.
+
+        Handles two response shapes:
+        - OAI /v1/completions & /v1/chat/completions: {"choices": [...]}
+        - Native llama.cpp /completion: {"content": "...", "stop": true}
+        """
         choices = obj.get("choices")
-        if not choices or not isinstance(choices, list):
-            return "", None
+        if choices and isinstance(choices, list):
+            c0 = choices[0] if choices else None
+            if isinstance(c0, dict):
+                fr = c0.get("finish_reason")
+                finish_reason = str(fr) if fr is not None else None
 
-        c0 = choices[0] if choices else None
-        if not isinstance(c0, dict):
-            return "", None
+                # Try text field (completions)
+                t = c0.get("text")
+                if isinstance(t, str) and t:
+                    return t, finish_reason
 
-        fr = c0.get("finish_reason")
-        finish_reason = str(fr) if fr is not None else None
+                # Try message.content (chat)
+                msg = c0.get("message")
+                if isinstance(msg, dict):
+                    content = msg.get("content")
+                    if isinstance(content, str) and content:
+                        return content, finish_reason
 
-        # Try text field (completions)
-        t = c0.get("text")
-        if isinstance(t, str) and t:
-            return t, finish_reason
+                return "", finish_reason
 
-        # Try message.content (chat)
-        msg = c0.get("message")
-        if isinstance(msg, dict):
-            content = msg.get("content")
-            if isinstance(content, str) and content:
-                return content, finish_reason
+        # Fallback: native llama.cpp /completion format {"content": "...", "stop": true}
+        native = obj.get("content")
+        if isinstance(native, str):
+            stop = obj.get("stop")
+            finish_reason = "stop" if stop else None
+            return native, finish_reason
 
-        return "", finish_reason
+        return "", None
 
     @staticmethod
     def _extract_delta_openai(obj: Dict[str, Any]) -> Tuple[str, Optional[str]]:
-        """Extract delta from streaming chunk"""
+        """Extract delta from streaming chunk.
+
+        Handles two streaming shapes:
+        - OAI SSE: {"choices": [{"delta": {"content": "..."}, "finish_reason": null}]}
+        - Native llama.cpp /completion SSE: {"content": "...", "stop": false}
+        """
         choices = obj.get("choices")
-        if not choices or not isinstance(choices, list):
-            return "", None
+        if choices and isinstance(choices, list):
+            c0 = choices[0] if choices else None
+            if isinstance(c0, dict):
+                fr = c0.get("finish_reason")
+                finish_reason = str(fr) if fr is not None else None
 
-        c0 = choices[0] if choices else None
-        if not isinstance(c0, dict):
-            return "", None
+                # Try text field (completions)
+                t = c0.get("text")
+                if isinstance(t, str) and t:
+                    return t, finish_reason
 
-        fr = c0.get("finish_reason")
-        finish_reason = str(fr) if fr is not None else None
+                # Try delta.content (chat)
+                delta = c0.get("delta")
+                if isinstance(delta, dict):
+                    content = delta.get("content")
+                    if isinstance(content, str) and content:
+                        return content, finish_reason
 
-        # Try text field (completions)
-        t = c0.get("text")
-        if isinstance(t, str) and t:
-            return t, finish_reason
+                # Try message.content (alternative format)
+                msg = c0.get("message")
+                if isinstance(msg, dict):
+                    content = msg.get("content")
+                    if isinstance(content, str) and content:
+                        return content, finish_reason
 
-        # Try delta.content (chat)
-        delta = c0.get("delta")
-        if isinstance(delta, dict):
-            content = delta.get("content")
-            if isinstance(content, str) and content:
-                return content, finish_reason
+                return "", finish_reason
 
-        # Try message.content (alternative format)
-        msg = c0.get("message")
-        if isinstance(msg, dict):
-            content = msg.get("content")
-            if isinstance(content, str) and content:
-                return content, finish_reason
+        # Fallback: native llama.cpp /completion streaming {"content": "...", "stop": false}
+        native = obj.get("content")
+        if isinstance(native, str):
+            stop = obj.get("stop")
+            finish_reason = "stop" if stop else None
+            return native, finish_reason
 
-        return "", finish_reason
+        return "", None
 
 
 if __name__ == "__main__":
     import sys
-    from buddy.prompts.base_system_prompts import BUDDY_IDENTITY
+    from buddy.tests.test_prompt import test_planner_prompt
+    from buddy.tests.test_retrieval_prompt import test_retrieval_prompt
+    from buddy.tests.test_brain_prompt import test_brain_prompt
 
     client = LlamaClient(
         model="local-model",
@@ -1667,190 +1722,17 @@ if __name__ == "__main__":
     try:
         print("\n[stream completion w/ json_extract+validate]")
         out = client.generate(
-            prompt="""
-<ROLE name="MEMORY_QUERY_BUILDER">
-
-You are Buddy, deciding what to recall before responding.
-Produce ONE search query that retrieves the memories that
-make the response feel like it comes from genuine, deep
-familiarity — not topical relevance.
-
-<INPUT_DATA>
-<NOW_ISO>{now_iso}</NOW_ISO>
-<TIMEZONE>{timezone}</TIMEZONE>
-
-<CONVERSATION_HISTORY>
-{recent_turns}
-</CONVERSATION_HISTORY>
-
-<USER_CURRENT_MESSAGE>
-{user_query}
-</USER_CURRENT_MESSAGE>
-</INPUT_DATA>
-
-<INSTRUCTIONS>
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-§1. READ THE INTENT BENEATH THE MESSAGE
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-Before building any query, understand what the person
-actually means — not just what they said. A message is
-never just its words. It carries a situation, a mood,
-an implicit want, and a moment in time. All four shape
-what is worth retrieving.
-
-Ask: what is this person doing right now, not just saying?
-Are they starting something, checking in, winding down,
-seeking reassurance, picking up a thread, processing
-something difficult, or simply reaching out?
-
-The intent is the real retrieval target. The words are
-just its surface. A query built on words alone will
-retrieve information. A query built on intent will
-retrieve meaning.
-
-When the message is a greeting or social opener, the
-intent is relational — not informational. Read the hour.
-A person reaching out in the morning is likely in a
-different state, with different habits and needs, than
-the same person reaching out late at night. Think like
-someone who knows them: what does this time of day mean
-for this person, based on what has been shared before?
-What do they typically carry at this hour — their
-routines, their moods, what they tend to need or talk
-about? Let that shape the query, not the surface words
-of the greeting itself.
-
-When the message is task-focused, the intent is about
-what they are trying to accomplish and why — the goal
-behind the ask, not just the ask itself.
-
-When the message is emotionally charged, the intent
-includes what they may need to feel, not just what
-they asked to know.
-
-Always build the query toward the intent. Never build
-it toward the surface.
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-§2. TWO LAYERS OF RECALL
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-LAYER 1 — SUBJECT MEMORY:
-What is known about this subject as it has appeared
-and been felt in this specific exchange — not in general.
-The subject in the abstract is irrelevant. What matters
-is its particular history here.
-
-LAYER 2 — STATE MEMORY:
-The current condition of this exchange — emotionally,
-situationally, temporally — that shifts which memories
-are most worth surfacing now. Matters most when the
-message carries weight beyond its surface, when the
-hour is significant, or when what came before colours
-what this message actually means.
-
-RULE: Every query carries at least one signal from LAYER 1.
-Weave LAYER 2 in only when it genuinely changes what is
-most useful to retrieve. Never force either layer.
-
-
-──────────────────────────────────────────────────────
-§3. UNRESOLVED REFERENCES
-──────────────────────────────────────────────────────
-
-When the message references something without enough
-information to identify it precisely:
-→ Read CONVERSATION_HISTORY first.
-→ If resolved there — anchor on what was identified.
-→ If still unresolved — anchor on the quality, dynamic,
-or nature of what is referenced, not on its label.
-
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-§4. TIME AWARENESS
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-Read NOW_ISO. Derive the time period from the hour.
-
-Time changes recall when the hour itself carries meaning —
-when knowing when this was sent would shift what a deeply
-attentive responder wants to remember. The time of a social
-opener always carries meaning. A mismatch between the hour
-and the tone of a message is itself a signal worth including.
-
-Time does not change recall when the message is purely
-about completing a task with no situational or emotional
-dimension the hour would affect.
-
-When time is relevant, reflect what that hour means in this
-specific context — not just name the period as a label.
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-§5. BUILDING THE QUERY
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-“search_query”:
-    -   Must be written as first person that you are looking into your own memories. 
-	-	Think like the user’s closest friend whose goal is to fulfill the request in the best possible way.
-	-	To help the user with the request or message in best possible way what do you must need to remember from your own memories.
-	-	Think and search memory broadly by adding known synonyms, paraphrases, and related concepts to avoid missing relevant context.
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-§6. DEEP RECALL JUDGMENT (DEFAULT deep_recall = False)
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-deep_recall signals whether the user message need to look
- into older, more established memories.
-
-Set deep_recall to true when:
-— The message contains or user ask for check deeper or older memories.
-- When user explicitly ask to look deeper
-Otherwise :
-- Set deep_recall = False
-
-</INSTRUCTIONS>
-
-<OUTPUT_FORMAT>
-
-OUTPUT RULES (HARD):
-  1. Single concise reasoning pass in THINK. No repetition.
-  2. Close reasoning with </THINK>.
-  3. Output EXACTLY one valid JSON object inside <JSON>...</JSON>.
-      No text, markdown, or characters outside the tags.
-  4. ack_message: 2–5 words. First person, present tense, to tell user what you are trying memorizing.
-
-{{
-  "ack_message": "…",
-  "search_query": "…",
-  "deep_recall": true | false
-}}
-
-</OUTPUT_FORMAT>
-
-</ROLE>
-
-<BEGIN_OUTPUT>
-<THINK>
-""".format(
-                now_iso=str(time.time()),
-                timezone="halifax",
-                recent_turns="",
-                user_query="do you know my papa",
-            ),
-            system=BUDDY_IDENTITY.format(
-                user_preferred_name="Kishan", os_profile="macos"
-            ),
+            prompt=test_planner_prompt,
             stream=True,
-            temperature=0.2,
-            top_p=1.0,
+            temperature=0.4,
+            top_p=0.98,
             repeat_last_n=128,
             repeat_penalty=1.06,
             on_delta=on_print,
             json_extract=True,
             json_validate=True,
             json_root="object",
-            stop=["<END_OUTPUT>", "</BEGIN_OUTPUT> ", "</BUDDY>", "</BEGIN_JSON>"],
+            stop=["<|im_end|>"],
         )
         print("\n---\nEXTRACTED:\n", out)
 

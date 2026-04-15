@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field, model_validator
 # ==========================================================
 
 
-class IntentType(str, Enum):
+class ModeType(str, Enum):
     """
     Prompt-aligned decision.mode (Brain prompt v1).
     """
@@ -80,8 +80,8 @@ class Decision(BuddyBaseModel):
     Matches the strict JSON output of the Brain prompt.
     """
 
-    intent_type: IntentType
-    intent: str = Field(default="")
+    mode: ModeType
+    planner_instructions: str = Field(default="")
     response: str = Field(default="")
     afterthought: str = Field(default="")
     model_config = {"populate_by_name": True}
@@ -97,7 +97,7 @@ class Decision(BuddyBaseModel):
 class RetrievalGateResult(BuddyBaseModel):
 
     search_queries: List[str] = Field(default_factory=list)
-    ack_message: str = Field(default="")
+    lookup_message: str = Field(default="")
     deep_recall: bool = Field(default=False)
 
 
@@ -158,77 +158,49 @@ class PlannerResult(BuddyBaseModel):
     LOCKED Planner output schema:
 
     {
-      "refusal": true|false,
-      "refusal_reason": "",
-      "followup": true|false,
-      "followup_question": "",
+      "status": "success" | "followup" | "refusal",
+      "message": "",        // followup question or refusal reason; "" on success
+      "responder_note": "", // briefing for Responder; populated on success only
       "steps": [ ... ]
     }
 
     Invariants:
-    - refusal=True  => steps=[], refusal_reason non-empty,
-                      followup=False, followup_question=""
-    - followup=True => steps=[], followup_question non-empty,
-                      refusal=False, refusal_reason=""
-    - refusal=False and followup=False => steps allowed,
-                      refusal_reason="", followup_question=""
+    - status="success"  => steps non-empty, message="", responder_note non-empty
+    - status="followup" => steps=[], message non-empty, responder_note=""
+    - status="refusal"  => steps=[], message non-empty, responder_note=""
     """
 
-    refusal: bool = False
-    refusal_reason: str = ""
-
-    followup: bool = False
-    followup_question: str = ""
+    status: Literal["success", "followup", "refusal"] = "success"
+    message: str = ""
+    responder_note: str = ""
 
     steps: List[PlannerStep] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _validate_planner_contract(self) -> "PlannerResult":
-        # Canonicalize strings
-        self.refusal_reason = (self.refusal_reason or "").strip()
-        self.followup_question = (self.followup_question or "").strip()
+        self.message = (self.message or "").strip()
+        self.responder_note = (self.responder_note or "").strip()
 
-        # Mutual exclusivity
-        if self.refusal and self.followup:
-            raise ValueError(
-                "Invalid planner output: refusal=true and followup=true cannot both be"
-                " true"
-            )
-
-        # Refusal branch
-        if self.refusal:
-            if not self.refusal_reason:
-                raise ValueError("refusal=true requires non-empty refusal_reason")
+        if self.status == "followup":
+            if not self.message:
+                raise ValueError("status=followup requires non-empty message")
             if self.steps:
-                raise ValueError("refusal=true requires steps=[]")
-            if self.followup:
-                raise ValueError("refusal=true requires followup=false")
-            if self.followup_question:
-                raise ValueError("refusal=true requires followup_question=''")
-            # enforce canonical empties
-            self.followup = False
-            self.followup_question = ""
+                raise ValueError("status=followup requires steps=[]")
+            self.responder_note = ""
             return self
 
-        # Followup branch
-        if self.followup:
-            if not self.followup_question:
-                raise ValueError("followup=true requires non-empty followup_question")
+        if self.status == "refusal":
+            if not self.message:
+                raise ValueError("status=refusal requires non-empty message")
             if self.steps:
-                raise ValueError("followup=true requires steps=[]")
-            if self.refusal_reason:
-                raise ValueError("followup=true requires refusal_reason=''")
-            # enforce canonical empties
-            self.refusal = False
-            self.refusal_reason = ""
+                raise ValueError("status=refusal requires steps=[]")
+            self.responder_note = ""
             return self
 
-        # Normal planning branch
-        # No refusal/followup => message fields must be empty
-        self.refusal_reason = ""
-        self.followup_question = ""
+        # success branch
+        self.message = ""
 
-        # Optional strictness: validate input_steps references earlier steps
+        # validate input_steps reference earlier steps only
         seen = set()
         for step in self.steps:
             if step.step_id in seen:

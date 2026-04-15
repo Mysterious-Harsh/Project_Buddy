@@ -137,6 +137,25 @@ def _is_tty() -> bool:
 
 
 def _supports_unicode() -> bool:
+    # 1. Explicit opt-out
+    if os.getenv("NO_COLOR") or os.environ.get("TERM") == "dumb":
+        return False
+    # 2. Locale encoding — reliable even when stdout is redirected (e.g. Textual)
+    try:
+        import locale
+        if "utf" in (locale.getpreferredencoding(False) or "").lower():
+            return True
+    except Exception:
+        pass
+    # 3. LANG / LC_ALL / LC_CTYPE env vars
+    lang_env = (
+        os.environ.get("LANG", "")
+        + os.environ.get("LC_ALL", "")
+        + os.environ.get("LC_CTYPE", "")
+    ).lower()
+    if "utf" in lang_env:
+        return True
+    # 4. Fallback: stdout encoding
     enc = (getattr(sys.stdout, "encoding", None) or "").lower()
     return "utf" in enc
 
@@ -347,6 +366,9 @@ def _banner_centered(
     gpu_label: str = "",
     ram_gb: str = "",
     llm_label: str = "",
+    web_engine: str = "",
+    stt: bool = False,
+    tts: bool = False,
     _cols: int = 0,  # live terminal columns; 0 = auto-detect
 ) -> str:
     """
@@ -396,7 +418,15 @@ def _banner_centered(
         info.append(f"LLM: {llm_label}")
     if info:
         out.append(cen(_c("  \u00b7  ".join(info), "warn")))
-        out.append("")
+
+    # — settings row (web engine + voice) ————————————-
+    settings: List[str] = []
+    if web_engine:
+        settings.append(f"Web: {web_engine}")
+    voice_parts = (["STT"] if stt else []) + (["TTS"] if tts else [])
+    settings.append("Voice: " + ("+".join(voice_parts) if voice_parts else "off"))
+    out.append(cen(_c("  \u00b7  ".join(settings), "dim")))
+    out.append("")
 
     # — faint separator ———————————————————————-
     sep_len = min(32, max(16, cols // 4))
@@ -441,6 +471,9 @@ def _banner_plain(
     gpu_label: str = "",
     ram_gb: str = "",
     llm_label: str = "",
+    web_engine: str = "",
+    stt: bool = False,
+    tts: bool = False,
     cols: int = 0,
 ) -> str:
     """
@@ -483,7 +516,15 @@ def _banner_plain(
         info.append(f"LLM: {llm_label}")
     if info:
         lines.append(cen("  |  ".join(info)))
-        lines.append("")
+
+    # Settings row
+    settings: List[str] = []
+    if web_engine:
+        settings.append(f"Web: {web_engine}")
+    voice_parts = (["STT"] if stt else []) + (["TTS"] if tts else [])
+    settings.append("Voice: " + ("+".join(voice_parts) if voice_parts else "off"))
+    lines.append(cen("  |  ".join(settings)))
+    lines.append("")
 
     # Separator
     lines.append(cen("-" * min(28, inner // 3)))
@@ -520,6 +561,9 @@ def print_banner_centered(
     gpu_label: str = "",
     ram_gb: str = "",
     llm_label: str = "",
+    web_engine: str = "",
+    stt: bool = False,
+    tts: bool = False,
 ) -> None:
     """
     Print the Buddy banner:
@@ -539,6 +583,9 @@ def print_banner_centered(
             gpu_label=gpu_label,
             ram_gb=ram_gb,
             llm_label=llm_label,
+            web_engine=web_engine,
+            stt=stt,
+            tts=tts,
             _cols=cols,
         )
     else:
@@ -547,6 +594,9 @@ def print_banner_centered(
             gpu_label=gpu_label,
             ram_gb=ram_gb,
             llm_label=llm_label,
+            web_engine=web_engine,
+            stt=stt,
+            tts=tts,
             cols=cols,
         )
 
@@ -753,6 +803,106 @@ def _draw_frame(lines: List[str], cols: int, rows: int) -> None:
     buf.append(CLEAR)
     sys.stdout.write("".join(buf))
     sys.stdout.flush()
+
+
+def _birth_animation() -> None:
+    """
+    First-boot only. Heartbeat sequence that plays before the regular
+    matrix reveal — gives the feeling of Buddy being born.
+
+    Sequence:
+      1. Three heartbeat pulses:  ·  →  · ·  →  · · ·
+         Each dot appears in aurora-cyan, then pulses white, then dims.
+      2. A line of text: "first awakening..."  in dim
+      3. Brief pause, then returns — caller fires _matrix_stream_reveal() next.
+
+    Falls back to a plain print on non-TTY / no-ANSI terminals.
+    """
+    if not (_supports_ansi() and _is_tty()):
+        print("Buddy — first awakening...")
+        return
+
+    _hide_cursor()
+    try:
+        cols, rows = _term_size()
+        RST = AURORA["reset"]
+        WH = AURORA["white"]
+        DIM = AURORA["dim"]
+        C0 = _logo_row_code(0)   # bright cyan
+        C5 = _logo_row_code(5)   # deep violet
+
+        def _draw(lines: List[str]) -> None:
+            _draw_frame(lines, cols, rows)
+
+        def _centered(s: str) -> str:
+            return _center_visible(s, cols)
+
+        # — Phase 1: dot pulses ————————————————————————
+        dot_sequences = ["·", "· ·", "· · ·"]
+        for seq in dot_sequences:
+            # dim appear
+            _draw([_centered(f"{DIM}{seq}{RST}")])
+            time.sleep(0.25)
+            # cyan flash
+            _draw([_centered(f"{C0}{seq}{RST}")])
+            time.sleep(0.15)
+            # white heartbeat pulse
+            _draw([_centered(f"{WH}{seq}{RST}")])
+            time.sleep(0.12)
+            # back to cyan
+            _draw([_centered(f"{C0}{seq}{RST}")])
+            time.sleep(0.20)
+
+        # — Phase 2: hold · · · and show awakening text ———————
+        awaken_text = _c("first awakening . . .", "dim")
+        _draw([
+            _centered(f"{C0}· · ·{RST}"),
+            "",
+            _centered(awaken_text),
+        ])
+        time.sleep(0.9)
+
+        # — Phase 3: expand dots into aurora arc ——————————-
+        # Brief cascade: dots grow from · · · to a horizontal pulse line
+        arc_chars = ["·", "·", "·", "·", "·", "◉", "·", "·", "·", "·", "·"]
+        for step in range(len(arc_chars)):
+            lit = step + 1
+            parts = []
+            for i, ch in enumerate(arc_chars[:lit]):
+                color = _logo_row_code(min(i, 5))
+                parts.append(f"{color}{ch}{RST}")
+            arc = "  ".join(parts)
+            _draw([
+                _centered(arc),
+                "",
+                _centered(awaken_text),
+            ])
+            time.sleep(0.07)
+
+        # — Phase 4: white flash of full arc ——————————————-
+        arc_full = "  ".join(f"{WH}{ch}{RST}" for ch in arc_chars)
+        _draw([
+            _centered(arc_full),
+            "",
+            _centered(awaken_text),
+        ])
+        time.sleep(0.18)
+
+        # — Phase 5: fade line to violet + identity line ——————-
+        id_text = _c("◈  B U D D Y  ◈", "tagline")
+        _draw([
+            _centered(f"{C5}{'  '.join(arc_chars)}{RST}"),
+            "",
+            _centered(id_text),
+            "",
+            _centered(awaken_text),
+        ])
+        time.sleep(0.70)
+
+        _term_clear()
+
+    finally:
+        _show_cursor()
 
 
 def _matrix_stream_reveal(duration: float = 3.2) -> None:

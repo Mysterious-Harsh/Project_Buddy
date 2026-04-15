@@ -1,47 +1,63 @@
 from __future__ import annotations
 
 # ==========================================================
-# search.py  —  v1.0.0
+# search.py  —  v3.0.0
 #
-# Web Search tool for Buddy.
-# Provides: search (DuckDuckGo), fetch (URL → plain text).
+# Web Search tool — search only.
+# Returns title, URL, and short snippet (≤400 chars) per result.
 #
-# Design rules:
-#   - search uses duckduckgo-search (no API key, no tracking).
-#   - fetch uses requests + BeautifulSoup to extract clean text.
-#   - All results are capped to protect LLM context window.
-#   - No cookies, no sessions — stateless per call.
+# Engine: SearXNG (self-hosted) or DuckDuckGo — toggled via buddy.toml.
+# For full page content use the separate web_fetch tool.
 # ==========================================================
 
-import re
-from typing import Any, Callable, Dict, List, Literal, Optional
+import tomllib
+from pathlib import Path
+from typing import Any, Callable, Dict, List, Optional
 
-import certifi
-import requests
-from bs4 import BeautifulSoup
-from ddgs import DDGS
 from pydantic import BaseModel, Field, model_validator
 
+from buddy.logger.logger import get_logger
 from buddy.prompts.web_search_prompts import (
     WEB_SEARCH_ERROR_RECOVERY_PROMPT,
     WEB_SEARCH_TOOL_PROMPT,
     tool_call_format,
 )
 
+logger = get_logger("web_search")
+
 # ==========================================================
 # Constants
 # ==========================================================
 
 _MAX_RESULTS_HARD_LIMIT = 20
-_DEFAULT_MAX_RESULTS = 5
-_MAX_CHARS_HARD_LIMIT = 20_000
-_DEFAULT_MAX_CHARS = 8_000
-_FETCH_TIMEOUT_S = 10
+_DEFAULT_MAX_RESULTS    = 5
+_SNIPPET_CAP            = 400
+_SEARXNG_TIMEOUT_S      = 8
 _USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/124.0.0.0 Safari/537.36"
 )
+_TOML_PATH = Path(__file__).parent.parent.parent / "config" / "buddy.toml"
+
+
+# ==========================================================
+# Config
+# ==========================================================
+
+
+def _load_config() -> Dict[str, Any]:
+    defaults: Dict[str, Any] = {
+        "engine": "duckduckgo",
+        "searxng_url": "http://127.0.0.1:8888",
+    }
+    try:
+        with _TOML_PATH.open("rb") as f:
+            cfg = tomllib.load(f)
+        defaults.update(cfg.get("web_search", {}))
+    except Exception:
+        pass
+    return defaults
 
 
 # ==========================================================
@@ -50,65 +66,43 @@ _USER_AGENT = (
 
 
 class WebSearchCall(BaseModel):
-    action: Literal["search", "fetch"]
-    # search fields
-    query: Optional[str] = None
+    query:       str = Field(..., min_length=1)
     max_results: int = Field(default=_DEFAULT_MAX_RESULTS)
-    region: str = Field(default="wt-wt")
+    region:      str = Field(default="wt-wt")
     safe_search: bool = Field(default=True)
-    # fetch fields
-    url: Optional[str] = None
-    max_chars: int = Field(default=_DEFAULT_MAX_CHARS)
 
     @model_validator(mode="after")
     def _validate(self) -> "WebSearchCall":
-        if self.action == "search":
-            if not self.query or not self.query.strip():
-                raise ValueError("query is required for action=search")
-            self.query = self.query.strip()
-            if self.max_results < 1:
-                self.max_results = _DEFAULT_MAX_RESULTS
-            if self.max_results > _MAX_RESULTS_HARD_LIMIT:
-                self.max_results = _MAX_RESULTS_HARD_LIMIT
-        elif self.action == "fetch":
-            if not self.url or not self.url.strip():
-                raise ValueError("url is required for action=fetch")
-            self.url = self.url.strip()
-            if not self.url.startswith(("http://", "https://")):
-                raise ValueError("url must start with http:// or https://")
-            if self.max_chars < 1:
-                self.max_chars = _DEFAULT_MAX_CHARS
-            if self.max_chars > _MAX_CHARS_HARD_LIMIT:
-                self.max_chars = _MAX_CHARS_HARD_LIMIT
+        self.query = self.query.strip()
+        if not self.query:
+            raise ValueError("query must not be empty")
+        self.max_results = max(1, min(self.max_results, _MAX_RESULTS_HARD_LIMIT))
         return self
 
 
 # ==========================================================
-# Tool implementation
+# Tool
 # ==========================================================
 
 
 class WebSearch:
     """
-    Web Search tool — search the web or fetch a URL's text content.
-    Plugs into Buddy's ToolRegistry via TOOL_NAME + TOOL_CLASS.
+    Web Search tool — returns titles, URLs, and short snippets.
+    Use web_fetch for full page content.
     """
 
-    # -------------------------
-    # Registry hooks
-    # -------------------------
-
     def get_info(self) -> Dict[str, Any]:
+        cfg = _load_config()
         return {
             "name": TOOL_NAME,
-            "version": "1.0.0",
+            "version": "3.0.0",
             "description": (
-                "Search the web or fetch a URL's text content. "
-                "Use for: current events, facts you don't know, documentation, "
-                "looking up prices, weather, news, any online information. "
-                "search → DuckDuckGo results (title + snippet + url). "
-                "fetch → full page text from a URL."
+                "Search the web. Returns title, URL, and a short snippet (≤400 chars) "
+                "per result. Snippets are enough for weather, prices, scores, and simple facts. "
+                "For full article or documentation content, use web_fetch after this step "
+                "and pass these results as input."
             ),
+            "engine": cfg.get("engine", "duckduckgo"),
             "prompt": WEB_SEARCH_TOOL_PROMPT,
             "error_prompt": WEB_SEARCH_ERROR_RECOVERY_PROMPT,
             "tool_call_format": tool_call_format,
@@ -124,185 +118,92 @@ class WebSearch:
         on_progress: Optional[Callable[[str, bool], None]] = None,
         **_kwargs: Any,
     ) -> Dict[str, Any]:
-        if call.action == "search":
-            return self._search(call, on_progress=on_progress)
-        return self._fetch(call, on_progress=on_progress)
-
-    # -------------------------
-    # search
-    # -------------------------
-
-    def _search(
-        self,
-        call: WebSearchCall,
-        *,
-        on_progress: Optional[Callable] = None,
-    ) -> Dict[str, Any]:
         if on_progress:
             on_progress(f"Searching: {call.query}", False)
 
-        try:
-            safesearch = "moderate" if call.safe_search else "off"
-            with DDGS() as ddgs:
-                raw = list(
-                    ddgs.text(
-                        call.query,
-                        region=call.region,
-                        safesearch=safesearch,
-                        max_results=call.max_results,
-                    )
-                )
-        except Exception as e:
-            return {
-                "OK": False,
-                "ACTION": "search",
-                "QUERY": call.query,
-                "ERROR": f"Search failed: {type(e).__name__}: {e}",
-                "RESULTS": [],
-                "TOTAL_FOUND": 0,
-            }
+        cfg    = _load_config()
+        engine = cfg.get("engine", "duckduckgo")
 
-        results: List[Dict[str, str]] = []
-        for item in raw:
-            results.append(
-                {
-                    "title": str(item.get("title") or ""),
-                    "url": str(item.get("href") or item.get("url") or ""),
-                    "snippet": str(item.get("body") or ""),
-                }
-            )
+        if engine == "searxng":
+            return self._searxng(call, cfg)
+        return self._ddg(call)
 
-        return {
-            "OK": True,
-            "ACTION": "search",
-            "QUERY": call.query,
-            "RESULTS": results,
-            "TOTAL_FOUND": len(results),
-            "ERROR": None,
-        }
+    # ── SearXNG ───────────────────────────────────────────
 
-    # -------------------------
-    # fetch
-    # -------------------------
+    def _searxng(self, call: WebSearchCall, cfg: Dict[str, Any]) -> Dict[str, Any]:
+        import requests
 
-    def _fetch(
-        self,
-        call: WebSearchCall,
-        *,
-        on_progress: Optional[Callable] = None,
-    ) -> Dict[str, Any]:
-        if on_progress:
-            on_progress(f"Fetching: {call.url}", False)
-
+        base = cfg.get("searxng_url", "http://127.0.0.1:8888").rstrip("/")
         try:
             resp = requests.get(
-                call.url,
-                timeout=_FETCH_TIMEOUT_S,
+                f"{base}/search",
+                params={
+                    "q": call.query,
+                    "format": "json",
+                    "safesearch": "1" if call.safe_search else "0",
+                    "language": call.region,
+                },
+                timeout=_SEARXNG_TIMEOUT_S,
                 headers={"User-Agent": _USER_AGENT},
-                allow_redirects=True,
-                verify=certifi.where(),
             )
             resp.raise_for_status()
-        except requests.exceptions.Timeout:
-            return {
-                "OK": False,
-                "ACTION": "fetch",
-                "URL": call.url,
-                "ERROR": "Request timed out",
-                "CONTENT": None,
-                "TITLE": None,
-                "SIZE_CHARS": 0,
-            }
-        except requests.exceptions.HTTPError as e:
-            return {
-                "OK": False,
-                "ACTION": "fetch",
-                "URL": call.url,
-                "ERROR": f"HTTP {e.response.status_code}: {e.response.reason}",
-                "CONTENT": None,
-                "TITLE": None,
-                "SIZE_CHARS": 0,
-            }
+            raw = resp.json().get("results", [])
         except Exception as e:
-            return {
-                "OK": False,
-                "ACTION": "fetch",
-                "URL": call.url,
-                "ERROR": f"{type(e).__name__}: {e}",
-                "CONTENT": None,
-                "TITLE": None,
-                "SIZE_CHARS": 0,
+            logger.warning("SearXNG failed, falling back to DDG: %r", e)
+            return self._ddg(call)
+
+        results = [
+            {
+                "title":   str(item.get("title") or ""),
+                "url":     str(item.get("url") or ""),
+                "snippet": str(item.get("content") or "")[:_SNIPPET_CAP],
             }
-
-        content_type = resp.headers.get("content-type", "")
-        if "html" not in content_type and "text" not in content_type:
-            return {
-                "OK": False,
-                "ACTION": "fetch",
-                "URL": call.url,
-                "ERROR": f"Non-text content type: {content_type}",
-                "CONTENT": None,
-                "TITLE": None,
-                "SIZE_CHARS": 0,
-            }
-
-        text, title = self._extract_text(resp.text)
-
-        if len(text) > call.max_chars:
-            text = text[: call.max_chars] + f"\n[truncated at {call.max_chars} chars]"
-
+            for item in raw[: call.max_results]
+        ]
         return {
-            "OK": True,
-            "ACTION": "fetch",
-            "URL": call.url,
-            "TITLE": title,
-            "CONTENT": text,
-            "SIZE_CHARS": len(text),
-            "ERROR": None,
+            "OK": True, "ENGINE": "searxng", "QUERY": call.query,
+            "RESULTS": results, "TOTAL_FOUND": len(results), "ERROR": None,
         }
 
-    # -------------------------
-    # HTML → plain text
-    # -------------------------
+    # ── DuckDuckGo ────────────────────────────────────────
 
-    @staticmethod
-    def _extract_text(html: str) -> tuple[str, str]:
-        """
-        Parse HTML and return (clean_text, page_title).
-        Strips scripts, styles, nav, footer, ads.
-        """
-        soup = BeautifulSoup(html, "lxml")
+    def _ddg(self, call: WebSearchCall) -> Dict[str, Any]:
+        try:
+            from ddgs import DDGS  # type: ignore
 
-        # remove noise tags
-        for tag in soup(["script", "style", "nav", "footer", "header",
-                          "aside", "form", "noscript", "iframe"]):
-            tag.decompose()
+            with DDGS() as ddgs:
+                raw = list(ddgs.text(
+                    call.query,
+                    region=call.region,
+                    safesearch="moderate" if call.safe_search else "off",
+                    max_results=call.max_results,
+                ))
+        except Exception as e:
+            return {
+                "OK": False, "ENGINE": "duckduckgo", "QUERY": call.query,
+                "RESULTS": [], "TOTAL_FOUND": 0,
+                "ERROR": f"{type(e).__name__}: {e}",
+            }
 
-        title = ""
-        if soup.title and soup.title.string:
-            title = soup.title.string.strip()
-
-        # prefer article/main body if present
-        body = soup.find("article") or soup.find("main") or soup.find("body") or soup
-
-        raw = body.get_text(separator="\n")
-
-        # collapse blank lines
-        lines = [ln.strip() for ln in raw.splitlines()]
-        lines = [ln for ln in lines if ln]
-        text = "\n".join(lines)
-
-        # collapse 3+ consecutive newlines
-        text = re.sub(r"\n{3,}", "\n\n", text)
-
-        return text, title
+        results = [
+            {
+                "title":   str(item.get("title") or ""),
+                "url":     str(item.get("href") or item.get("url") or ""),
+                "snippet": str(item.get("body") or "")[:_SNIPPET_CAP],
+            }
+            for item in raw
+        ]
+        return {
+            "OK": True, "ENGINE": "duckduckgo", "QUERY": call.query,
+            "RESULTS": results, "TOTAL_FOUND": len(results), "ERROR": None,
+        }
 
 
 # ==========================================================
 # Registry contract
 # ==========================================================
 
-TOOL_NAME = "web_search"
+TOOL_NAME  = "web_search"
 TOOL_CLASS = WebSearch
 
 

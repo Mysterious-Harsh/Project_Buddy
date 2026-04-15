@@ -592,6 +592,7 @@ class SpeechToText:
         "debug",
         "on_text",
         "on_interrupt",
+        "on_speech_start",
         "language",
         "sample_rate",
         "microphone_index",
@@ -642,6 +643,7 @@ class SpeechToText:
         silence_timeout: float = HANGOVER_SEC,
         on_text: Optional[Callable[[str], None]] = None,
         on_interrupt: Optional[Callable[[], None]] = None,
+        on_speech_start: Optional[Callable[[], None]] = None,
         max_queue_frames: int = MAX_QUEUE_FRAMES,
         debug: bool = False,
         compute_type: str = "",
@@ -653,6 +655,7 @@ class SpeechToText:
         self.debug = bool(debug)
         self.on_text = on_text
         self.on_interrupt = on_interrupt
+        self.on_speech_start = on_speech_start
         self.language = language
         self.sample_rate = int(sample_rate)
         self.beam_size = int(beam_size)
@@ -936,11 +939,13 @@ class SpeechToText:
     def _on_speech_detected(self) -> None:
         """
         Called by both VAD back-ends the instant real speech is confirmed.
-        Plays the confirmation beep and submits the on_interrupt callback.
-        Centralising both actions here ensures they are always in sync.
+        Plays the confirmation beep and submits the on_interrupt and
+        on_speech_start callbacks.
+        Centralising all actions here ensures they are always in sync.
         """
         self._play_beep()
         self._cbw.submit(self.on_interrupt)
+        self._cbw.submit(self.on_speech_start)
 
     # =========================================================================
     # Audio callback  (sounddevice thread — keep minimal)
@@ -1791,9 +1796,19 @@ class SpeechToText:
     # Virtual/aggregate device name fragments that cause AUHAL errors when
     # PortAudio tries to open them as raw input streams.
     _VIRTUAL_DEVICE_FRAGMENTS = (
-        "teams", "zoom", "meet", "slack", "discord", "webex",
-        "virtual", "aggregate", "multi-output", "blackhole",
-        "loopback", "soundflower", "cables",
+        "teams",
+        "zoom",
+        "meet",
+        "slack",
+        "discord",
+        "webex",
+        "virtual",
+        "aggregate",
+        "multi-output",
+        "blackhole",
+        "loopback",
+        "soundflower",
+        "cables",
     )
 
     def _list_input_devices(self) -> List[Tuple[int, dict]]:
@@ -1814,7 +1829,9 @@ class SpeechToText:
                 # skip virtual/aggregate devices
                 name_lower = str(d.get("name", "")).lower()
                 if any(frag in name_lower for frag in self._VIRTUAL_DEVICE_FRAGMENTS):
-                    logger.debug("[STT] Skipping virtual device idx=%d name=%r", i, d.get("name"))
+                    logger.debug(
+                        "[STT] Skipping virtual device idx=%d name=%r", i, d.get("name")
+                    )
                     continue
                 out.append((i, d))
         except Exception:

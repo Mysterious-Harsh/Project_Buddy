@@ -245,75 +245,52 @@ class OutputParser:
 
     def _normalize_planner(self, data: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Normalize planner payload to the LOCKED schema (with refusal).
-
-        Expected:
-        {
-          "refusal": bool,
-          "refusal_reason": str,
-          "followup": bool,
-          "followup_question": str,
-          "steps": [ {PlannerStep...} ]
-        }
+        Normalize planner payload to the locked schema:
+        { status, message, responder_note, steps[] }
         """
         if not isinstance(data, dict):
             data = {}
 
-        refusal = self._to_bool(data.get("refusal", False))
-        refusal_reason = self._to_str(data.get("refusal_reason", "")).strip()
+        status = self._to_str(data.get("status", "success")).strip().lower()
+        if status not in ("success", "followup", "refusal"):
+            status = "success"
 
-        followup = self._to_bool(data.get("followup", False))
-        followup_question = self._to_str(data.get("followup_question", "")).strip()
+        message = self._to_str(data.get("message", "")).strip()
+        responder_note = self._to_str(data.get("responder_note", "")).strip()
 
         raw_steps = data.get("steps", [])
         steps: List[Dict[str, Any]] = raw_steps if isinstance(raw_steps, list) else []
 
-        # normalize steps fields lightly + reindex step_id
         norm_steps: List[Dict[str, Any]] = []
         for idx, s in enumerate(steps, start=1):
             if not isinstance(s, dict):
                 continue
             norm_steps.append({
-                "step_id": idx,
-                "tool": self._to_str(s.get("tool", "shell")).strip() or "shell",
+                "step_id": s.get("step_id", idx),
+                "tool": self._to_str(s.get("tool", "")).strip(),
+                "goal": self._to_str(s.get("goal", "")).strip(),
                 "instruction": self._to_str(s.get("instruction", "")).strip(),
-                "depends_on": self._to_int_list(s.get("depends_on")),
-                "inputs": self._to_str_list(s.get("inputs")),
+                "hints": self._to_str(s.get("hints", "")).strip(),
+                "input_steps": self._to_int_list(s.get("input_steps")),
                 "output": self._to_str(s.get("output", "")).strip(),
-                "confidence": self._clamp01(s.get("confidence", 0.0)),
             })
 
-        # Enforce mutual exclusivity + invariants at payload level (schema validator enforces too)
-        if refusal and followup:
-            # choose refusal as dominant (prevents followup loops)
-            followup = False
-            followup_question = ""
+        if status in ("followup", "refusal"):
             norm_steps = []
-
-        if refusal:
-            norm_steps = []
-            followup = False
-            followup_question = ""
-            if not refusal_reason:
-                refusal_reason = "Task is not achievable with the provided tools."
-        elif followup:
-            norm_steps = []
-            refusal = False
-            refusal_reason = ""
-            if not followup_question:
-                followup_question = (
+            responder_note = ""
+            if not message:
+                message = (
                     "I need more information to proceed. What is missing?"
+                    if status == "followup"
+                    else "Task is not achievable with the available tools."
                 )
         else:
-            # normal plan: clear messages
-            refusal_reason = ""
-            followup_question = ""
+            message = ""
 
         return {
-            "refusal": refusal,
-            "refusal_reason": refusal_reason,
-            "followup": followup,
-            "followup_question": followup_question,
+            "status": status,
+            "message": message,
+            "responder_note": responder_note,
             "steps": norm_steps,
         }
 

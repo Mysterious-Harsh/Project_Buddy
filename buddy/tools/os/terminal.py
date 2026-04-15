@@ -1,35 +1,28 @@
 from __future__ import annotations
 
 # ==========================================================
-# terminal.py  —  v1.1.0
+# terminal.py  —  v1.2.0
 #
-# Changes from v1.0.0
-# ────────────────────
+# v1.0.0 → v1.1.0
+# ────────────────
 # 1. Platform-independent execution (Linux / macOS / Windows)
-#    _popen_kwargs()  →  start_new_session=True on Unix,
-#                        CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW on Windows
-#    _kill_process()  →  killpg (Unix) / taskkill /F /T (Windows)
+# 2. Daemon command auto-detection + DaemonRegistry
+# 3. Bug fix — TimeoutExpired now kills orphaned child process
+# 4. TerminalResult: IS_DAEMON, PID fields added (backward-compat)
 #
-# 2. Blocking / daemon command auto-detection
-#    _is_daemon_command()  →  recognises npm start, uvicorn, flask run,
-#    gunicorn, redis-server, streamlit, jupyter, tail -f, ng serve, etc.
-#    Daemon commands are launched with Popen (non-blocking) and tracked in
-#    Terminal.daemons (DaemonRegistry).
+# v1.1.0 → v1.2.0
+# ────────────────
+# 5. Output truncation — stdout/stderr capped at _MAX_OUTPUT_CHARS
+#    (8 000 chars / ~2 k tokens) with a "...[truncated]" notice
+# 6. Daemon reader thread memory fix — lines read but not accumulated
+#    after the startup deadline, preventing unbounded list growth
+# 7. Removed unused _argv_to_display() helper
 #
-# 3. Bug fix — TimeoutExpired now actually kills the child process
-#    The original code raised TimeoutExpired but left the subprocess running
-#    as an orphan.  The fix uses _kill_process() before returning.
-#
-# 4. Two new backward-compatible fields on TerminalResult:
-#    IS_DAEMON: bool = False   — True when running in background
-#    PID: Optional[int] = None — PID of background process
-#
-# All existing public names, signatures, and fields are UNCHANGED.
+# All existing public names, signatures, and result fields are UNCHANGED.
 # ==========================================================
 
 import os
 import re
-import shlex
 import signal
 import subprocess
 import sys
@@ -53,6 +46,17 @@ _WINDOWS: bool = sys.platform == "win32"
 
 # Seconds to wait for early output from a daemon before returning
 _DAEMON_STARTUP_WAIT: float = 5.0
+
+# Max chars captured from stdout/stderr before truncation (~2 k tokens)
+_MAX_OUTPUT_CHARS: int = 8_000
+
+
+def _truncate(text: str) -> str:
+    """Truncate output to _MAX_OUTPUT_CHARS with a notice appended."""
+    if len(text) <= _MAX_OUTPUT_CHARS:
+        return text
+    omitted = len(text) - _MAX_OUTPUT_CHARS
+    return text[:_MAX_OUTPUT_CHARS] + f"\n...[truncated: {omitted} chars omitted]"
 
 
 # ==========================================================
@@ -331,7 +335,7 @@ class Terminal:
     """
 
     tool_name = "terminal"
-    version = "1.1.0"
+    version = "1.2.0"
 
     # Shared registry of all background processes
     daemons = DaemonRegistry()
@@ -346,11 +350,19 @@ class Terminal:
             "name": self.tool_name,
             "version": self.version,
             "description": (
-                "Run shell commands. Use for: running programs, scripts, git, package managers, "
-                "compilers, system utilities, network commands, process management, installing software. "
-                "NOT for basic file operations (use filesystem tool instead). "
-                "Use terminal only when no other tool can do the job — it returns raw stdout/stderr "
-                "which is harder to parse than structured tool output."
+                "Runs shell commands.\n"
+                "USE FOR:\n"
+                "  • Run code/scripts — python, node, go run, cargo run, java -jar, ruby, bash\n"
+                "  • Tests — pytest, jest, go test, cargo test, rspec\n"
+                "  • Compilers/builders — gcc, make, tsc, mvn, gradle\n"
+                "  • Package managers — pip, npm, yarn, brew, apt, cargo\n"
+                "  • Git and version control\n"
+                "  • System utilities, network commands (curl, ping, ssh)\n"
+                "  • Process management and installs\n"
+                "DO NOT USE FOR: read/write/search files — use filesystem tool instead.\n"
+                "PREFER structured tools over terminal when available; terminal returns raw text.\n"
+                "DAEMON AWARE: servers/watchers (uvicorn, npm start, tail -f, etc.) are "
+                "auto-detected, launched in background, and tracked in Terminal.daemons."
             ),
             "prompt": TERMINAL_TOOL_PROMPT,
             "error_prompt": TERMINAL_ERROR_RECOVERY_PROMPT,
@@ -458,8 +470,8 @@ class Terminal:
                 CWD=cwd or "",
                 COMMAND=cmd,
                 EXIT_CODE=int(proc.returncode),
-                STDOUT=stdout or "",
-                STDERR=stderr or "",
+                STDOUT=_truncate(stdout or ""),
+                STDERR=_truncate(stderr or ""),
                 TIMEOUT=timeout,
             ).model_dump()
 
@@ -530,11 +542,13 @@ class Terminal:
         deadline = time.monotonic() + _DAEMON_STARTUP_WAIT
 
         def _reader(stream, buf: List[str]) -> None:
+            # Accumulate lines until deadline; after that drain to prevent
+            # the OS pipe buffer from blocking the child, but stop storing.
             try:
                 for line in stream:
-                    buf.append(line)
-                    if time.monotonic() > deadline:
-                        break
+                    if time.monotonic() <= deadline:
+                        buf.append(line)
+                    # else: keep reading (drain) but don't grow the buffer
             except Exception:
                 pass
 
@@ -549,8 +563,8 @@ class Terminal:
         t_out.join(timeout=_DAEMON_STARTUP_WAIT + 0.5)
         t_err.join(timeout=_DAEMON_STARTUP_WAIT + 0.5)
 
-        early_out = "".join(stdout_lines)
-        early_err = "".join(stderr_lines)
+        early_out = _truncate("".join(stdout_lines))
+        early_err = _truncate("".join(stderr_lines))
 
         # Register so Buddy can kill it later
         handle = _DaemonHandle(
@@ -588,14 +602,6 @@ class Terminal:
             IS_DAEMON=True,
             PID=proc.pid,
         ).model_dump()
-
-    # --------------------------
-    # Helpers
-    # --------------------------
-
-    @staticmethod
-    def _argv_to_display(argv: List[str]) -> str:
-        return " ".join(shlex.quote(a) for a in argv)
 
 
 # ==========================================================
