@@ -1866,14 +1866,28 @@ def _write_first_boot_config(
     text = _re.sub(r"enable_audio_stt\s*=\s*\w+", f"enable_audio_stt = {stt_val}", text)
     text = _re.sub(r"enable_audio_tts\s*=\s*\w+", f"enable_audio_tts = {tts_val}", text)
 
-    # Append new [user] section
-    if "[user]" not in text:
+    # Write name + language into [user] section.
+    # The default template already has [user] with language = "en" but no name,
+    # so we cannot just append a new section — we must patch into the existing one.
+    escaped_name = user_name.replace("\\", "\\\\").replace('"', '\\"')
+    if "[user]" in text:
+        # Replace existing name = "..." if present, else insert after [user] header
+        if _re.search(r'(?m)^name\s*=', text):
+            text = _re.sub(r'(?m)^name\s*=.*$', f'name = "{escaped_name}"', text)
+        else:
+            text = _re.sub(r'(\[user\])', f'\\1\nname = "{escaped_name}"', text)
+        # Replace existing language = "..." if present
+        if _re.search(r'(?m)^language\s*=', text):
+            text = _re.sub(r'(?m)^language\s*=.*$', f'language = "{language}"', text)
+        else:
+            text = _re.sub(r'(\[user\])', f'\\1\nlanguage = "{language}"', text)
+    else:
         text += f"""
 # ─────────────────────────────────────────────────────────────
 # User preferences — set by first-boot wizard
 # ─────────────────────────────────────────────────────────────
 [user]
-name = "{user_name}"
+name = "{escaped_name}"
 language = "{language}"
 """
 

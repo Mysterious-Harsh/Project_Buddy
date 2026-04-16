@@ -677,7 +677,12 @@ class LlamaClient:
         if stream and json_extract:
             json_capture = _JsonCapture(root=json_root, max_chars=int(json_max_chars))
 
-        endpoint = "/completion" if image_data else "/v1/completions"
+        # Always use the native /completion endpoint — it accepts all llama.cpp
+        # parameters (repeat_penalty, repeat_last_n, n_predict, etc.) without
+        # restriction. Newer llama.cpp builds reject these on /v1/completions
+        # because that endpoint is now strictly OpenAI-spec only (400 Bad Request).
+        # Response parsing already handles the native {"content": "..."} format.
+        endpoint = "/completion"
         text, _stats = self._call(
             endpoint=endpoint,
             payload=payload,
