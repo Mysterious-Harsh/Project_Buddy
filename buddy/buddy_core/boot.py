@@ -923,6 +923,7 @@ def _layout() -> Dict[str, Path]:
         "sqlite_db": root / "data" / "mem.sqlite3",
         "qdrant_dir": root / "data" / "qdrant",
         "models_dir": root / "data" / "models",
+        "bin_dir": root / "data" / "bin",
         "conversations_snapshot": root / "state" / "conversations.json",
         "boot_report": root / "data" / "assets" / "boot_report.json",
         "os_profile": root / "data" / "assets" / "os_profile.json",
@@ -940,6 +941,7 @@ def _ensure_dirs(paths: Dict[str, Path]) -> None:
         "assets_dir",
         "state_dir",
         "models_dir",
+        "bin_dir",
     ):
         paths[k].mkdir(parents=True, exist_ok=True)
     (paths["models_dir"] / "st").mkdir(parents=True, exist_ok=True)
@@ -1276,6 +1278,15 @@ def _wait_spawned(
         if elapsed >= timeout_s:
             return False, f"timeout>{timeout_s:.0f}s"
         time.sleep(0.25)
+
+
+def _tail_log(log: Path, n: int = 25) -> List[str]:
+    """Return the last n lines of a log file, or [] if unreadable."""
+    try:
+        lines = log.read_text(encoding="utf-8", errors="replace").splitlines()
+        return lines[-n:] if lines else []
+    except Exception:
+        return []
 
 
 def _spawn(
@@ -1939,16 +1950,30 @@ def run_pre_textual_setup() -> Optional[Dict[str, Any]]:
             show_ui=True,
             default_name=default_name,
         )
-        # Write config now so bootstrap finds it — bootstrap skips this when
-        # pre_wizard_result is set.
+        user_name = wizard_result["user_name"]
+        # Write buddy.toml config so bootstrap finds it.
         _write_first_boot_config(
             config_dir,
-            user_name=wizard_result["user_name"],
+            user_name=user_name,
             language=wizard_result["language"],
             web_engine=wizard_result["web_engine"],
             stt=wizard_result["stt"],
             tts=wizard_result["tts"],
         )
+        # Write os_profile.json NOW with the real name so _is_first_boot()
+        # returns False on every subsequent run — even if bootstrap crashes later.
+        try:
+            assets_dir.mkdir(parents=True, exist_ok=True)
+            _write_json(
+                os_profile_file,
+                _build_os_profile(
+                    assets_dir=assets_dir,
+                    data_dir=data_dir,
+                    user_preferred_name=user_name,
+                ),
+            )
+        except Exception as _e:
+            logger.warning("Could not pre-write os_profile.json: %r", _e)
         _term_clear()
 
     # ── Model selection ────────────────────────────────────────────────────────
@@ -2163,9 +2188,8 @@ def bootstrap(
     _ui_ok(f"System: {cores} cores · {ram_gb} GB RAM · {gpu_lbl}")
 
     # ── STEP 6.5 · llama-server binary ───────────────────────────────────────
-    _root_dir = _runtime_root()
-    _bin_dir = _root_dir / "bin"
-    _state_dir = _root_dir / "state"
+    _bin_dir = paths["bin_dir"]   # ~/.buddy/data/bin/
+    _state_dir = _runtime_root() / "state"
     _llama_bin = ensure_llama_binary(
         _bin_dir,
         on_progress=lambda m, _d: _ui_info(m),
@@ -2624,6 +2648,24 @@ def bootstrap(
                 else:
                     _ui_fail(f"llama-server NOT READY: {status}")
                     integrity.violations.append(f"llama_not_ready:{status}")
+                    # Surface the crash log so the user can see why it failed
+                    _crash_lines = _tail_log(llama_server_log, n=30)
+                    if _crash_lines:
+                        logger.error(
+                            "llama-server crash log (%s):\n%s",
+                            llama_server_log,
+                            "\n".join(_crash_lines),
+                        )
+                        if opts.show_boot_ui:
+                            print(_c("\n  ── llama-server crash log ──", "bright_red"))
+                            for _line in _crash_lines:
+                                print(f"  {_line}")
+                            print()
+                    else:
+                        logger.error(
+                            "llama-server crashed but log is empty: %s",
+                            llama_server_log,
+                        )
                     _terminate(proc)
                     _proc_ref[0] = None
                     _owned_ref[0] = False

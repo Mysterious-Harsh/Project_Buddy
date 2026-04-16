@@ -34,7 +34,6 @@ server_args = [
   "--threads-batch", "8",
   "--batch-size", "512",
   "--mmap",
-  "--mlock",
   "--no-webui"
 ]
 

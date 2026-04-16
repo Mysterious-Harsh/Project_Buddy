@@ -249,22 +249,15 @@ def _extract_archive(archive: Path, extract_dir: Path, is_windows: bool) -> Opti
 
 def find_existing_binary(bin_dir: Path) -> Optional[Path]:
     """
-    Return path to llama-server if already available.
-    Checks ~/.buddy/bin/ first, then PATH.
+    Return path to llama-server if already downloaded to bin_dir.
+    Only checks ~/.buddy/data/bin/ — PATH is ignored so Buddy always
+    uses its own managed binary.
     """
     is_windows = sys.platform == "win32"
     exe = "llama-server.exe" if is_windows else "llama-server"
-
-    # Check ~/.buddy/bin/
     local = bin_dir / exe
     if local.exists() and local.stat().st_size > 0:
         return local
-
-    # Check PATH
-    found = shutil.which("llama-server")
-    if found:
-        return Path(found)
-
     return None
 
 
