@@ -213,33 +213,45 @@ def _download(url: str, dest: Path, on_progress: Optional[Callable]) -> None:
                     on_progress(downloaded, total)
 
 
-def _find_binary_in_dir(extract_dir: Path, is_windows: bool) -> Optional[Path]:
-    """
-    Locate the llama-server binary inside an extracted archive directory.
-    Searches recursively; returns the first match.
-    """
-    target = "llama-server.exe" if is_windows else "llama-server"
-    for p in extract_dir.rglob(target):
-        if p.is_file():
-            return p
-    return None
-
-
-def _extract_archive(archive: Path, extract_dir: Path, is_windows: bool) -> Optional[Path]:
-    """Extract archive and return path to llama-server binary."""
+def _extract_archive(archive: Path, extract_dir: Path) -> bool:
+    """Extract the full archive into extract_dir. Returns True on success."""
     extract_dir.mkdir(parents=True, exist_ok=True)
-
     if archive.suffix == ".zip":
         with zipfile.ZipFile(archive, "r") as zf:
             zf.extractall(extract_dir)
-    elif archive.name.endswith(".tar.gz") or archive.name.endswith(".tgz"):
+        return True
+    if archive.name.endswith(".tar.gz") or archive.name.endswith(".tgz"):
         with tarfile.open(archive, "r:gz") as tf:
             tf.extractall(extract_dir)
-    else:
-        logger.warning("Unknown archive format: %s", archive.name)
-        return None
+        return True
+    logger.warning("Unknown archive format: %s", archive.name)
+    return False
 
-    return _find_binary_in_dir(extract_dir, is_windows)
+
+def _install_all(extract_dir: Path, bin_dir: Path, is_windows: bool) -> Optional[Path]:
+    """
+    Copy every file from the extracted archive into bin_dir (flat).
+    Makes all files executable on Unix.
+    Returns the path to llama-server, or None if not found.
+    """
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    exe = "llama-server.exe" if is_windows else "llama-server"
+    llama_server_dest: Optional[Path] = None
+    count = 0
+
+    for src in extract_dir.rglob("*"):
+        if not src.is_file():
+            continue
+        dest = bin_dir / src.name
+        shutil.copy2(src, dest)
+        if not is_windows:
+            dest.chmod(dest.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+        if src.name == exe:
+            llama_server_dest = dest
+        count += 1
+
+    logger.info("Installed %d files from archive → %s", count, bin_dir)
+    return llama_server_dest
 
 
 # ═══════════════════════════════════════════════════════════
@@ -375,26 +387,28 @@ def ensure_llama_binary(
                 on_progress(f"Download failed: {ex}", True)
             return None
 
-        # Extract
-        binary_in_archive = _extract_archive(archive_path, extract_dir, is_windows)
-        if not binary_in_archive:
+        # Extract full archive
+        if on_progress:
+            on_progress("Extracting archive...", False)
+        if not _extract_archive(archive_path, extract_dir):
+            logger.error("Failed to extract archive: %s", asset_name)
+            if on_progress:
+                on_progress(f"Failed to extract archive: {asset_name}", True)
+            return None
+
+        # Install all files to bin_dir
+        if on_progress:
+            on_progress(f"Installing to {bin_dir} ...", False)
+        dest = _install_all(extract_dir, bin_dir, is_windows)
+        if dest is None:
             logger.error("llama-server not found in archive: %s", asset_name)
             if on_progress:
                 on_progress("llama-server binary not found inside archive.", True)
             return None
 
-        # Install
-        dest = bin_dir / exe
-        shutil.copy2(binary_in_archive, dest)
-
-        # Make executable on Unix
-        if not is_windows:
-            current = dest.stat().st_mode
-            dest.chmod(current | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
-
-    logger.info("Installed llama-server → %s", dest)
+    logger.info("llama.cpp installed → %s", bin_dir)
     if on_progress:
-        on_progress(f"llama-server installed → {dest}", True)
+        on_progress(f"llama.cpp installed → {bin_dir}", True)
 
     return dest
 

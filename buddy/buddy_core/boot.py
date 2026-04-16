@@ -587,16 +587,28 @@ def _installed_tools() -> Dict[str, Optional[str]]:
 
 def _is_first_boot(os_profile_file: Path) -> bool:
     """
-    True if no preferred name has ever been stored.
-    A profile may exist from a partial previous run but have only the raw username.
+    True if the first-boot wizard has never been completed.
+
+    Source of truth: [user] name key in ~/.buddy/config/buddy.toml.
+    _write_first_boot_config() writes this atomically the moment the
+    wizard finishes — before Textual starts, before bootstrap runs.
+    This means even a crashed bootstrap cannot cause a re-prompt.
     """
-    existing = _read_json(os_profile_file)
-    if not existing:
+    toml_path = _runtime_root() / "config" / "buddy.toml"
+    if not toml_path.exists():
         return True
-    name = existing.get("user_preferred_name", "")
-    username = existing.get("username", "")
-    # First boot if name is missing or was never personalised
-    return not name or name == username
+    try:
+        if sys.version_info >= (3, 11):
+            import tomllib as _tl
+        else:
+            import tomli as _tl  # type: ignore
+        with toml_path.open("rb") as f:
+            raw = _tl.load(f)
+        user_section = raw.get("user", {})
+        name = str(user_section.get("name", "")).strip()
+        return not name
+    except Exception:
+        return True
 
 
 def _ensure_os_profile(
@@ -1175,7 +1187,10 @@ def _flatten(x: Any) -> List[str]:
 
 
 def _sanitize_args(args: List[str]) -> Tuple[List[str], List[str]]:
-    banned = {"--host", "--port", "-m", "--model", "--chat-template-file", "--jinja"}
+    # --mlock is banned: it calls mlockall() and aborts (SIGABRT / rc=-6) when
+    # the OS ulimit for locked memory is too low, which is the default on macOS
+    # and many Linux systems. --mmap already handles efficient memory access.
+    banned = {"--host", "--port", "-m", "--model", "--chat-template-file", "--jinja", "--mlock"}
     out, removed = [], []
     i = 0
     while i < len(args):
@@ -2400,7 +2415,7 @@ def bootstrap(
 
     # ── STEP 11.5 · SearXNG (if configured) ──────────────────────────────────
     _searxng_started = False
-    _searxng_dir = _root_dir / "searxng"
+    _searxng_dir = _runtime_root() / "searxng"
     _searxng_host = "127.0.0.1"
     _searxng_port = int(
         _sec(buddy_cfg, "web_search")
@@ -2450,7 +2465,7 @@ def bootstrap(
                 _ok_setup = setup_searxng(
                     _searxng_dir,
                     port=_searxng_port,
-                    python_dir=_root_dir / "python",
+                    python_dir=_runtime_root() / "python",
                     ask_install_python=_ask_python,
                     on_progress=lambda m, _d: _ui_info(m),
                 )
