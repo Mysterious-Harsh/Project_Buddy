@@ -1043,6 +1043,7 @@ def _load_runtime_config() -> Dict[str, Any]:
             "db_path": paths["sqlite_db"],
             "qdrant_dir": paths["qdrant_dir"],
             "models_dir": paths["models_dir"],
+            "bin_dir": paths["bin_dir"],
             "state_dir": paths["state_dir"],
             "conversations_snapshot": paths["conversations_snapshot"],
             "os_profile_file": paths["os_profile"],
@@ -2028,6 +2029,7 @@ def bootstrap(
     assets_dir: Path = fs["assets_dir"]
     db_path: Path = fs["db_path"]
     models_dir: Path = fs["models_dir"]
+    bin_dir: Path = fs["bin_dir"]
     prompts_dir: Path = fs["prompts_dir"]
     prompts_lock_file: Path = fs["prompts_lock_file"]
     os_profile_file: Path = fs["os_profile_file"]
@@ -2188,7 +2190,7 @@ def bootstrap(
     _ui_ok(f"System: {cores} cores · {ram_gb} GB RAM · {gpu_lbl}")
 
     # ── STEP 6.5 · llama-server binary ───────────────────────────────────────
-    _bin_dir = paths["bin_dir"]   # ~/.buddy/data/bin/
+    _bin_dir = bin_dir   # ~/.buddy/data/bin/
     _state_dir = _runtime_root() / "state"
     _llama_bin = ensure_llama_binary(
         _bin_dir,
