@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import signal
 from pathlib import Path
 import threading
 import time
@@ -346,28 +347,47 @@ class MainScreen(Screen):
             asyncio.create_task(self._async_set_sleeping(False))
             return
 
-        await self._iq.push_typed(text)
+        turn_active = self._active_turn is not None and not self._active_turn.done()
 
-        if self._active_turn is None or self._active_turn.done():
-            self._notify_activity()
+        if turn_active:
             with self._state_lock:
-                is_sleeping = self._sys_state.sleeping
-            if is_sleeping:
-                asyncio.create_task(self._async_set_sleeping(False))
-
-            await self.query_one(ChatLog).add_message(text, "user")
-
-            try:
-                img_paths = extract_image_paths(text)
-                if img_paths:
-                    names = ", ".join(os.path.basename(p) for p in img_paths)
-                    await self.query_one(ChatLog).add_message(
-                        f"[image: {names}]", "meta"
+                pipeline_running = self._sys_state.pipeline_running
+            if pipeline_running:
+                # Pipeline is busy processing — drop input, prompt to interrupt
+                try:
+                    self.query_one(StatusBar).set_hint(
+                        f"[{_YELLOW}]busy — Esc to interrupt[/]", 2.0
                     )
-            except Exception:
-                pass
+                except Exception:
+                    pass
+                return
+            # Pipeline paused, waiting for follow-up input
+            await self.query_one(ChatLog).add_message(text, "user")
+            await self._iq.push_typed(text)
+            return
 
-            self._active_turn = asyncio.create_task(self._run_turn(text))
+        # ── Fresh turn ────────────────────────────────────────────────────────
+        self._notify_activity()
+        with self._state_lock:
+            is_sleeping = self._sys_state.sleeping
+        if is_sleeping:
+            asyncio.create_task(self._async_set_sleeping(False))
+
+        await self.query_one(ChatLog).add_message(text, "user")
+
+        try:
+            img_paths = extract_image_paths(text)
+            if img_paths:
+                names = ", ".join(os.path.basename(p) for p in img_paths)
+                await self.query_one(ChatLog).add_message(
+                    f"[image: {names}]", "meta"
+                )
+        except Exception:
+            pass
+
+        # Text goes directly to _run_turn — NOT into the queue.
+        # The queue is only for mid-turn follow-up inputs via pipeline_input().
+        self._active_turn = asyncio.create_task(self._run_turn(text))
 
     # ── Voice input ───────────────────────────────────────────────────────────
 
@@ -411,17 +431,22 @@ class MainScreen(Screen):
         if muted:
             return
 
+        turn_active = self._active_turn is not None and not self._active_turn.done()
         loop = self._main_loop
         if loop:
-            self._iq.push_voice(t, loop)
-            asyncio.create_task(self._handle_voice_input(t))
+            if turn_active:
+                # Turn running but pipeline paused waiting for follow-up — queue only
+                self._iq.push_voice(t, loop)
+            else:
+                # Fresh turn — bypass queue, start directly
+                asyncio.create_task(self._handle_voice_input(t))
 
     async def _handle_voice_input(self, text: str) -> None:
         if self._active_turn and not self._active_turn.done():
             return
         self._notify_activity()
         await self.query_one(ChatLog).add_message(text, "user")
-        await self._run_turn(text)
+        self._active_turn = asyncio.create_task(self._run_turn(text))
 
     # ── Turn execution ────────────────────────────────────────────────────────
 
@@ -435,12 +460,12 @@ class MainScreen(Screen):
             with self._state_lock:
                 self._sys_state.pipeline_running = True
 
-            self._start_spinner("Thinking", "thinking")
+            self._start_spinner("Remembering", "working")
             self._refresh_info_bar()
             _turn_start = time.perf_counter()
 
             loop = self._main_loop
-            current_label = "Thinking"
+            current_label = "Remembering"
             stream_buf: List[str] = []
             _last_preview_t = 0.0
             _thinking_done = False
@@ -483,7 +508,7 @@ class MainScreen(Screen):
                         _thinking_done = True
                         stream_buf.clear()
                         loop.call_soon_threadsafe(
-                            self._update_spinner, "Thinking", "thinking"
+                            self._update_spinner, current_label, "thinking"
                         )
 
             async def pipeline_output(text: str) -> None:
@@ -652,6 +677,23 @@ class MainScreen(Screen):
         except Exception:
             pass
 
+    def _handle_voice_interrupt(self) -> None:
+        """
+        Called via call_soon_threadsafe when the STT engine detects speech onset.
+        If a turn is currently running, cancels it (same effect as pressing Escape).
+        Always updates the mic indicator to active.
+        """
+        if self._active_turn and not self._active_turn.done():
+            self._interrupt_event.set()
+            self._active_turn.cancel()
+            self._stop_spinner()
+            self.query_one(StatusBar).set_hint(f"[{_YELLOW}]⛔ voice interrupt[/]")
+            logger.info("interrupt: voice onset detected")
+        try:
+            self.query_one(MicIndicator).set_state("active")
+        except Exception:
+            pass
+
     def set_mic_idle(self) -> None:
         try:
             self.query_one(MicIndicator).set_state("idle")
@@ -713,6 +755,7 @@ class BuddyApp(App):
         self._stt: Any = None
         self._main_screen: Optional[MainScreen] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._bootstrap_state: Any = None  # set by _async_on_boot_done
 
     def on_mount(self) -> None:
         self._loop = asyncio.get_running_loop()
@@ -724,6 +767,8 @@ class BuddyApp(App):
             logger.error("bootstrap returned None — exiting")
             self.exit()
             return
+
+        self._bootstrap_state = state  # retained for shutdown in on_unmount
 
         mm = getattr(getattr(state, "artifacts", None), "memory_manager", None)
         self._main_screen = MainScreen(
@@ -743,13 +788,17 @@ class BuddyApp(App):
 
             cfg = getattr(state, "config", {}) or {}
             buddy_cfg = cfg.get("buddy", {}) or {}
+            feat_cfg = buddy_cfg.get("features", {}) or {}
             voice_cfg = buddy_cfg.get("voice", {}) or {}
             runtime = cfg.get("runtime", {}) or {}
             whisper_dir = os.path.join(
                 (runtime.get("fs") or {}).get("models_dir", "."), "whisper"
             )
 
-            if not bool(voice_cfg.get("enabled", True)):
+            # [features].enable_audio_stt is the master switch.
+            # [voice].enabled can also disable it (defaults True when absent).
+            voice_enabled = bool(voice_cfg.get("enabled", True))
+            if not feat_cfg.get("enable_audio_stt", False) or not voice_enabled:
                 if self._main_screen:
                     self._main_screen.query_one(StatusBar).set_hint(
                         f"[dim {_DIM}]🎧 voice disabled[/]"
@@ -762,15 +811,22 @@ class BuddyApp(App):
             def on_text(text: str) -> None:
                 if self._main_screen and loop:
                     loop.call_soon_threadsafe(self._main_screen.handle_voice_text, text)
-                    loop.call_soon_threadsafe(self._main_screen.set_mic_idle)
+                # mic idle is handled by on_segment_end, not here
 
             def on_interrupt() -> None:
+                # Called at speech onset — cancel any active response turn.
+                if self._main_screen and loop:
+                    loop.call_soon_threadsafe(self._main_screen._handle_voice_interrupt)
+
+            def on_speech_start() -> None:
+                # Called at speech onset — update mic UI only.
                 if self._main_screen and loop:
                     loop.call_soon_threadsafe(self._main_screen.set_mic_active)
 
-            def on_speech_start() -> None:
+            def on_segment_end() -> None:
+                # Called after every segment (transcribed or rejected) — return mic to idle.
                 if self._main_screen and loop:
-                    loop.call_soon_threadsafe(self._main_screen.set_mic_active)
+                    loop.call_soon_threadsafe(self._main_screen.set_mic_idle)
 
             self._stt = SpeechToText(
                 whisper_model_size=str(voice_cfg.get("whisper_model_size", "base")),
@@ -782,6 +838,7 @@ class BuddyApp(App):
                 on_text=on_text,
                 on_interrupt=on_interrupt,
                 on_speech_start=on_speech_start,
+                on_segment_end=on_segment_end,
                 beam_size=int(voice_cfg.get("beam_size", 5)),
                 whisper_vad_filter=bool(voice_cfg.get("whisper_vad_filter", True)),
                 speech_trigger_mult=float(voice_cfg.get("speech_trigger_mult", 3.0)),
@@ -810,6 +867,12 @@ class BuddyApp(App):
                 self._stt.stop()
             except Exception:
                 pass
+        _fn = getattr(self._bootstrap_state, "shutdown", None)
+        if callable(_fn):
+            try:
+                _fn()
+            except Exception:
+                logger.exception("shutdown failed in on_unmount")
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -898,6 +961,24 @@ def run_textual() -> None:
 
     _prewarm_whisper_before_textual()
     app = BuddyApp(pre_wizard_result=_pre_wizard_result)
+
+    # SIGTERM handler — covers `kill PID` and systemd/launchd stop signals.
+    # Delegates to the same shutdown hook used by on_unmount.
+    def _sigterm_handler(sig: int, frame: Any) -> None:
+        logger.info("SIGTERM received — shutting down services")
+        _fn = getattr(getattr(app, "_bootstrap_state", None), "shutdown", None)
+        if callable(_fn):
+            try:
+                _fn()
+            except Exception:
+                pass
+        raise SystemExit(0)
+
+    try:
+        signal.signal(signal.SIGTERM, _sigterm_handler)
+    except (OSError, ValueError):
+        pass  # not on main thread or platform doesn't support it
+
     try:
         app.run()
     except Exception:
@@ -909,3 +990,13 @@ def run_textual() -> None:
         except Exception:
             pass
         raise
+    finally:
+        # Belt-and-suspenders: on_unmount fires on clean exits, but on a hard
+        # crash or early exit Textual may skip it. Call shutdown here to cover
+        # the gap. _shutdown() is idempotent so a double call is harmless.
+        _fn = getattr(getattr(app, "_bootstrap_state", None), "shutdown", None)
+        if callable(_fn):
+            try:
+                _fn()
+            except Exception:
+                pass

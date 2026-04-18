@@ -5,14 +5,13 @@ import asyncio
 import re
 import time
 import uuid
-from dataclasses import dataclass
 from typing import Awaitable, Callable, Optional, Any, Dict, List, Tuple
 import threading
 from buddy.logger.logger import get_logger
 from buddy.brain.action_router import ActionRouter
 from buddy.buddy_core.smart_truncator import (
     truncate_history,
-    truncate_middle,
+    truncate_memory,
     truncate_proportional,
 )
 import json
@@ -21,20 +20,6 @@ logger = get_logger("pipeline")
 
 UiInputFn = Callable[[], Awaitable[str]]
 UiPrintFn = Callable[[str], Awaitable[None]]
-
-# ==========================================================
-# Return DTO
-# ==========================================================
-
-
-@dataclass(frozen=True)
-class PipelineResult:
-    reply: str
-    brain_payload: Dict[str, Any]
-    decided_context_ids: List[str]
-    decided_memory_ids: List[str]
-    trace: Optional[Dict[str, Any]] = None
-
 
 # ==========================================================
 # Strict turn/session rules (v1)
@@ -180,36 +165,6 @@ def _preview(s: str, n: int = 120) -> str:
     return t[:n].rstrip() + "…"
 
 
-def _cfg_nested(cfg: Dict[str, Any], *keys: str) -> Dict[str, Any]:
-    cur: Any = cfg
-    for k in keys:
-        if not isinstance(cur, dict):
-            return {}
-        cur = cur.get(k, {})
-    return cur if isinstance(cur, dict) else {}
-
-
-def _system_state_from_boot_state(state: Any) -> Dict[str, Any]:
-    """
-    Keep this lightweight. Brain.run_brain_prompt already gets timezone/now_iso,
-    so we return minimal flags for future expansion.
-    """
-    cfg = getattr(state, "config", None)
-    cfg = cfg if isinstance(cfg, dict) else {}
-    buddy_cfg = _cfg_nested(cfg, "buddy")
-
-    allow_web = bool(buddy_cfg.get("allow_web_search", False))
-    allow_local = bool(buddy_cfg.get("allow_local_search", True))
-    tz = str(buddy_cfg.get("timezone", "America/Moncton"))
-
-    return {
-        "allow_web_search": allow_web,
-        "allow_local_search": allow_local,
-        "timezone": tz,
-        "now_iso": _now_local_iso(),
-    }
-
-
 # ==========================================================
 # Memory retrieval -> compact LLM context
 # ==========================================================
@@ -239,7 +194,7 @@ def _get_memory_context_multi(
     t0 = time.perf_counter()
 
     # Collect results from all queries — deduplicate by memory_id, keep max score
-    seen: dict = {}  # memory_id → candidate with highest rerank_score
+    seen: dict = {}  # memory_id → candidate with highest composite_score
     for query in queries:
         try:
             hits = (
@@ -260,25 +215,32 @@ def _get_memory_context_multi(
             mid = getattr(candidate, "memory_id", None)
             if mid is None:
                 continue
+            # composite_score is the authoritative ranking signal;
+            # fall back to semantic_score for any older code paths.
             score = float(
-                getattr(candidate, "rerank_score", None)
+                getattr(candidate, "composite_score", None)
                 or getattr(candidate, "semantic_score", 0.0)
             )
-            if mid not in seen or score > float(
-                getattr(seen[mid], "rerank_score", None)
-                or getattr(seen[mid], "semantic_score", 0.0)
-            ):
+            existing = seen.get(mid)
+            if existing is None:
                 seen[mid] = candidate
+            else:
+                existing_score = float(
+                    getattr(existing, "composite_score", None)
+                    or getattr(existing, "semantic_score", 0.0)
+                )
+                if score > existing_score:
+                    seen[mid] = candidate
 
     if not seen:
         logger.info("mem_search_multi | dt=%.3fs retrieved=0", time.perf_counter() - t0)
         return [], "None"
 
-    # Sort by best score descending, trim to top_k
+    # Sort by composite_score descending, trim to top_k
     merged = sorted(
         seen.values(),
         key=lambda c: float(
-            getattr(c, "rerank_score", None) or getattr(c, "semantic_score", 0.0)
+            getattr(c, "composite_score", None) or getattr(c, "semantic_score", 0.0)
         ),
         reverse=True,
     )[:top_k]
@@ -336,6 +298,7 @@ async def handle_turn(
 
     brain = artifacts.brain
     brain.set_interrupt(interrupt_event=interrupt_event)
+    brain.set_on_token(progress_cb)
     mm = getattr(artifacts, "memory_manager", None)
     conversations = getattr(artifacts, "conversations", None)
     if conversations is None:
@@ -344,14 +307,6 @@ async def handle_turn(
 
     # ── Context budget ────────────────────────────────────────
     _base_budget = getattr(state, "context_budget", None)
-    if _base_budget is None:
-        # fallback: build a default budget with no os_profile
-        try:
-            from buddy.buddy_core.context_budget import ContextBudget
-
-            _base_budget = ContextBudget.from_hardware({})
-        except Exception:
-            _base_budget = None
 
     # Live pressure adjustment (±1 turn, never half-cut)
     _live_turns = getattr(state, "_live_recent_turns", None)
@@ -359,13 +314,8 @@ async def handle_turn(
         if _live_turns is None:
             _live_turns = _base_budget.recent_turns
         try:
-            from buddy.buddy_core.context_budget import ContextBudget
-
-            _adjusted = ContextBudget.adjusted_for_pressure(
-                _base_budget, current_turns=_live_turns
-            )
+            _adjusted = _base_budget.adjusted_for_pressure(current_turns=_live_turns)
             _live_turns = _adjusted.recent_turns
-            state._live_recent_turns = _live_turns
         except Exception:
             _adjusted = _base_budget
     else:
@@ -375,13 +325,13 @@ async def handle_turn(
     _top_k = _adjusted.top_k_memories if _adjusted else top_k_memories
     _max_history_chars = _adjusted.max_history_chars if _adjusted else 14_000
     _max_memory_chars = _adjusted.max_memory_chars if _adjusted else 8_000
-    _max_exec_results_chars = _adjusted.max_exec_results_chars if _adjusted else 16_000
-    _max_tool_output_chars = _adjusted.max_tool_output_chars if _adjusted else 10_000
+    _max_exec_results_chars = _adjusted.max_exec_chars if _adjusted else 16_000
+    _max_tool_output_chars = _adjusted.max_tool_chars if _adjusted else 10_000
 
     logger.info(
         "handle_turn | budget: tier=%s turns=%d top_k=%d "
         "hist_chars=%d mem_chars=%d exec_chars=%d tool_chars=%d",
-        _adjusted.tier_label if _adjusted else "fallback",
+        _adjusted.tier if _adjusted else "fallback",
         _live_turns if isinstance(_live_turns, int) else 0,
         _top_k,
         _max_history_chars,
@@ -394,7 +344,6 @@ async def handle_turn(
     session_id = _ensure_session_id(state)
     turn_id = _new_turn_id()
     turn_index = _next_turn_index(state)
-    sys_state = _system_state_from_boot_state(state)
 
     logger.info(
         "\nHANDLE_TURN_START | sid=%s tid=%s turn=%d src=%s text_len=%d preview=%r",
@@ -405,22 +354,6 @@ async def handle_turn(
         len(user_message),
         _preview(user_message, 120),
     )
-
-    # Single-turn: original user message remains the “turn owner”
-
-    """
-    Run one Brain turn.
-
-    Pipeline:
-      1) Fetch recent conversation context (RAM snapshot)
-      2) Run retrieval gate -> (search_queries[], lookup_message, deep_recall)
-      3) If needed, retrieve memory context
-      4) Run brain prompt (decision + memories)
-      5) Optionally ingest memory via MemoryManager
-
-    Returns:
-      decision dict (parsed)
-    """
 
     mem_text = "none"
     recent_conversations = "none"
@@ -449,6 +382,7 @@ async def handle_turn(
     # 2) Retrieval gate
     # ------------------------------------------------------
 
+    progress_cb("Remembering", False)
     t0 = time.perf_counter()
     try:
         rg_payload = await asyncio.to_thread(
@@ -456,7 +390,6 @@ async def handle_turn(
             active_task=user_message,
             recent_turns=recent_conversations,
             temperature=0.4,
-            on_token=progress_cb,
             stream=True,
         )
     except Exception as ex:
@@ -487,14 +420,13 @@ async def handle_turn(
         len(search_queries),
         dt_rg,
     )
-    if logger:
-        logger.debug(
-            "retrieval_gate_queries | sid=%s tid=%s turn=%d queries=%r",
-            session_id,
-            turn_id,
-            turn_index,
-            search_queries,
-        )
+    logger.debug(
+        "retrieval_gate_queries | sid=%s tid=%s turn=%d queries=%r",
+        session_id,
+        turn_id,
+        turn_index,
+        search_queries,
+    )
 
     # ------------------------------------------------------
     # 3) Memory retrieval (multi-query, merged by max score)
@@ -539,21 +471,20 @@ async def handle_turn(
         dt_rg,
         dt_mem,
     )
-    if logger:
-        logger.debug(
-            "brain_context_preview | sid=%s tid=%s"
-            " turn=%d\nmemories:\n%s\n\nrecent_turns:\n%s",
-            session_id,
-            turn_id,
-            turn_index,
-            mem_text,
-            recent_conversations,
-        )
+    logger.debug(
+        "brain_context_preview | sid=%s tid=%s"
+        " turn=%d\nmemories:\n%s\n\nrecent_turns:\n%s",
+        session_id,
+        turn_id,
+        turn_index,
+        mem_text,
+        recent_conversations,
+    )
     # ── Trim inputs to fit context budget before brain call ──
     recent_conversations = truncate_history(
         recent_conversations or "", _max_history_chars
     )
-    mem_text = truncate_middle(mem_text or "", _max_memory_chars)
+    mem_text = truncate_memory(mem_text or "", _max_memory_chars)
     # ─────────────────────────────────────────────────────────
 
     progress_cb("Thinking", False)
@@ -566,7 +497,6 @@ async def handle_turn(
         memories=mem_text,
         temperature=0.4,
         stream=True,
-        on_token=progress_cb,
     )
     dt_llm = time.perf_counter() - t0
 
@@ -579,8 +509,9 @@ async def handle_turn(
     )
 
     # ── Touch retrieved memories (invariant #4) ───────────────
-    # Fire-and-forget: bump access_count + consolidation_strength
+    # One place only: bump access_count + consolidation_strength
     # for every memory the Brain actually received this turn.
+    # Uses batch_touch — single SQLite commit for all ids.
     if mm is not None and retrieved:
         _touch_ids = [
             str(getattr(c, "memory_id", None))
@@ -596,25 +527,23 @@ async def handle_turn(
                 _tid=turn_id,
                 _turn=turn_index,
             ):
-                for mid in _ids:
-                    try:
-                        _store.touch(mid)
-                    except Exception as _te:
-                        logger.debug(
-                            "touch_failed | sid=%s tid=%s turn=%d mem_id=%s err=%r",
-                            _sid,
-                            _tid,
-                            _turn,
-                            mid,
-                            _te,
-                        )
-                logger.info(
-                    "touch_done | sid=%s tid=%s turn=%d count=%d",
-                    _sid,
-                    _tid,
-                    _turn,
-                    len(_ids),
-                )
+                try:
+                    _store.batch_touch(_ids)
+                    logger.info(
+                        "touch_done | sid=%s tid=%s turn=%d count=%d",
+                        _sid,
+                        _tid,
+                        _turn,
+                        len(_ids),
+                    )
+                except Exception as _te:
+                    logger.debug(
+                        "touch_failed | sid=%s tid=%s turn=%d err=%r",
+                        _sid,
+                        _tid,
+                        _turn,
+                        _te,
+                    )
 
             threading.Thread(target=_touch_all, daemon=True).start()
     # ─────────────────────────────────────────────────────────
@@ -712,12 +641,14 @@ async def handle_turn(
             session_id=session_id,
             planner_instructions=str(decision.get("planner_instructions")),
             user_message=user_message,
-            memories=mem_text,
             on_token=progress_cb,
+            memories=mem_text,
             llm_options={},
         )
-        progress_cb("Checking Execution Results 🤓", False)
-        responder_note = str(action_result.get("responder_note") or "").strip()
+        progress_cb("Responding", False)
+        responder_instruction = str(
+            action_result.get("responder_instruction") or ""
+        ).strip()
         execution_results = action_result.get("step_execution_map")
 
         # ── Trim execution results before responder call ──────
@@ -730,14 +661,13 @@ async def handle_turn(
 
         payload = await asyncio.to_thread(
             brain.run_respond,
-            active_task=responder_note,
+            active_task=responder_instruction,
             memories=mem_text,
             execution_results=json.dumps(
                 execution_results, ensure_ascii=False, indent=2
             ),
             temperature=0.4,
             stream=True,
-            on_token=progress_cb,
         )
         parsed_respond = payload.get("parsed")
         response = parsed_respond.get("response")

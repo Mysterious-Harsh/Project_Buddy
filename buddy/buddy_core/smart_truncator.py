@@ -38,7 +38,7 @@ def truncate_middle(text: str, max_chars: int) -> str:
     omitted = len(text) - head - tail
     marker = _TRUNCATION_MARKER.format(n=omitted)
 
-    return text[:head] + marker + text[len(text) - tail:]
+    return text[:head] + marker + text[len(text) - tail :]
 
 
 # ==========================================================
@@ -79,7 +79,8 @@ def truncate_proportional(
 
     # steps that carry output data
     steps_with_data = [
-        k for k, v in step_execution_map.items()
+        k
+        for k, v in step_execution_map.items()
         if isinstance(v, dict) and v.get("output_data") is not None
     ]
 
@@ -138,7 +139,7 @@ def truncate_history(text: str, max_chars: int) -> str:
         return text
 
     # Split into turns on blank lines
-    turns = [t.strip() for t in text.split("\n\n") if t.strip()]
+    turns = [t.strip() for t in text.split("\n") if t.strip()]
 
     if len(turns) <= 2:
         # Can't drop any turns — fall back to middle-cut
@@ -146,10 +147,23 @@ def truncate_history(text: str, max_chars: int) -> str:
 
     # Drop oldest turns until it fits, keeping at least 2
     while len(turns) > 2:
-        candidate = "\n\n".join(turns)
+        candidate = "\n".join(turns)
         if len(candidate) <= max_chars:
             return candidate
         turns.pop(0)  # drop oldest
 
     # Still too long with only 2 turns — middle-cut as last resort
-    return truncate_middle("\n\n".join(turns), max_chars)
+    return truncate_middle("\n".join(turns), max_chars)
+
+
+def truncate_memory(text: str, max_chars: int) -> str:
+    """
+    Alias for truncate_history — used for memory trimming in responder input.
+    """
+    mem = text.split("\n")
+    while len(text) > max_chars:
+
+        mem.pop(0)  # drop oldest line
+        text = "\n".join(mem)
+
+    return text

@@ -11,8 +11,10 @@ PALETTE (single source of truth — the AURORA dict):
   Deco lines: bright cyan  * —- *
   Matrix:     same aurora arc, cyan -> blue -> indigo -> violet during neural activation
 
-main.py imports:  AURORA, _c, _term_width, _info, _ok, _warn, _fail,
-                  Spinner, _banner_centered
+boot.py imports:  Spinner, _birth_animation, _c, _center_visible, _color_frame,
+                  _fail, _frame, _info, _matrix_stream_reveal, _ok, _term_clear,
+                  _term_size, _warn, print_banner_centered
+widgets.py imports: AURORA, _buddy_title_lines, _logo_row_code, _supports_unicode
 """
 from __future__ import annotations
 
@@ -226,14 +228,6 @@ def _term_width(default: int = 96) -> int:
         return default
 
 
-def _term_height(default: int = 24) -> int:
-    """Current terminal row count — sampled fresh each call."""
-    try:
-        return max(10, shutil.get_terminal_size((96, default)).lines)
-    except Exception:
-        return default
-
-
 def _term_size() -> Tuple[int, int]:
     """Return (columns, rows) sampled in one syscall to avoid race on resize."""
     try:
@@ -310,10 +304,6 @@ def _color_frame(block: str) -> str:
     return "\n".join(out)
 
 
-def _panel_divider(width: int) -> str:
-    return "=" * max(40, int(width))
-
-
 # =======================================================================
 # Banner
 # =======================================================================
@@ -341,23 +331,6 @@ def _buddy_title_lines() -> List[str]:
         r"| |_) | |_| | |_| | |_| |__   _|",
         r"|____/ \___/|____/|____/   |_|",
     ]
-
-
-def _aurora_logo_lines(inner: int) -> List[str]:
-    """Logo with per-row aurora gradient, centered to inner_width."""
-    out = []
-    for i, ln in enumerate(_buddy_title_lines()):
-        code = _logo_row_code(i)  # 256-color or basic fallback
-        colored = _raw_c(code, ln) if _supports_ansi() else ln
-        out.append(_center_visible(colored, inner))
-    return out
-
-
-def _aurora_deco_line(inner: int) -> str:
-    """* ——————— * ——————— *  decorative divider in aurora cyan."""
-    half = max(1, (inner - 8) // 2)
-    raw = f"* {'—' * half} * {'—' * half} *"
-    return _center_visible(_c(raw, "deco"), inner)
 
 
 def _banner_centered(
@@ -388,8 +361,7 @@ def _banner_centered(
 
     # — aurora gradient logo, centred in full terminal width —————
     # Use _fade_reveal_logo at full brightness (fade_p=1.0)
-    for ln in _fade_reveal_logo(_buddy_title_lines(), 1.0, cols):
-        out.append(ln)
+    out.extend(_fade_reveal_logo(_buddy_title_lines(), 1.0, cols))
     out.append("")
 
     # — tagline — deep violet ————————————————————-
@@ -455,9 +427,10 @@ def _banner_centered(
     bullet_code = _logo_row_code(5)  # deep violet  #875fff
     key_code = _logo_row_code(0)  # bright cyan  #00ffff
 
+    # _banner_centered is only reached when _supports_ansi() is True — no check needed
+    bullet = _raw_c(bullet_code, "\u2022")
     for k, v in cmds:
-        bullet = _raw_c(bullet_code, "\u2022") if _supports_ansi() else "*"
-        key = _raw_c(key_code, f"{k:<{CMD_W}}") if _supports_ansi() else f"{k:<{CMD_W}}"
+        key = _raw_c(key_code, f"{k:<{CMD_W}}")
         desc = _c(f"{v:<{DESC_W}}", "dim")
         out.append(indent + "  " + bullet + "  " + key + "  " + desc)
 
@@ -1150,41 +1123,6 @@ class Spinner:
             finally:
                 if self.enabled:
                     self.resume()
-
-    def prompt_preferred_name(
-        self,
-        *,
-        default_if_empty: str = "boss",
-        examples: str = "Harsh / Alex / Jordan / Sam",
-        width: int = 72,
-    ) -> str:
-        """
-        First-boot name prompt — called once, stored forever in os_profile.json.
-        Full Aurora styling.
-        """
-        inner = max(56, int(width))
-        lines = [
-            "",
-            _center_visible(_c("*   Hello — I'm Buddy.", "accent"), inner),
-            "",
-            _center_visible(
-                _c("I'm your private, fully offline AI companion.", "dim"), inner
-            ),
-            _center_visible(
-                _c("I think, remember, and act — entirely on your device.", "dim"),
-                inner,
-            ),
-            "",
-            _center_visible(
-                _c(f"What should I call you?  (e.g. {examples})", "tagline"), inner
-            ),
-            _center_visible(_c("Stored locally and never shared.", "dim"), inner),
-            "",
-        ]
-        box = _color_frame(_frame(lines, inner))
-        div = _panel_divider(min(_term_width(), inner + 2))
-        prompt = "\n" + div + "\n" + box + "\n" + div + "\n" + _c("  > ", "accent")
-        return (self.prompt_input(prompt) or "").strip() or default_if_empty
 
     def _run(self) -> None:
         i = 0

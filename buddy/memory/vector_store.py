@@ -534,6 +534,9 @@ class RerankConfig:
     # ACC-1: RRF rank constant for hybrid candidate merging
     rrf_k: int = 60
 
+    # Skip reranker when dense top score already exceeds this (high confidence path)
+    skip_rerank_above: float = 1.1  # default >1 = never skip (off by default)
+
 
 # ==========================================================
 # Rerankers (EXACTLY TWO)
@@ -648,7 +651,7 @@ class Qwen3RerankerYesNo:
         self.model = AutoModelForCausalLM.from_pretrained(
             self.model_name,
             trust_remote_code=True,
-            dtype=self.dtype,
+            torch_dtype=self.dtype,
             low_cpu_mem_usage=True,
         )
         self.model.eval()
@@ -934,6 +937,7 @@ class VectorStore:
             use_mmr=bool(rr_cfg.get("use_mmr", False)),
             mmr_lambda=float(rr_cfg.get("mmr_lambda", 0.7) or 0.7),
             rrf_k=int(rr_cfg.get("rrf_k", 60) or 60),
+            skip_rerank_above=float(rr_cfg.get("skip_rerank_above", 1.1) or 1.1),
         )
 
         self._reranker_initialized = False
@@ -1896,32 +1900,6 @@ class VectorStore:
                 out.append((mid, sc, None))
         return out
 
-    def _ordered_union_ids(
-        self,
-        sparse_hits: List[Tuple[str, float, Optional[Dict[str, Any]]]],
-        dense_hits: List[Tuple[str, float, Optional[Dict[str, Any]]]],
-    ) -> List[str]:
-        """
-        Simple union IDs preserving sparse-first order.
-
-        Kept for backward compatibility. Internal hybrid path uses
-        _ordered_union_rrf for better ranking quality.
-        """
-        seen: set[str] = set()
-        out: List[str] = []
-
-        for mid, _sc, _pl in sparse_hits:
-            if mid and mid not in seen:
-                seen.add(mid)
-                out.append(mid)
-
-        for mid, _sc, _pl in dense_hits:
-            if mid and mid not in seen:
-                seen.add(mid)
-                out.append(mid)
-
-        return out
-
     def _ordered_union_rrf(
         self,
         sparse_hits: List[Tuple[str, float, Optional[Dict[str, Any]]]],
@@ -1980,6 +1958,17 @@ class VectorStore:
             raise ValueError("rerank_mode must be auto|fast|accuracy")
 
         cfg = self.rerank_cfg
+
+        # Option A: skip reranker when dense is already confident
+        skip_thr = float(getattr(cfg, "skip_rerank_above", 1.1))
+        if hits and float(hits[0][1]) >= skip_thr:
+            self._debug(
+                "rerank: skipped (dense confident top=%.4f >= skip_rerank_above=%.4f)",
+                float(hits[0][1]),
+                skip_thr,
+            )
+            return hits
+
         if m == "fast" or not cfg.enabled:
             # Still apply MMR even in fast mode if configured (no model call needed)
             if cfg.use_mmr and hits:

@@ -1429,6 +1429,8 @@ class TestTuningPolish:
                 metadata={"encoding_arousal": 0.90},
             )
             mm.add_entry(high_arousal_entry)
+            # _novelty_burst runs in a daemon thread — wait for it to finish
+            import time as _time; _time.sleep(0.15)
 
             # Neighbors should have boosted consolidation_strength
             boosted = 0

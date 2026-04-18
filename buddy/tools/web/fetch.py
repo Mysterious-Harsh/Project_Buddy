@@ -30,10 +30,10 @@ logger = get_logger("web_fetch")
 # Constants
 # ==========================================================
 
-_MAX_URLS            = 5
-_DEFAULT_MAX_CHARS   = 8_000
+_MAX_URLS = 5
+_DEFAULT_MAX_CHARS = 8_000
 _MAX_CHARS_HARD_LIMIT = 20_000
-_FETCH_TIMEOUT_S     = 10
+_FETCH_TIMEOUT_S = 10
 _USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -47,7 +47,7 @@ _USER_AGENT = (
 
 
 class WebFetchCall(BaseModel):
-    urls:      List[str] = Field(..., min_length=1)
+    urls: List[str] = Field(..., min_length=1)
     max_chars: int = Field(default=_DEFAULT_MAX_CHARS)
 
     @model_validator(mode="after")
@@ -81,11 +81,11 @@ class WebFetch:
             "name": TOOL_NAME,
             "version": "1.0.0",
             "description": (
-                "Fetch full readable text from one or more URLs (up to 5). "
-                "Use AFTER web_search — pass the URLs from search results as input. "
-                "Returns full article/page content extracted as plain text. "
-                "Do NOT use on weather sites, maps, or social media — they use JavaScript "
-                "and return empty content; use web_search snippets for those instead."
+                "Fetch full readable text from one or more URLs (up to 5). Use AFTER"
+                " web_search — pass the URLs from search results as input. Returns full"
+                " article/page content extracted as plain text. Do NOT use on weather"
+                " sites, maps, or social media — they use JavaScript and return empty"
+                " content; use web_search snippets for those instead."
             ),
             "prompt": WEB_FETCH_TOOL_PROMPT,
             "error_prompt": WEB_FETCH_ERROR_RECOVERY_PROMPT,
@@ -95,7 +95,7 @@ class WebFetch:
     def parse_call(self, payload: Dict[str, Any]) -> WebFetchCall:
         return WebFetchCall.model_validate(payload)
 
-    def execute(
+    async def execute(
         self,
         call: WebFetchCall,
         *,
@@ -164,11 +164,11 @@ class WebFetch:
             content = content[:max_chars] + f"\n[truncated at {max_chars} chars]"
 
         return {
-            "url":        url,
-            "title":      title,
-            "content":    content,
+            "url": url,
+            "title": title,
+            "content": content,
             "size_chars": len(content),
-            "error":      None,
+            "error": None,
         }
 
 
@@ -190,7 +190,8 @@ def _extract(html: str, url: str) -> tuple[str, str]:
         import trafilatura  # type: ignore
 
         content = trafilatura.extract(
-            html, url=url or None,
+            html,
+            url=url or None,
             include_comments=False,
             include_tables=True,
             no_fallback=False,
@@ -212,8 +213,17 @@ def _extract(html: str, url: str) -> tuple[str, str]:
         from bs4 import BeautifulSoup  # type: ignore
 
         soup = BeautifulSoup(html, "lxml")
-        for tag in soup(["script", "style", "nav", "footer", "header",
-                          "aside", "form", "noscript", "iframe"]):
+        for tag in soup([
+            "script",
+            "style",
+            "nav",
+            "footer",
+            "header",
+            "aside",
+            "form",
+            "noscript",
+            "iframe",
+        ]):
             tag.decompose()
 
         title = ""
@@ -221,9 +231,9 @@ def _extract(html: str, url: str) -> tuple[str, str]:
             title = soup.title.string.strip()
 
         body = soup.find("article") or soup.find("main") or soup.find("body") or soup
-        raw  = body.get_text(separator="\n")
+        raw = body.get_text(separator="\n")
         lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
-        text  = re.sub(r"\n{3,}", "\n\n", "\n".join(lines))
+        text = re.sub(r"\n{3,}", "\n\n", "\n".join(lines))
         return text, title
     except Exception:
         pass
@@ -235,7 +245,7 @@ def _extract(html: str, url: str) -> tuple[str, str]:
 # Registry contract
 # ==========================================================
 
-TOOL_NAME  = "web_fetch"
+TOOL_NAME = "web_fetch"
 TOOL_CLASS = WebFetch
 
 

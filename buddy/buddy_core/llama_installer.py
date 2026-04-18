@@ -413,17 +413,3 @@ def ensure_llama_binary(
     return dest
 
 
-def platform_summary() -> str:
-    """Return a human-readable platform + GPU backend string for display."""
-    plat = _detect_platform()
-    sys_map  = {"darwin": "macOS", "linux": "Linux", "windows": "Windows"}
-    gpu_map  = {
-        "metal":  "Metal (Apple GPU)",
-        "cuda":   "CUDA (NVIDIA)",
-        "vulkan": "Vulkan (GPU)",
-        "hip":    "HIP (AMD)",
-        "cpu":    "CPU only",
-    }
-    sys_name = sys_map.get(plat["system"], plat["system"].title())
-    gpu_name = gpu_map.get(plat["gpu"], plat["gpu"].upper())
-    return f"{sys_name} {plat['arch']}  ·  {gpu_name}"

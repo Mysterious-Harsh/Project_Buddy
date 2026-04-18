@@ -98,11 +98,18 @@ class MemoryCandidateLite:
 
     Fields are intentionally redundant (summary + full content) so the Brain
     prompt builder never needs extra fetches in the hot path.
+
+    composite_score: final ranking score (semantic×0.40 + strength×0.25 +
+                     rerank×0.15 + tier×0.10 + arousal×0.10). Use this
+                     as the merge key in multi-query deduplication.
+    rerank_score:    raw score from the reranker model (0.0 if reranker skipped).
+    semantic_score:  raw dense similarity from Qdrant.
     """
 
     memory_id: str
     semantic_score: float
     rerank_score: float
+    composite_score: float
     summary: str
     content: str
     source: Optional[str] = None
@@ -589,9 +596,7 @@ class MemoryManager:
         self,
         entry: MemoryEntry,
         *,
-        upsert_vector: bool = True,
         mark_pending: bool = True,
-        discard_if: Optional[Dict[str, Any]] = None,
     ) -> bool:
         """
         Persist a MemoryEntry.
@@ -653,11 +658,8 @@ class MemoryManager:
                     getattr(entry, "memory_type", None),
                 )
 
-        # X5 (Phase 5): novelty-burst micro-consolidation
-        # High-arousal new memories propagate a small strength boost to their
-        # semantic neighbors — simulating the way emotional novelty accelerates
-        # consolidation of related knowledge (Cahill & McGaugh 1998).
-        self._novelty_burst(entry)
+        # X5 (Phase 5): novelty-burst — run in background to avoid blocking write path
+        threading.Thread(target=self._novelty_burst, args=(entry,), daemon=True).start()
 
         return True
 
@@ -709,9 +711,7 @@ class MemoryManager:
         memory_type: str = "flash",
         importance: float = 0.5,
         metadata: Optional[Dict[str, Any]] = None,
-        upsert_vector: bool = True,
         mark_pending: bool = True,
-        discard_if: Optional[Dict[str, Any]] = None,
         source: Optional[str] = None,
         source_turn: Optional[int] = None,
     ) -> Optional[MemoryEntry]:
@@ -732,51 +732,8 @@ class MemoryManager:
         )
         if e is None:
             return None
-        ok = self.add_entry(
-            e,
-            upsert_vector=upsert_vector,
-            mark_pending=mark_pending,
-            discard_if=discard_if,
-        )
+        ok = self.add_entry(e, mark_pending=mark_pending)
         return e if ok else None
-
-    # def create_memory_entry(
-    #     self,
-    #     *,
-    #     text: Optional[str] = None,
-    #     memory: Optional[Dict[str, Any]] = None,
-    #     role: Optional[str] = None,
-    #     source: Optional[str] = None,
-    #     source_turn: Optional[int] = None,
-    #     memory_type: str = "flash",
-    #     importance: float = 0.5,
-    #     metadata: Optional[Dict[str, Any]] = None,
-    #     normalize_text_lower: bool = False,
-    # ) -> Optional[MemoryEntry]:
-    #     """
-    #     Public factory alias — build without storing.
-    #     Kept for API compatibility with callers that pre-build entries.
-    #     """
-    #     e = self._build_entry(
-    #         text=text,
-    #         memory=memory,
-    #         role=role,
-    #         source=source,
-    #         source_turn=source_turn,
-    #         memory_type=memory_type,
-    #         importance=importance,
-    #         metadata=metadata,
-    #         normalize_text_lower=normalize_text_lower,
-    #     )
-    #     if self.debug and e is not None:
-    #         logger.info(
-    #             "memory.entry_built | id=%s role=%s type=%s imp=%.3f",
-    #             getattr(e, "id", "?"),
-    #             getattr(e, "role", None),
-    #             getattr(e, "memory_type", None),
-    #             float(getattr(e, "importance", 0.0) or 0.0),
-    #         )
-    #     return e
 
     # ------------------------------------------------------------------
     # Read path
@@ -848,11 +805,13 @@ class MemoryManager:
         if not hits:
             return []
 
-        # 3) Hydrate from SQLite (preserve ranking order)
+        # 3) Hydrate from SQLite — single batch query, preserve Qdrant ranking order
+        hit_ids = [mid for mid, _sc, _pl in hits]
+        entry_map = self.sqlite.batch_get_memories(hit_ids)
+
         hydrated: List[Tuple[MemoryEntry, float, Optional[Dict[str, Any]]]] = []
-        sqlite_get = self.sqlite.get_memory
         for mid, sc, pl in hits:
-            e = sqlite_get(mid)
+            e = entry_map.get(mid)
             if e is not None:
                 hydrated.append((e, float(sc), pl))
 
@@ -860,14 +819,10 @@ class MemoryManager:
             return []
 
         # 4) Build Brain DTOs with composite re-scoring
-        now_ts = time.time()
+        # Touch is NOT done here — pipeline.py owns touch (invariant #4: one place only).
         scored: List[Tuple[float, MemoryCandidateLite]] = []
-        sqlite_touch = self.sqlite.touch
-        _touch_ids: List[str] = []  # collect for batched touch after scoring
 
         for e, sc, pl in hydrated:
-            _touch_ids.append(e.id)
-
             rerank_score = 0.0
             source = None
             if isinstance(pl, dict):
@@ -898,7 +853,8 @@ class MemoryManager:
                 MemoryCandidateLite(
                     memory_id=str(e.id),
                     semantic_score=float(sc),
-                    rerank_score=final,  # expose composite as rerank_score for downstream
+                    rerank_score=rerank_score,
+                    composite_score=final,
                     summary=_summarize(e.text),
                     content=str(e.text),
                     source=source,
@@ -910,82 +866,14 @@ class MemoryManager:
         # Re-sort by composite score
         scored.sort(key=lambda x: x[0], reverse=True)
 
-        # P16: 1-hop spreading activation
-        # Top-3 scoring hits → reuse stored embedding (no re-inference) →
-        # secondary vector search → promote semantically adjacent memories.
-        _SPREAD_DAMP   = 0.4
-        _N_ACTIVATORS  = min(3, len(scored))
-        _SPREAD_TOP_K  = 5
-        spread_seen: set = {c.memory_id for _, c in scored}
-        spread_pool: List[Tuple[float, MemoryCandidateLite]] = []
-
-        # Build id→entry map once so spreading activation can reuse stored embeddings
-        # instead of calling embed_query (model inference) per activator.
-        _entry_map: Dict[str, MemoryEntry] = {e.id: e for e, _, _ in hydrated}
-
-        if self.vector is not None:
-            for act_score, act_cand in scored[:_N_ACTIVATORS]:
-                # Use stored embedding — avoids 3 extra embed_query model calls.
-                _act_entry = _entry_map.get(act_cand.memory_id)
-                _stored_emb = getattr(_act_entry, "embedding", None) if _act_entry else None
-                if _stored_emb is None:
-                    continue
-                act_qv = np.asarray(_stored_emb, dtype=np.float32).reshape(-1)
-                if act_qv.size == 0:
-                    continue
-                try:
-                    spread_hits = self.vector.search(
-                        query_vector=act_qv,
-                        top_k=_SPREAD_TOP_K,
-                        include_deleted=False,
-                        query_text=act_cand.content,
-                        mode=mode,
-                        rerank_mode="none",
-                    )
-                except Exception:
-                    continue
-
-                for spread_mid, spread_sim in spread_hits:
-                    if spread_mid in spread_seen:
-                        continue
-                    spread_e = self.sqlite.get_memory(spread_mid)
-                    if spread_e is None:
-                        continue
-                    spread_seen.add(spread_mid)
-                    _touch_ids.append(spread_mid)
-                    spread_final = _SPREAD_DAMP * float(act_score) * float(spread_sim)
-                    spread_pool.append((
-                        spread_final,
-                        MemoryCandidateLite(
-                            memory_id=spread_mid,
-                            semantic_score=float(spread_sim),
-                            rerank_score=spread_final,
-                            summary=_summarize(spread_e.text),
-                            content=str(spread_e.text),
-                            source=None,
-                            created_at_iso=_iso(getattr(spread_e, "created_at", None)),
-                            memory_type=str(
-                                getattr(spread_e, "memory_type", "flash") or "flash"
-                            ),
-                        ),
-                    ))
-
-        if spread_pool:
-            scored = sorted(scored + spread_pool, key=lambda x: x[0], reverse=True)
-            self._dbg("spreading_activation | added=%d new candidates", len(spread_pool))
+        # P16: spreading activation — skipped; composite re-scoring already
+        # surfaces adjacent memories via consolidation_strength signal.
 
         out = [c for _, c in scored[:top_k]]
 
         # Record top result for UI display (InfoPane "last memory" line)
         if out:
             self.last_retrieved_text = out[0].content[:120]
-
-        # Batch touch all accessed memories (primary + spread) in one pass
-        for _mid in _touch_ids:
-            try:
-                sqlite_touch(_mid)
-            except Exception:
-                pass
 
         if self.debug:
             logger.info(

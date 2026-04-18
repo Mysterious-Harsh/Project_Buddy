@@ -3,31 +3,58 @@
 # BUDDY BOOTSTRAP  —  v2
 # ═══════════════════════════════════════════════════════════
 #
-# Boot sequence:
-#   1.  Load runtime config from ~/.buddy/config/buddy.toml
-#   2.  Matrix reveal animation  (2.8 s neural activation)
-#   3.  First-boot preferred name prompt  ← ONLY on first boot, stored forever
-#   4.  Python dependency checks + optional auto-install
-#   5.  SQLite DB prep
-#   6.  Full OS profile refresh  (every boot — name preserved)
-#   7.  LLM model selection  (first-boot interactive, subsequent silent)
-#   8.  LLM GGUF download if missing  (no Spinner — tqdm owns terminal)
-#   9.  ST model download  (embedder + reranker, no Spinner)
-#  10.  Env vars: BUDDY_EMBED_MODEL, BUDDY_RERANKER_MODEL  ← set before first use
-#  11.  Prompt integrity check
-#  12.  Render base system prompt
-#  13.  Start / wait for llama-server
-#  14.  Create core objects
-#  15.  Strict enforcement  ← boot report only written AFTER this passes
-#  16.  Write boot report
-#  17.  Show online banner with system info + user name
+# Boot sequence (inside bootstrap()):
+#   STEP  1  ·  Birth / matrix animation       (first-boot only)
+#   STEP  2  ·  Name resolution                (first-boot only)
+#   STEP  3  ·  Boot header print
+#   STEP  4  ·  SQLite DB prep
+#   STEP  6  ·  OS profile refresh             (every boot — name preserved)
+#   STEP  6.5·  llama-server binary check
+#   STEP  6.6·  First-boot wizard              (first-boot only)
+#   STEP  7  ·  LLM model selection            (interactive first time, silent after)
+#   STEP  7.5·  Vision / mmproj selection
+#   STEP  8  ·  LLM GGUF download              (tqdm owns terminal — no Spinner)
+#   STEP  8.5·  mmproj download                (vision only)
+#   STEP  9  ·  ST model download              (embedder + reranker)
+#   STEP 10  ·  Set BUDDY_EMBED_MODEL / BUDDY_RERANKER_MODEL env vars
+#   STEP 11  ·  SearXNG setup / start          (if web_engine == "searxng")
+#   STEP 12  ·  llama-server start / wait
+#   STEP 13  ·  Core objects instantiation
+#   STEP 14  ·  Strict integrity enforcement
+#   STEP 15  ·  Online banner
 #
 # Public API:
 #   bootstrap(options: Optional[BootstrapOptions] = None) -> BootstrapState
+#   run_pre_textual_setup() -> Optional[Dict[str, Any]]
 #
+# ─────────────────────────────────────────────────────────────────────────────
+# Section index  (in file order — search "§N" to jump)
+# ─────────────────────────────────────────────────────────────────────────────
+#  §1   Imports & module constants
+#  §2   Public types           BootstrapOptions · BootstrapIntegrity
+#                              BootstrapArtifacts · BootstrapState
+#  §3   UI print helpers       _ui_ok / _ui_warn / _ui_fail / _ui_info
+#  §4   Low-level utilities    atomic write · JSON · TOML · subprocess
+#  §5   OS profile collection  _collect_* · _cpu · _ram · _disk · _gpu
+#  §6   OS profile assembly    _build_os_profile · _ensure_os_profile
+#  §7   Database preparation   _ensure_db
+#  §8   Model downloads        ST sentence-transformers (9a) · LLM GGUF (9b)
+#  §9   Runtime config         _runtime_root · _layout · _load_runtime_config
+#  §10  Port & URL helpers     _find_free_port · _url_reachable · _parse_url_port
+#  §11  Vision / mmproj        _ensure_mmproj
+#  §12  llama-server lifecycle spawn · wait · probe · terminate · pretty_cmd
+#  §13  Lazy imports & factory _SQLiteStore … _Brain · _create_artifacts
+#  §14  Server props fetch     _fetch_llama_server_props
+#  §15  First-boot wizard      UI prompts · _write_first_boot_config
+#  §16  run_pre_textual_setup  interactive terminal I/O before Textual starts
+#  §17  bootstrap()            PUBLIC ENTRY POINT
+# ─────────────────────────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════
+# §1  Imports & module constants
+# ═══════════════════════════════════════════════════════════
+
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import platform
@@ -41,14 +68,13 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import requests
 
 from buddy.logger.logger import get_logger
 from buddy.ui.boot_ui import (
     Spinner,
-    _banner_centered,
     _birth_animation,
     _c,
     _center_visible,
@@ -56,16 +82,18 @@ from buddy.ui.boot_ui import (
     _fail,
     _frame,
     _info,
-    _logo_row_code,
     _matrix_stream_reveal,
     _ok,
-    _raw_c,
     _term_clear,
     _term_size,
     _warn,
     print_banner_centered,
 )
-from buddy.buddy_core.model_selector import LLMOption, get_or_select_llm_model
+from buddy.buddy_core.model_selector import (
+    HardwareTier,
+    LLMOption,
+    get_or_select_llm_model,
+)
 from buddy.buddy_core.llama_installer import ensure_llama_binary
 from buddy.buddy_core.vision_selector import VisionChoice, get_or_select_vision
 from buddy.buddy_core.searxng_setup import (
@@ -79,12 +107,13 @@ logger = get_logger("bootstrap")
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 PROJECT_ROOT = PACKAGE_ROOT.parent
-_HASH_CHUNK = 65536
 _HTTP = requests.Session()
 
 
 # ═══════════════════════════════════════════════════════════
-# Options / State types
+# §2  Public types
+#     BootstrapOptions · BootstrapIntegrity
+#     BootstrapArtifacts · BootstrapState
 # ═══════════════════════════════════════════════════════════
 
 
@@ -94,10 +123,6 @@ class BootstrapOptions:
 
     show_boot_ui: bool = True
     strict_integrity: bool = True
-    auto_install: bool = False
-    verify_prompts_lock: bool = True
-    verify_os_profile_lock: bool = True
-    write_boot_report: bool = True
     download_models: bool = True
     force_model_reselect: bool = False
     force_vision_reselect: bool = False
@@ -108,8 +133,6 @@ class BootstrapOptions:
 
 @dataclass
 class BootstrapIntegrity:
-    prompts_lock_ok: bool = True
-    os_profile_ok: bool = True
     violations: List[str] = field(default_factory=list)
     warnings: List[str] = field(default_factory=list)
 
@@ -151,7 +174,10 @@ class BootstrapState:
 
 
 # ═══════════════════════════════════════════════════════════
-# UI helpers
+# §3  UI print helpers
+#     Thin wrappers so bootstrap() never calls boot_ui directly.
+#     Shadowed by closures inside bootstrap() when running under Textual
+#     (progress_cb provided) to redirect output to the BootScreen log.
 # ═══════════════════════════════════════════════════════════
 
 
@@ -178,51 +204,14 @@ def _ui_info(msg: str) -> None:
 
 
 # ═══════════════════════════════════════════════════════════
-# Small helpers
+# §4  Low-level utilities
+#     Atomic file I/O · JSON · TOML · subprocess helpers
+#     No business logic — pure mechanics used by everything above.
 # ═══════════════════════════════════════════════════════════
 
 
 def _utc_now_iso() -> str:
     return datetime.utcnow().isoformat() + "Z"
-
-
-def _as_bool(x: Any, default: bool) -> bool:
-    if x is None:
-        return default
-    if isinstance(x, bool):
-        return x
-    if isinstance(x, (int, float)):
-        return bool(x)
-    return str(x).strip().lower() in {"1", "true", "yes", "y", "on"}
-
-
-def _as_int(x: Any, default: int) -> int:
-    if x is None or isinstance(x, bool):
-        return default
-    if isinstance(x, int):
-        return x
-    try:
-        return int(str(x).strip())
-    except Exception:
-        return default
-
-
-def _as_float(x: Any, default: float) -> float:
-    if x is None or isinstance(x, bool):
-        return default
-    if isinstance(x, (int, float)):
-        return float(x)
-    try:
-        return float(str(x).strip())
-    except Exception:
-        return default
-
-
-def _as_str(x: Any, default: str) -> str:
-    if x is None:
-        return default
-    s = (x if isinstance(x, str) else str(x)).strip()
-    return s if s else default
 
 
 def _inject_ctx_size(server_args: List[str], n_ctx: int) -> List[str]:
@@ -278,14 +267,6 @@ def _write_json(path: Path, obj: Dict[str, Any]) -> None:
     )
 
 
-def _sha256(path: Path) -> str:
-    h = hashlib.sha256()
-    with path.open("rb") as f:
-        for chunk in iter(lambda: f.read(_HASH_CHUNK), b""):
-            h.update(chunk)
-    return h.hexdigest()
-
-
 def _sec(d: Dict[str, Any], key: str) -> Dict[str, Any]:
     v = d.get(key)
     return v if isinstance(v, dict) else {}
@@ -307,16 +288,71 @@ def _run(cmd: List[str], *, timeout: float = 3.0) -> Optional[str]:
 
 
 # ═══════════════════════════════════════════════════════════
-# Full OS profile  — collected on EVERY boot
+# §5  OS profile collection
+#     Five collectors — each returns one section of the profile dict.
+#     All sizes in GB. No raw-byte fields. No platform-flag booleans.
+#
+#     _collect_identity()          → { username, preferred_name, hostname }
+#     _collect_platform()          → { os, os_version, architecture, python_version }
+#     _collect_hardware(data_dir)  → { cpu, ram, disk, gpu }
+#       _cpu()                     → { model, physical_cores, logical_cores, … }
+#       _ram()                     → { total_gb, available_gb }
+#       _disk(data_dir)            → { total_gb, free_gb }
+#       _gpu()                     → { backend, name, vram_gb }
+#     _collect_runtime()           → { preferred_shell, virtual_env, installed_tools }
+#     _collect_paths(…)            → { home, data_dir, assets_dir }
 # ═══════════════════════════════════════════════════════════
+
+
+def _collect_identity() -> Dict[str, Any]:
+    return {
+        "username": os.environ.get("USER") or os.environ.get("USERNAME") or "unknown",
+        "preferred_name": None,  # filled in by caller from persisted prefs
+        "hostname": platform.node(),
+    }
+
+
+def _collect_platform() -> Dict[str, Any]:
+    sysname = platform.system().lower()
+    os_version = None
+
+    if sysname == "darwin":
+        os_version = _run(["sw_vers", "-productVersion"])
+    elif sysname == "linux":
+        try:
+            with open("/etc/os-release") as f:
+                for line in f:
+                    if line.startswith("VERSION_ID="):
+                        os_version = line.split("=", 1)[1].strip().strip('"')
+                        break
+        except Exception:
+            pass
+    elif sysname == "windows":
+        os_version = platform.version()
+
+    return {
+        "os": sysname,
+        "os_version": os_version,
+        "architecture": platform.machine(),
+        "python_version": sys.version.split()[0],
+    }
+
+
+def _collect_hardware(data_dir: Path) -> Dict[str, Any]:
+    return {
+        "cpu": _cpu(),
+        "ram": _ram(),
+        "disk": _disk(data_dir),
+        "gpu": _gpu(),
+    }
 
 
 def _cpu() -> Dict[str, Any]:
     info: Dict[str, Any] = {
+        "model": None,
         "physical_cores": None,
         "logical_cores": None,
         "frequency_mhz": None,
-        "model": None,
         "architecture": platform.machine(),
     }
     try:
@@ -329,7 +365,9 @@ def _cpu() -> Dict[str, Any]:
             info["frequency_mhz"] = round(freq.current, 1)
     except ImportError:
         pass
-    if platform.system() == "Darwin":
+
+    sys_name = platform.system()
+    if sys_name == "Darwin":
         info["model"] = _run(["sysctl", "-n", "machdep.cpu.brand_string"]) or _run(
             ["sysctl", "-n", "hw.model"]
         )
@@ -339,7 +377,7 @@ def _cpu() -> Dict[str, Any]:
         if info["physical_cores"] is None:
             n = _run(["sysctl", "-n", "hw.physicalcpu"])
             info["physical_cores"] = int(n) if n and n.isdigit() else None
-    elif platform.system() == "Linux":
+    elif sys_name == "Linux":
         try:
             with open("/proc/cpuinfo") as f:
                 for line in f:
@@ -348,52 +386,83 @@ def _cpu() -> Dict[str, Any]:
                         break
         except Exception:
             pass
+    elif sys_name == "Windows":
+        ps_out = _run(
+            ["powershell", "-Command", "(Get-CimInstance Win32_Processor).Name"]
+        )
+        if ps_out:
+            info["model"] = ps_out.strip()
+        if info["physical_cores"] is None or info["logical_cores"] is None:
+            out = _run([
+                "powershell",
+                "-Command",
+                (
+                    "(Get-CimInstance Win32_Processor)"
+                    " | Select-Object NumberOfCores,NumberOfLogicalProcessors"
+                    " | ConvertTo-Json"
+                ),
+            ])
+            if out:
+                try:
+                    d = json.loads(out)
+                    info["physical_cores"] = info["physical_cores"] or d.get(
+                        "NumberOfCores"
+                    )
+                    info["logical_cores"] = info["logical_cores"] or d.get(
+                        "NumberOfLogicalProcessors"
+                    )
+                except (json.JSONDecodeError, AttributeError):
+                    pass
     return info
 
 
 def _ram() -> Dict[str, Any]:
-    info: Dict[str, Any] = {
-        "total_bytes": None,
-        "available_bytes": None,
-        "used_bytes": None,
-        "total_gb": None,
-    }
+    info: Dict[str, Any] = {"total_gb": None, "available_gb": None}
     try:
         import psutil  # type: ignore
 
         vm = psutil.virtual_memory()
-        info.update({
-            "total_bytes": vm.total,
-            "available_bytes": vm.available,
-            "used_bytes": vm.used,
-            "total_gb": round(vm.total / (1024**3), 2),
-        })
+        info["total_gb"] = round(vm.total / (1024**3), 2)
+        info["available_gb"] = round(vm.available / (1024**3), 2)
         return info
     except ImportError:
         pass
-    if platform.system() == "Darwin":
+
+    # Fallback: total only (available not reliably cross-platform without psutil)
+    sys_name = platform.system()
+    if sys_name == "Darwin":
         out = _run(["sysctl", "-n", "hw.memsize"])
         if out and out.isdigit():
-            total = int(out)
-            info.update({"total_bytes": total, "total_gb": round(total / (1024**3), 2)})
+            info["total_gb"] = round(int(out) / (1024**3), 2)
+    elif sys_name == "Windows":
+        ps_out = _run([
+            "powershell",
+            "-Command",
+            "(Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory",
+        ])
+        if ps_out and ps_out.strip().isdigit():
+            info["total_gb"] = round(int(ps_out.strip()) / (1024**3), 2)
+    elif sys_name == "Linux":
+        try:
+            with open("/proc/meminfo") as f:
+                for line in f:
+                    if line.startswith("MemTotal:"):
+                        kb = int(line.split()[1])
+                        info["total_gb"] = round(kb / (1024**2), 2)
+                    elif line.startswith("MemAvailable:"):
+                        kb = int(line.split()[1])
+                        info["available_gb"] = round(kb / (1024**2), 2)
+        except Exception:
+            pass
     return info
 
 
 def _disk(data_dir: Path) -> Dict[str, Any]:
-    info: Dict[str, Any] = {
-        "total_bytes": None,
-        "free_bytes": None,
-        "total_gb": None,
-        "free_gb": None,
-    }
+    info: Dict[str, Any] = {"total_gb": None, "free_gb": None}
     try:
         stat = shutil.disk_usage(data_dir)
-        info.update({
-            "total_bytes": stat.total,
-            "free_bytes": stat.free,
-            "total_gb": round(stat.total / (1024**3), 2),
-            "free_gb": round(stat.free / (1024**3), 2),
-        })
+        info["total_gb"] = round(stat.total / (1024**3), 2)
+        info["free_gb"] = round(stat.free / (1024**3), 2)
     except Exception:
         pass
     return info
@@ -403,149 +472,100 @@ def _gpu() -> Dict[str, Any]:
     info: Dict[str, Any] = {
         "backend": None,
         "name": None,
-        "metal_supported": False,
-        "cuda_available": False,
-        "total_vram_bytes": None,
-        "total_vram_gb": None,
+        "vram_gb": None,
     }
     sys_name = platform.system()
     machine = platform.machine()
 
-    if sys_name == "Darwin" and machine == "arm64":
-        info.update({"backend": "metal", "metal_supported": True})
+    if sys_name == "Darwin":
+        info["backend"] = "metal"
         info["name"] = (
             _run(["sysctl", "-n", "machdep.cpu.brand_string"])
             or _run(["sysctl", "-n", "hw.model"])
-            or "Apple Silicon"
+            or ("Apple Silicon" if machine == "arm64" else "Intel Mac GPU")
         )
-        out = _run(["sysctl", "-n", "hw.memsize"])
-        if out and out.isdigit():
-            total = int(out)
-            info.update({
-                "total_vram_bytes": total,
-                "total_vram_gb": round(total / (1024**3), 2),
-            })
-        return info
-
-    if sys_name == "Darwin":
-        info.update(
-            {"backend": "metal", "metal_supported": True, "name": "Intel Mac GPU"}
-        )
+        if machine == "arm64":
+            # Unified memory — report system RAM as VRAM
+            out = _run(["sysctl", "-n", "hw.memsize"])
+            if out and out.isdigit():
+                info["vram_gb"] = round(int(out) / (1024**3), 2)
         return info
 
     if _which("nvidia-smi"):
-        info.update({"backend": "cuda", "cuda_available": True})
+        info["backend"] = "cuda"
         info["name"] = _run(["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"])
         vram_raw = _run(
             ["nvidia-smi", "--query-gpu=memory.total", "--format=csv,noheader,nounits"]
         )
         if vram_raw and vram_raw.strip().isdigit():
-            mib = int(vram_raw.strip())
-            info.update({
-                "total_vram_bytes": mib * 1024 * 1024,
-                "total_vram_gb": round(mib / 1024, 2),
-            })
+            info["vram_gb"] = round(int(vram_raw.strip()) / 1024, 2)
         return info
 
     if _which("rocm-smi"):
-        info.update({
-            "backend": "rocm",
-            "name": _run(["rocm-smi", "--showproductname"]) or "AMD GPU",
-        })
+        info["backend"] = "rocm"
+        info["name"] = _run(["rocm-smi", "--showproductname"]) or "AMD GPU"
         return info
+
+    if sys_name == "Linux":
+        lspci = _run(["lspci"])
+        if lspci:
+            for line in lspci.splitlines():
+                if "VGA" in line or "Display" in line or "3D" in line:
+                    info["backend"] = "unknown"
+                    info["name"] = line.split(":")[-1].strip()
+                    break
+
+    if sys_name == "Windows":
+        ps_out = _run([
+            "powershell",
+            "-Command",
+            (
+                "Get-CimInstance Win32_VideoController"
+                " | Select-Object -First 1 Name,AdapterRAM | ConvertTo-Json"
+            ),
+        ])
+        if ps_out:
+            try:
+                d = json.loads(ps_out)
+                vram = d.get("AdapterRAM") or 0
+                info.update({
+                    "backend": "directx",
+                    "name": d.get("Name"),
+                    "vram_gb": round(vram / (1024**3), 2) if vram else None,
+                })
+                return info
+            except (json.JSONDecodeError, AttributeError):
+                pass
 
     info["backend"] = "cpu_only"
     return info
 
 
-def _build_os_profile(
-    *,
-    assets_dir: Path,
-    data_dir: Path,
-    user_preferred_name: Optional[str] = None,
-) -> Dict[str, Any]:
-    """
-    Full OS profile. Decoupled from UI — no Spinner argument.
-    Called on EVERY boot. user_preferred_name preserved across boots.
-    """
-    sysname = platform.system().lower()
-    is_windows = sysname.startswith("win")
-    username = os.environ.get("USER") or os.environ.get("USERNAME") or "unknown"
+def _collect_runtime() -> Dict[str, Any]:
+    sys_name = platform.system().lower()
 
-    if is_windows:
-        shells = ["powershell", "cmd"]
+    if sys_name.startswith("win"):
+        shell_candidates = [s for s in ("powershell", "cmd") if _which(s)]
     else:
-        shells = [s for s in ("zsh", "bash", "fish", "sh") if _which(s)] or ["sh"]
+        shell_candidates = [s for s in ("zsh", "bash", "fish", "sh") if _which(s)]
+
+    preferred_shell = (
+        # honour the user's actual shell if set
+        Path(os.environ.get("SHELL", "")).name
+        or (shell_candidates[0] if shell_candidates else "sh")
+    )
 
     return {
-        "version": 2,
-        "generated_at": _utc_now_iso(),
-        "username": username,
-        "user_preferred_name": user_preferred_name or username,
-        "platform": {
-            "system": platform.system(),
-            "release": platform.release(),
-            "version": platform.version(),
-            "machine": platform.machine(),
-            "python": sys.version.split()[0],
-            "node": platform.node(),
-        },
-        "os_hints": {
-            "is_windows": is_windows,
-            "is_macos": sysname == "darwin",
-            "is_linux": sysname == "linux",
-            "shell_candidates": shells,
-            "preferred_shell": shells[0] if shells else "sh",
-        },
-        "cpu": _cpu(),
-        "ram": _ram(),
-        "disk": _disk(data_dir),
-        "gpu": _gpu(),
-        "macos": _macos_info(),
-        "environment": {
-            k: os.environ.get(k)
-            for k in (
-                "SHELL",
-                "TERM",
-                "LANG",
-                "HOME",
-                "USER",
-                "VIRTUAL_ENV",
-                "CONDA_DEFAULT_ENV",
-            )
-        },
-        "tools": _installed_tools(),
-        "paths": {
-            "project_root": str(PROJECT_ROOT),
-            "package_root": str(PACKAGE_ROOT),
-            "data_dir": str(data_dir),
-            "assets_dir": str(assets_dir),
-            "home": str(Path.home()),
-        },
+        "preferred_shell": preferred_shell,
+        "virtual_env": (
+            os.environ.get("VIRTUAL_ENV") or os.environ.get("CONDA_DEFAULT_ENV")
+        ),
+        "installed_tools": _installed_tools(),
     }
-
-
-def _macos_info() -> Dict[str, Any]:
-    if platform.system() != "Darwin":
-        return {}
-    info: Dict[str, Any] = {
-        "product_name": None,
-        "product_version": None,
-        "build_version": None,
-        "is_apple_silicon": platform.machine() == "arm64",
-    }
-    sw = _run(["sw_vers"])
-    if sw:
-        for line in sw.splitlines():
-            if ":" in line:
-                key, _, val = line.partition(":")
-                key = key.strip().lower().replace(" ", "_")
-                if key in info:
-                    info[key] = val.strip()
-    return info
 
 
 def _installed_tools() -> Dict[str, Optional[str]]:
+    tools_with_version = {"git", "python3", "node", "ffmpeg", "jq", "brew"}
     tools = [
         "bash",
         "zsh",
@@ -576,39 +596,62 @@ def _installed_tools() -> Dict[str, Optional[str]]:
         if not path:
             result[t] = None
             continue
-        version = None
-        if t in ("git", "python3", "node", "ffmpeg", "jq", "brew"):
+        if t in tools_with_version:
             out = _run([t, "--version"], timeout=2.0)
-            if out:
-                version = out.splitlines()[0][:80]
-        result[t] = version or path
+            result[t] = out.splitlines()[0][:80] if out else path
+        else:
+            result[t] = path
     return result
 
 
-def _is_first_boot(os_profile_file: Path) -> bool:
-    """
-    True if the first-boot wizard has never been completed.
+def _collect_paths(assets_dir: Path, data_dir: Path) -> Dict[str, str]:
+    return {
+        "home": str(Path.home()),
+        "data_dir": str(data_dir),
+        "assets_dir": str(assets_dir),
+    }
 
-    Source of truth: [user] name key in ~/.buddy/config/buddy.toml.
-    _write_first_boot_config() writes this atomically the moment the
-    wizard finishes — before Textual starts, before bootstrap runs.
-    This means even a crashed bootstrap cannot cause a re-prompt.
+
+# ═══════════════════════════════════════════════════════════
+# §6  OS profile assembly
+#     _build_os_profile        — assembles all §5 collectors into one dict
+#     _ensure_os_profile       — loads stored name, rebuilds every boot, persists
+#     _needs_first_boot_wizard — checks if buddy.toml exists yet
+# ═══════════════════════════════════════════════════════════
+
+
+def _build_os_profile(
+    *,
+    assets_dir: Path,
+    data_dir: Path,
+    user_preferred_name: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Build a compact, platform-independent OS profile.
+    All sizes in GB; no raw byte fields; no platform-flag booleans.
+    """
+    identity = _collect_identity()
+    identity["preferred_name"] = user_preferred_name or identity["username"]
+
+    return {
+        "generated_at": _utc_now_iso(),
+        "identity": identity,
+        "platform": _collect_platform(),
+        "hardware": _collect_hardware(data_dir),
+        "runtime": _collect_runtime(),
+        "paths": _collect_paths(assets_dir, data_dir),
+    }
+
+
+def _needs_first_boot_wizard() -> bool:
+    """True if the first-boot wizard has never been completed.
+
+    Source of truth: buddy.toml in ~/.buddy/config/.
+    Written atomically by _write_first_boot_config() the moment the wizard
+    finishes — so even a crashed bootstrap cannot cause a re-prompt.
     """
     toml_path = _runtime_root() / "config" / "buddy.toml"
-    if not toml_path.exists():
-        return True
-    try:
-        if sys.version_info >= (3, 11):
-            import tomllib as _tl
-        else:
-            import tomli as _tl  # type: ignore
-        with toml_path.open("rb") as f:
-            raw = _tl.load(f)
-        user_section = raw.get("user", {})
-        name = str(user_section.get("name", "")).strip()
-        return not name
-    except Exception:
-        return True
+    return not toml_path.exists()
 
 
 def _ensure_os_profile(
@@ -624,7 +667,14 @@ def _ensure_os_profile(
     user_preferred_name: newly entered (first boot) or None (subsequent → read from file).
     """
     existing = _read_json(os_profile_file)
-    stored_name = existing.get("user_preferred_name") if existing else None
+    stored_name = (
+        (
+            ((existing.get("identity") or {}).get("preferred_name"))
+            or existing.get("user_preferred_name")  # legacy key fallback
+        )
+        if existing
+        else None
+    )
     resolved = user_preferred_name or stored_name
 
     try:
@@ -642,63 +692,9 @@ def _ensure_os_profile(
         return existing if existing else {"version": 2, "generated_at": _utc_now_iso()}
 
 
-def _refresh_profile_lock(*, os_profile_file: Path, lock_file: Path) -> None:
-    """Regenerate lock hash to match the freshly written profile."""
-    if not os_profile_file.exists():
-        return
-    lock = {
-        "version": 1,
-        "generated_at": _utc_now_iso(),
-        "file": str(os_profile_file),
-        "sha256": _sha256(os_profile_file),
-        "bytes": os_profile_file.stat().st_size,
-    }
-    _write_json(lock_file, lock)
-
-
-# ═══════════════════════════════════════════════════════════
-# Dependencies
-# ═══════════════════════════════════════════════════════════
-
-_REQUIRED_IMPORTS = [
-    "numpy",
-    "pydantic",
-    "requests",
-    "tomllib" if sys.version_info >= (3, 11) else "tomli",
-]
-_OPTIONAL_DEPS = [
-    ("psutil", "psutil"),
-    ("huggingface_hub", "huggingface_hub"),
-    ("qdrant_client", "qdrant-client"),
-    ("sentence_transformers", "sentence-transformers"),
-]
-
-
-def _check_imports(required: Sequence[str]) -> Tuple[List[str], List[str]]:
-    missing, present = [], []
-    for mod in required:
-        try:
-            __import__(mod)
-            present.append(mod)
-        except Exception:
-            missing.append(mod)
-    return missing, present
-
-
-def _pip_install(packages: Sequence[str]) -> Tuple[bool, str]:
-    if not packages:
-        return True, ""
-    try:
-        p = subprocess.run(
-            [sys.executable, "-m", "pip", "install", *packages],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=600,
-        )
-        return p.returncode == 0, ((p.stdout or "") + (p.stderr or "")).strip()
-    except Exception as ex:
-        return False, repr(ex)
+# ─────────────────────────────────────────────────────────
+# §7  Database preparation
+# ─────────────────────────────────────────────────────────
 
 
 def _ensure_db(db_path: Path) -> None:
@@ -708,8 +704,13 @@ def _ensure_db(db_path: Path) -> None:
 
 
 # ═══════════════════════════════════════════════════════════
-# ST model download  (embedder + reranker)
+# §8  Model downloads
 # ═══════════════════════════════════════════════════════════
+
+
+# ── 8a · ST sentence-transformers  (embedder + reranker) ─────────────────────
+# ⚠  NO Spinner here — snapshot_download uses tqdm which writes to stdout.
+#    A Spinner background thread + tqdm = corrupted terminal output.
 
 
 def _st_dest(hf_model: str, data_dir: Path) -> Path:
@@ -783,9 +784,8 @@ def _ensure_st_model(
         return None
 
 
-# ═══════════════════════════════════════════════════════════
-# LLM GGUF download
-# ═══════════════════════════════════════════════════════════
+# ── 8b · LLM GGUF ────────────────────────────────────────────────────────────
+# ⚠  Same tqdm caveat — no Spinner wrapper around hf_hub_download.
 
 
 def _gguf_present(models_dir: Path, filename: str) -> bool:
@@ -843,75 +843,10 @@ def _ensure_llm_gguf(
 
 
 # ═══════════════════════════════════════════════════════════
-# Prompt integrity
-# ═══════════════════════════════════════════════════════════
-
-
-def _verify_prompts_lock(
-    integrity: BootstrapIntegrity,
-    *,
-    strict: bool,
-    prompts_dir: Path,
-    prompts_lock_file: Path,
-) -> None:
-    if not prompts_dir.is_dir():
-        integrity.prompts_lock_ok = False
-        integrity.violations.append("prompts_dir_missing")
-        return
-
-    prompt_files = sorted(
-        p
-        for p in prompts_dir.iterdir()
-        if p.is_file() and p.suffix == ".py" and not p.name.startswith("_")
-    )
-    if not prompt_files:
-        integrity.prompts_lock_ok = False
-        integrity.violations.append("prompts_dir_empty")
-        return
-
-    if not prompts_lock_file.exists():
-        integrity.prompts_lock_ok = False
-        (integrity.violations if strict else integrity.warnings).append(
-            "prompts_lock_missing"
-        )
-        return
-
-    lock = _read_json(prompts_lock_file)
-    locked_files = lock.get("files") or {}
-    if not isinstance(locked_files, dict):
-        locked_files = {}
-
-    actual = {p.name for p in prompt_files}
-    locked = set(locked_files.keys())
-
-    for name in sorted(actual - locked):
-        integrity.prompts_lock_ok = False
-        integrity.violations.append(f"prompt_not_in_lock:{name}")
-    for name in sorted(locked - actual):
-        integrity.prompts_lock_ok = False
-        integrity.violations.append(f"lock_references_missing_prompt:{name}")
-
-    for p in prompt_files:
-        entry = locked_files.get(p.name)
-        if not isinstance(entry, dict):
-            integrity.prompts_lock_ok = False
-            integrity.violations.append(f"lock_entry_invalid:{p.name}")
-            continue
-        expected = entry.get("sha256", "")
-        if not expected:
-            integrity.prompts_lock_ok = False
-            integrity.violations.append(f"lock_entry_no_sha256:{p.name}")
-            continue
-        if expected != _sha256(p):
-            integrity.prompts_lock_ok = False
-            integrity.violations.append(f"prompt_mismatch:{p.name}")
-
-    if integrity.prompts_lock_ok:
-        logger.info("Prompts lock OK (%d files)", len(prompt_files))
-
-
-# ═══════════════════════════════════════════════════════════
-# Runtime config
+# §9  Runtime config & filesystem layout
+#     _runtime_root        — platform-aware base dir (~/.buddy / %LOCALAPPDATA%\Buddy)
+#     _layout              — all path references as a single dict
+#     _load_runtime_config — reads buddy.toml + tools.toml, returns unified cfg
 # ═══════════════════════════════════════════════════════════
 
 
@@ -937,9 +872,7 @@ def _layout() -> Dict[str, Path]:
         "models_dir": root / "data" / "models",
         "bin_dir": root / "data" / "bin",
         "conversations_snapshot": root / "state" / "conversations.json",
-        "boot_report": root / "data" / "assets" / "boot_report.json",
         "os_profile": root / "data" / "assets" / "os_profile.json",
-        "os_profile_lock": root / "data" / "assets" / "os_profile.lock.json",
         "llama_server_log": root / "logs" / "llama_server.log",
     }
 
@@ -1004,17 +937,11 @@ def _load_runtime_config() -> Dict[str, Any]:
     llama_cfg = _sec(buddy_cfg, "llama")
     mem_cfg = _sec(buddy_cfg, "memory")
     rerank_cfg = _sec(_sec(buddy_cfg, "vector_store"), "rerank")
-    prompts_dir = Path(
-        _as_str(boot_cfg.get("prompts_dir"), str(PACKAGE_ROOT / "prompts"))
-    )
-
     # Model resolution from existing buddy.toml config keys
     # Embedder lives in [memory] embedding_model  (already in your toml)
     # Reranker lives in [vector_store.rerank] qwen_model  (already in your toml)
-    embedder_model = _as_str(
-        mem_cfg.get("embedding_model"), "Qwen/Qwen3-Embedding-0.6B"
-    )
-    reranker_model = _as_str(rerank_cfg.get("qwen_model"), "Qwen/Qwen3-Reranker-0.6B")
+    embedder_model = mem_cfg.get("embedding_model") or "Qwen/Qwen3-Embedding-0.6B"
+    reranker_model = rerank_cfg.get("qwen_model") or "Qwen/Qwen3-Reranker-0.6B"
 
     return {
         "buddy": buddy_cfg,
@@ -1022,30 +949,22 @@ def _load_runtime_config() -> Dict[str, Any]:
         "embedder_model": embedder_model,
         "reranker_model": reranker_model,
         "bootstrap": {
-            "show_boot_ui": _as_bool(boot_cfg.get("show_boot_ui"), True),
-            "strict_integrity": _as_bool(boot_cfg.get("strict_integrity"), True),
-            "auto_install": _as_bool(boot_cfg.get("auto_install"), False),
-            "verify_prompts_lock": _as_bool(boot_cfg.get("verify_prompts_lock"), True),
-            "verify_os_profile_lock": _as_bool(
-                boot_cfg.get("verify_os_profile_lock"), True
-            ),
-            "write_boot_report": _as_bool(boot_cfg.get("write_boot_report"), True),
-            "download_models": _as_bool(boot_cfg.get("download_models"), True),
-            "force_model_reselect": _as_bool(
-                boot_cfg.get("force_model_reselect"), False
-            ),
-            "force_vision_reselect": _as_bool(
-                boot_cfg.get("force_vision_reselect"), False
-            ),
+            "show_boot_ui": boot_cfg.get("show_boot_ui", True),
+            "strict_integrity": boot_cfg.get("strict_integrity", True),
+            "download_models": boot_cfg.get("download_models", True),
+            "force_model_reselect": boot_cfg.get("force_model_reselect", False),
+            "force_vision_reselect": boot_cfg.get("force_vision_reselect", False),
         },
         "llama": {
-            "base_url": _as_str(llama_cfg.get("base_url"), "http://127.0.0.1:8080"),
-            "host": _as_str(llama_cfg.get("host"), "127.0.0.1"),
+            "base_url": llama_cfg.get("base_url") or "http://127.0.0.1:8080",
+            "host": llama_cfg.get("host") or "127.0.0.1",
             "port": int(llama_cfg.get("port") or 8080),
-            "model_gguf": _as_str(llama_cfg.get("model_gguf"), ""),
-            "model_name": _as_str(llama_cfg.get("model_name"), "local-model"),
+            "model_gguf": llama_cfg.get("model_gguf", ""),
+            "model_name": llama_cfg.get("model_name") or "local-model",
             "ready_timeout_s": float(llama_cfg.get("ready_timeout_s") or 180.0),
-            "scan_ports": llama_cfg.get("scan_ports") or [8080, 8081, 8082, 8088, 8888, 11434],
+            "override": bool(llama_cfg.get("override", False)),
+            "use_external": bool(llama_cfg.get("use_external", False)),
+            "external_url": str(llama_cfg.get("external_url") or ""),
             "server_args": llama_cfg.get("server_args") or [],
         },
         "fs": {
@@ -1059,69 +978,80 @@ def _load_runtime_config() -> Dict[str, Any]:
             "state_dir": paths["state_dir"],
             "conversations_snapshot": paths["conversations_snapshot"],
             "os_profile_file": paths["os_profile"],
-            "os_profile_lock_file": paths["os_profile_lock"],
-            "boot_report_file": paths["boot_report"],
             "llama_server_log": paths["llama_server_log"],
-            "prompts_dir": prompts_dir,
-            "prompts_lock_file": prompts_dir / "lock" / "prompts.lock.json",
         },
         "copied_defaults": copied,
     }
 
 
 # ═══════════════════════════════════════════════════════════
-# Port scanning helpers — detect existing servers
+# §10  Port & URL helpers
+#      _find_free_port  — pick a free TCP port (prefer configured, else random)
+#      _url_reachable   — fast liveness check against an HTTP URL
+#      _parse_url_port  — extract port number from a URL string
 # ═══════════════════════════════════════════════════════════
 
 
-def _scan_llama_ports(host: str, scan_ports: List[int]) -> Optional[int]:
+def _find_free_port(host: str, preferred: int = 0) -> int:
     """
-    Scan a list of ports for a running llama-server.
-    Returns the first port where a ready llama-server is found, or None.
+    Return a free TCP port on host.
+
+    If preferred > 0 and that port is not already bound, return it.
+    Otherwise let the OS assign an ephemeral free port (bind to 0).
     """
-    for p in scan_ports:
+    if preferred > 0:
         try:
-            with socket.create_connection((host, p), timeout=0.3):
-                pass
-        except Exception:
-            continue
-        bu = f"http://{host}:{p}"
-        for path in ("/health", "/v1/models"):
-            try:
-                r = _HTTP.get(bu + path, timeout=(0.3, 1.0))
-                if r.status_code == 200:
-                    logger.info("Found existing llama-server on port %d", p)
-                    return p
-            except Exception:
-                continue
-    return None
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                # SO_REUSEADDR = 0 → fail immediately if port is in use
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 0)
+                s.bind((host, preferred))
+                return preferred
+        except OSError:
+            logger.info(
+                "Port %d already in use — picking a random free port", preferred
+            )
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind((host, 0))
+        return s.getsockname()[1]
 
 
-def _scan_searxng_ports(host: str, scan_ports: List[int]) -> Optional[int]:
+def _url_reachable(
+    url: str,
+    check_paths: Optional[List[str]] = None,
+    *,
+    timeout: float = 3.0,
+) -> bool:
     """
-    Scan a list of ports for a running SearXNG instance.
-    Returns the first port where SearXNG is responding, or None.
+    Return True if the URL returns any non-5xx HTTP response.
+    Tries each path in check_paths in order; returns on first success.
     """
-    for p in scan_ports:
+    base = url.rstrip("/")
+    for path in check_paths or ["/"]:
         try:
-            with socket.create_connection((host, p), timeout=0.3):
-                pass
+            r = _HTTP.get(base + path, timeout=(1.0, timeout))
+            if r.status_code < 500:
+                return True
         except Exception:
             continue
-        bu = f"http://{host}:{p}"
-        for path in ("/search", "/", "/healthz"):
-            try:
-                r = _HTTP.get(bu + path, timeout=(0.3, 1.5))
-                if r.status_code in (200, 302, 405):
-                    logger.info("Found existing SearXNG on port %d", p)
-                    return p
-            except Exception:
-                continue
-    return None
+    return False
+
+
+def _parse_url_port(url: str, default: int = 8080) -> int:
+    """Extract the port number from a URL string."""
+    try:
+        from urllib.parse import urlparse
+
+        p = urlparse(url).port
+        return int(p) if p else default
+    except Exception:
+        return default
 
 
 # ═══════════════════════════════════════════════════════════
-# mmproj (vision) download helper
+# §11  Vision / mmproj download
+#      Downloads the multimodal projector GGUF alongside the LLM.
+#      Only runs when vision_choice.enabled == True.
 # ═══════════════════════════════════════════════════════════
 
 
@@ -1176,7 +1106,16 @@ def _ensure_mmproj(
 
 
 # ═══════════════════════════════════════════════════════════
-# llama-server lifecycle
+# §12  llama-server lifecycle
+#      _flatten / _sanitize_args  — build & clean the CLI arg list
+#      _find_gguf                 — resolve model path across known locations
+#      _probe                     — single liveness check (TCP + HTTP)
+#      _wait_external             — poll an already-running server until ready
+#      _wait_spawned              — poll our own Popen until ready or crashed
+#      _tail_log                  — last N lines from the server log
+#      _spawn                     — launch llama-server as a detached subprocess
+#      _terminate                 — graceful SIGTERM → SIGKILL with timeout
+#      _pretty_cmd                — format the command for display
 # ═══════════════════════════════════════════════════════════
 
 
@@ -1190,7 +1129,15 @@ def _sanitize_args(args: List[str]) -> Tuple[List[str], List[str]]:
     # --mlock is banned: it calls mlockall() and aborts (SIGABRT / rc=-6) when
     # the OS ulimit for locked memory is too low, which is the default on macOS
     # and many Linux systems. --mmap already handles efficient memory access.
-    banned = {"--host", "--port", "-m", "--model", "--chat-template-file", "--jinja", "--mlock"}
+    banned = {
+        "--host",
+        "--port",
+        "-m",
+        "--model",
+        "--chat-template-file",
+        "--jinja",
+        "--mlock",
+    }
     out, removed = [], []
     i = 0
     while i < len(args):
@@ -1378,8 +1325,14 @@ def _pretty_cmd(cmd: List[str]) -> List[str]:
 
 
 # ═══════════════════════════════════════════════════════════
-# Core objects
+# §13  Lazy imports & core object factory
+#
+#      Lazy accessors (lru_cache singletons) — each returns the CLASS,
+#      not an instance. Deferred so heavy imports don't happen at module
+#      load time; only pay the cost when bootstrap() actually needs them.
 # ═══════════════════════════════════════════════════════════
+
+# ── 13a · Lazy class accessors ───────────────────────────────────────────────
 
 
 @lru_cache(maxsize=1)
@@ -1418,20 +1371,6 @@ def _Conversations():
 
 
 @lru_cache(maxsize=1)
-def _PromptBuilder():
-    from buddy.brain.prompt_builder import PromptBuilder
-
-    return PromptBuilder
-
-
-@lru_cache(maxsize=1)
-def _OutputParser():
-    from buddy.brain.output_parser import OutputParser
-
-    return OutputParser
-
-
-@lru_cache(maxsize=1)
 def _LlamaClient():
     from buddy.llm.llama_client import LlamaClient
 
@@ -1443,6 +1382,11 @@ def _Brain():
     from buddy.brain.brain import Brain
 
     return Brain
+
+
+# ── 13b · Core object factory ────────────────────────────────────────────────
+# Instantiates all runtime objects in dependency order.
+# Violations → hard stop; warnings → logged and degraded mode.
 
 
 def _create_artifacts(
@@ -1467,12 +1411,10 @@ def _create_artifacts(
     ctx_cfg = _sec(buddy_cfg, "context")
     fs = config.get("runtime", {}).get("fs", {}) or {}
     qdrant_dir = Path(
-        _as_str(
-            fs.get("qdrant_dir") if isinstance(fs, dict) else None,
-            str(_layout()["qdrant_dir"]),
-        )
+        (fs.get("qdrant_dir") if isinstance(fs, dict) else None)
+        or str(_layout()["qdrant_dir"])
     )
-    debug = _as_bool(_sec(buddy_cfg, "general").get("debug"), True)
+    debug = _sec(buddy_cfg, "general").get("debug", True)
 
     # SQLite (required)
     try:
@@ -1488,7 +1430,7 @@ def _create_artifacts(
 
     # VectorStore — BUDDY_RERANKER_MODEL env var already set
     try:
-        backend = _as_str(vs_cfg.get("backend"), "local").lower()
+        backend = (vs_cfg.get("backend") or "local").lower()
         server_obj = None
         if backend == "server":
             try:
@@ -1496,9 +1438,9 @@ def _create_artifacts(
 
                 sc = _sec(vs_cfg, "server")
                 server_obj = VectorServerConfig(
-                    url=_as_str(sc.get("url"), "http://127.0.0.1:6333"),
-                    api_key=_as_str(sc.get("api_key"), ""),
-                    timeout=_as_int(sc.get("timeout"), 10),
+                    url=sc.get("url") or "http://127.0.0.1:6333",
+                    api_key=sc.get("api_key", ""),
+                    timeout=sc.get("timeout", 10),
                 )
             except Exception:
                 integrity.warnings.append("vector_server_config_failed")
@@ -1531,7 +1473,7 @@ def _create_artifacts(
         snapshot = (
             fs.get("conversations_snapshot") if isinstance(fs, dict) else None
         ) or str(_layout()["conversations_snapshot"])
-        max_turns = _as_int(ctx_cfg.get("max_conversation_turn", 12), 12)
+        max_turns = ctx_cfg.get("max_conversation_turn", 12)
         arts.conversations = _Conversations()(
             max_turns=max_turns, snapshot_path=str(snapshot)
         )
@@ -1575,6 +1517,13 @@ def _create_artifacts(
         integrity.warnings.append(f"memory_manager_failed:{ex!r}")
 
     return arts
+
+
+# ═══════════════════════════════════════════════════════════
+# §14  Live server props fetch
+#      Queries /props and /v1/models after the server is ready.
+#      Used only for the online banner display — never blocks boot.
+# ═══════════════════════════════════════════════════════════
 
 
 def _fetch_llama_server_props(base_url: str) -> Dict[str, Any]:
@@ -1683,7 +1632,13 @@ def _fetch_llama_server_props(base_url: str) -> Dict[str, Any]:
 
 
 # ═══════════════════════════════════════════════════════════
-# First-boot wizard
+# §15  First-boot wizard
+#      Runs ONCE — the moment buddy.toml does not yet exist.
+#      Collects: user name · language · web engine · STT · TTS.
+#      Writes results atomically to buddy.toml via _write_first_boot_config.
+#
+#      UI primitives: _wizard_line · _wizard_ask · _wizard_yn · _wizard_header
+#      Hardware summary shown at top: _show_wizard_hardware
 # ═══════════════════════════════════════════════════════════
 
 
@@ -1741,16 +1696,17 @@ def _wizard_header(title: str) -> None:
 
 def _show_wizard_hardware(os_profile: Dict[str, Any]) -> None:
     """Print a compact hardware summary for the first-boot wizard."""
-    gpu = os_profile.get("gpu", {}) or {}
-    ram = os_profile.get("ram", {}) or {}
-    cpu = os_profile.get("cpu", {}) or {}
-    macos = os_profile.get("macos", {}) or {}
+    hw = os_profile.get("hardware", {}) or {}
+    plat = os_profile.get("platform", {}) or {}
+    gpu = hw.get("gpu", {}) or {}
+    ram = hw.get("ram", {}) or {}
+    cpu = hw.get("cpu", {}) or {}
 
     ram_gb = ram.get("total_gb", "?")
     cores = cpu.get("logical_cores", "?")
     gpu_name = gpu.get("name") or "unknown"
     backend = gpu.get("backend") or "cpu_only"
-    mac_ver = macos.get("product_version", "")
+    os_ver = plat.get("os_version", "") if plat.get("os") == "darwin" else ""
 
     print()
     _wizard_line(_c("Hardware detected:", "dim"))
@@ -1761,8 +1717,8 @@ def _show_wizard_hardware(os_profile: Dict[str, Any]) -> None:
         f"  RAM     {_c(str(ram_gb) + ' GB', 'warn')}  · "
         f" {_c(str(cores) + ' cores', 'dim')}"
     )
-    if mac_ver:
-        _wizard_line(f"  macOS   {_c(mac_ver, 'dim')}")
+    if os_ver:
+        _wizard_line(f"  macOS   {_c(os_ver, 'dim')}")
     print()
 
 
@@ -1872,15 +1828,15 @@ def _write_first_boot_config(
     escaped_name = user_name.replace("\\", "\\\\").replace('"', '\\"')
     if "[user]" in text:
         # Replace existing name = "..." if present, else insert after [user] header
-        if _re.search(r'(?m)^name\s*=', text):
-            text = _re.sub(r'(?m)^name\s*=.*$', f'name = "{escaped_name}"', text)
+        if _re.search(r"(?m)^name\s*=", text):
+            text = _re.sub(r"(?m)^name\s*=.*$", f'name = "{escaped_name}"', text)
         else:
-            text = _re.sub(r'(\[user\])', f'\\1\nname = "{escaped_name}"', text)
+            text = _re.sub(r"(\[user\])", f'\\1\nname = "{escaped_name}"', text)
         # Replace existing language = "..." if present
-        if _re.search(r'(?m)^language\s*=', text):
-            text = _re.sub(r'(?m)^language\s*=.*$', f'language = "{language}"', text)
+        if _re.search(r"(?m)^language\s*=", text):
+            text = _re.sub(r"(?m)^language\s*=.*$", f'language = "{language}"', text)
         else:
-            text = _re.sub(r'(\[user\])', f'\\1\nlanguage = "{language}"', text)
+            text = _re.sub(r"(\[user\])", f'\\1\nlanguage = "{language}"', text)
     else:
         text += f"""
 # ─────────────────────────────────────────────────────────────
@@ -1907,7 +1863,14 @@ searxng_url = "http://127.0.0.1:8888"
 
 
 # ═══════════════════════════════════════════════════════════
-# run_pre_textual_setup()  — called from run_textual() BEFORE BuddyApp
+# §16  run_pre_textual_setup()
+#      Called from run_textual() BEFORE BuddyApp.run() takes over the terminal.
+#      Handles all interactive terminal I/O that cannot happen inside Textual:
+#        · Birth animation + matrix reveal (first-boot only)
+#        · First-boot wizard
+#        · LLM model selection (if no saved choice)
+#        · Vision / mmproj selection (if no saved choice)
+#      Returns wizard_result dict on first boot, None if fully configured.
 # ═══════════════════════════════════════════════════════════
 
 
@@ -1944,7 +1907,7 @@ def run_pre_textual_setup() -> Optional[Dict[str, Any]]:
     data_dir: Path = fs["data_dir"]
     os_profile_file: Path = fs["os_profile_file"]
 
-    needs_first_boot = _is_first_boot(os_profile_file)
+    needs_first_boot = _needs_first_boot_wizard()
     needs_model = _ms_load(config_dir) is None
     needs_vision = _vs_load(config_dir) is None
 
@@ -1958,11 +1921,7 @@ def run_pre_textual_setup() -> Optional[Dict[str, Any]]:
         _term_clear()
         # Name is collected once inside the wizard (Q1) — no separate prompt here.
 
-    default_name = (
-        os.environ.get("USER")
-        or os.environ.get("USERNAME")
-        or "boss"
-    )
+    default_name = os.environ.get("USER") or os.environ.get("USERNAME") or "boss"
 
     # Build a lightweight OS profile so wizard/model-selector shows accurate hardware info.
     os_profile = _build_os_profile(
@@ -2033,7 +1992,15 @@ def run_pre_textual_setup() -> Optional[Dict[str, Any]]:
 
 
 # ═══════════════════════════════════════════════════════════
-# bootstrap()  — PUBLIC ENTRY POINT
+# §17  bootstrap()  —  PUBLIC ENTRY POINT
+#
+#      Full boot orchestrator. Runs steps 1–15 in order.
+#      Returns BootstrapState with all live artifacts attached.
+#
+#      progress_cb: optional Callable[[str, str], None]
+#        → provided by Textual BootScreen to relay messages to the UI.
+#        → when provided, _ui_* helpers are shadowed by closures so all
+#          output goes to the BootLog widget instead of stdout.
 # ═══════════════════════════════════════════════════════════
 
 
@@ -2041,7 +2008,6 @@ def bootstrap(
     options: Optional[BootstrapOptions] = None,
     progress_cb: Optional[Callable[[str, str], None]] = None,
 ) -> BootstrapState:
-    now_iso = _utc_now_iso()
     runtime = _load_runtime_config()
 
     fs = runtime["fs"]
@@ -2059,20 +2025,21 @@ def bootstrap(
     db_path: Path = fs["db_path"]
     models_dir: Path = fs["models_dir"]
     bin_dir: Path = fs["bin_dir"]
-    prompts_dir: Path = fs["prompts_dir"]
-    prompts_lock_file: Path = fs["prompts_lock_file"]
     os_profile_file: Path = fs["os_profile_file"]
-    os_profile_lock_file: Path = fs["os_profile_lock_file"]
-    boot_report_file: Path = fs["boot_report_file"]
     llama_server_log: Path = fs["llama_server_log"]
 
     # Only map fields that live in boot_cfg (toml-derived).
     # Fields like pre_wizard_result have no toml key and must default to None.
-    opts = options or BootstrapOptions(
-        **{k: boot_cfg[k] for k in BootstrapOptions.__dataclass_fields__ if k in boot_cfg}
-    )
+    opts = options or BootstrapOptions(**{
+        k: boot_cfg[k] for k in BootstrapOptions.__dataclass_fields__ if k in boot_cfg
+    })
 
-    # ── Progress callback helper (Textual BootScreen integration) ────────────
+    # ── Progress callback + Textual output shadow ────────────────────────────
+    # _pcb: thin wrapper — safe to call even when progress_cb is None.
+    # When Textual provides progress_cb, shadow the module-level _ui_* helpers
+    # so all terminal output is redirected to the BootLog widget instead.
+    # Also suppress tqdm / HF progress bars — they write raw ANSI to stdout
+    # which Textual owns and would corrupt the TUI layout.
     def _pcb(msg: str, status: str = "running") -> None:
         if progress_cb:
             try:
@@ -2080,9 +2047,6 @@ def bootstrap(
             except Exception:
                 pass
 
-    # When running under Textual (progress_cb provided):
-    #  · shadow _ui_* so messages reach the BootLog
-    #  · disable tqdm / HF progress bars (they write to stdout Textual owns)
     if progress_cb:
         os.environ.setdefault("TQDM_DISABLE", "1")
         os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
@@ -2100,10 +2064,9 @@ def bootstrap(
             _pcb(msg, "running")
 
     integrity = BootstrapIntegrity()
-    installed: List[str] = []
 
     # ── STEP 1 · Animation ───────────────────────────────────────────────────
-    first_boot = _is_first_boot(os_profile_file)
+    first_boot = _needs_first_boot_wizard()
     if opts.show_boot_ui:
         if first_boot:
             _birth_animation()
@@ -2116,19 +2079,13 @@ def bootstrap(
     # When pre_wizard_result is provided the prompt already ran pre-Textual.
     user_preferred_name: Optional[str] = None
 
-    if _is_first_boot(os_profile_file):
+    if _needs_first_boot_wizard():
         if opts.pre_wizard_result is not None:
             # run_pre_textual_setup() already collected the name — no input() here.
             user_preferred_name = opts.pre_wizard_result.get("user_name") or (
                 os.environ.get("USER") or os.environ.get("USERNAME") or "boss"
             )
-        elif opts.show_boot_ui:
-            # Name is collected once in the wizard (Step 6.6, Q1) — skip here.
-            user_preferred_name = (
-                os.environ.get("USER") or os.environ.get("USERNAME") or "boss"
-            )
         else:
-            # Headless first boot — use OS username as the default
             user_preferred_name = (
                 os.environ.get("USER") or os.environ.get("USERNAME") or "boss"
             )
@@ -2137,50 +2094,7 @@ def bootstrap(
     if opts.show_boot_ui:
         print(_c("\n  ◈  Buddy Cognitive System  ·  Initializing…\n", "bright_cyan"))
 
-    # ── STEP 4 · Python dependencies ──────────────────────────────────────────
-    _pcb("Checking Python dependencies")
-    sp = _ui_step(opts.show_boot_ui, "Checking Python dependencies")
-    missing, present = _check_imports(_REQUIRED_IMPORTS)
-    sp.stop()
-
-    if missing:
-        _ui_warn(f"Missing required: {missing}")
-        if opts.auto_install:
-            sp = _ui_step(opts.show_boot_ui, "Installing missing dependencies")
-            ok, _ = _pip_install(missing)
-            sp.stop()
-            if ok:
-                installed.extend(missing)
-                _ui_ok(f"Installed: {missing}")
-            else:
-                _ui_fail("Auto-install failed")
-                integrity.violations += [
-                    "dep_auto_install_failed",
-                    f"missing_required:{missing}",
-                ]
-        else:
-            integrity.violations.append(f"missing_required:{missing}")
-            _ui_fail("Missing required libs (auto-install disabled)")
-    else:
-        _ui_ok("Required imports OK")
-
-    for import_name, pip_name in _OPTIONAL_DEPS:
-        try:
-            __import__(import_name)
-        except ImportError:
-            if opts.auto_install:
-                ok, _ = _pip_install([pip_name])
-                (
-                    installed.append(pip_name)
-                    if ok
-                    else integrity.warnings.append(
-                        f"optional_install_failed:{pip_name}"
-                    )
-                )
-            else:
-                integrity.warnings.append(f"optional_missing:{import_name}")
-
-    # ── STEP 5 · SQLite DB ────────────────────────────────────────────────────
+    # ── STEP 4 · SQLite DB ────────────────────────────────────────────────────
     _pcb("Preparing SQLite database")
     sp = _ui_step(opts.show_boot_ui, "Preparing SQLite database")
     try:
@@ -2202,25 +2116,23 @@ def bootstrap(
         data_dir=data_dir,
         user_preferred_name=user_preferred_name,
     )
-    if opts.verify_os_profile_lock:
-        _refresh_profile_lock(
-            os_profile_file=os_profile_file, lock_file=os_profile_lock_file
-        )
     sp.stop()
 
-    gpu_info = os_profile.get("gpu", {}) or {}
-    ram_info = os_profile.get("ram", {}) or {}
-    cpu_info = os_profile.get("cpu", {}) or {}
+    _hw = os_profile.get("hardware", {}) or {}
+    gpu_info = _hw.get("gpu", {}) or {}
+    ram_info = _hw.get("ram", {}) or {}
+    cpu_info = _hw.get("cpu", {}) or {}
     ram_gb = ram_info.get("total_gb", "?")
     cores = cpu_info.get("logical_cores", "?")
     gpu_lbl = f"{gpu_info.get('backend', '?')} / {gpu_info.get('name', '?')}"
-    pref_name = str(os_profile.get("user_preferred_name") or "").strip() or "friend"
+    _identity = os_profile.get("identity", {}) or {}
+    pref_name = str(_identity.get("preferred_name") or "").strip() or "friend"
 
     _ui_ok(f"System: {cores} cores · {ram_gb} GB RAM · {gpu_lbl}")
 
     # ── STEP 6.5 · llama-server binary ───────────────────────────────────────
-    _bin_dir = bin_dir   # ~/.buddy/data/bin/
-    _state_dir = _runtime_root() / "state"
+    _bin_dir = bin_dir  # ~/.buddy/data/bin/
+    _state_dir = fs["state_dir"]
     _llama_bin = ensure_llama_binary(
         _bin_dir,
         on_progress=lambda m, _d: _ui_info(m),
@@ -2237,7 +2149,9 @@ def bootstrap(
             # Re-use the collected results without prompting again.
             _wizard_result = opts.pre_wizard_result
             user_preferred_name = _wizard_result.get("user_name") or user_preferred_name
-            os_profile["user_preferred_name"] = user_preferred_name
+            os_profile.setdefault("identity", {})[
+                "preferred_name"
+            ] = user_preferred_name
             pref_name = user_preferred_name or pref_name
             _pcb(f"First-boot setup: welcome, {pref_name}!", "ok")
         else:
@@ -2247,10 +2161,12 @@ def bootstrap(
                 os_profile=os_profile,
                 show_ui=opts.show_boot_ui,
                 default_name=user_preferred_name
-                or (os.environ.get("USER") or os.environ.get("USERNAME") or "boss"),
+                or (os.environ.get("USER") or os.environ.get("USERNAME") or "sir"),
             )
             user_preferred_name = _wizard_result["user_name"]
-            os_profile["user_preferred_name"] = user_preferred_name
+            os_profile.setdefault("identity", {})[
+                "preferred_name"
+            ] = user_preferred_name
             pref_name = user_preferred_name
             _write_first_boot_config(
                 config_dir,
@@ -2262,14 +2178,13 @@ def bootstrap(
             )
             if opts.show_boot_ui:
                 _term_clear()
-        # Re-run OS profile write with confirmed name (always — captures name from wizard)
-        _ensure_os_profile(
-            integrity,
-            os_profile_file=os_profile_file,
-            assets_dir=assets_dir,
-            data_dir=data_dir,
-            user_preferred_name=user_preferred_name,
-        )
+        # Persist the confirmed name into the already-loaded os_profile dict
+        # and flush once to disk — no second full profile rebuild needed.
+        os_profile.setdefault("identity", {})["preferred_name"] = user_preferred_name
+        try:
+            _write_json(os_profile_file, os_profile)
+        except Exception as _e:
+            logger.warning("os_profile name flush failed: %r", _e)
 
     # Resolve web / voice settings from wizard or config
     _feat_cfg = _sec(buddy_cfg, "features")
@@ -2279,45 +2194,69 @@ def bootstrap(
         _stt = _wizard_result["stt"]
         _tts = _wizard_result["tts"]
     else:
-        _web_engine = _as_str(_web_cfg.get("engine"), "duckduckgo")
-        _stt = _as_bool(_feat_cfg.get("enable_audio_stt"), False)
-        _tts = _as_bool(_feat_cfg.get("enable_audio_tts"), False)
+        _web_engine = _web_cfg.get("engine") or "duckduckgo"
+        _stt = _feat_cfg.get("enable_audio_stt", False)
+        _tts = _feat_cfg.get("enable_audio_tts", False)
 
     # ── STEP 7 · LLM model selection ─────────────────────────────────────────
     _pcb("Selecting LLM model")
-    # Spinner stopped before this — interactive prompt may print to terminal.
-    chosen = get_or_select_llm_model(
-        os_profile,
-        config_dir=config_dir,
-        show_ui=opts.show_boot_ui,
-        force_reselect=opts.force_model_reselect,
-    )
-    # [model_choice] is the single source of truth for the LLM filename.
-    # [llama].model_gguf is a manual escape hatch only — leave it empty in normal use.
-    # Priority: model_choice (chosen) > manual [llama].model_gguf override > hardware auto-pick
-    _manual_override = (llama_cfg.get("model_gguf") or "").strip()
-    if chosen.filename:
-        # Selection succeeded (interactive or auto-recommended) — use it
-        if _manual_override and _manual_override != chosen.filename:
-            _pcb(f"[llama].model_gguf override: {_manual_override}", "warn")
+    _llama_override: bool = bool(llama_cfg.get("override", False))
+
+    if _llama_override:
+        # ── Manual override: skip model selector entirely ─────────────────────
+        # Use model_gguf, host, port, server_args exactly from toml.
+        # No dynamic context budget will be applied in STEP 12.
+        _override_gguf = (llama_cfg.get("model_gguf") or "").strip()
+        if not _override_gguf:
+            _ui_fail(
+                "[llama] override=true but model_gguf is empty — set it in buddy.toml"
+            )
+            integrity.violations.append("llama_override_no_model_gguf")
+        chosen = LLMOption(
+            tier=HardwareTier.LOW,  # unused in override mode
+            family="override",
+            filename=_override_gguf,
+            hf_repo="",
+            hf_filename=_override_gguf,
+            label=_override_gguf,
+            size_gb=0.0,
+            min_ram_gb=0.0,
+        )
+        llama_cfg["model_gguf"] = _override_gguf
+        llama_cfg["model_name"] = llama_cfg.get("model_name") or _override_gguf
+        _ui_ok(f"LLM override: {_override_gguf}  (model selector skipped)")
+    else:
+        # ── Dynamic path: hardware-aware model selection ──────────────────────
+        # Spinner stopped before this — interactive prompt may print to terminal.
+        chosen = get_or_select_llm_model(
+            os_profile,
+            config_dir=config_dir,
+            show_ui=opts.show_boot_ui,
+            force_reselect=opts.force_model_reselect,
+        )
+        # [model_choice] is the single source of truth for the LLM filename.
+        # [llama].model_gguf is a manual escape hatch only — leave it empty in normal use.
+        # Priority: model_choice (chosen) > manual [llama].model_gguf override > hardware auto-pick
+        _manual_override = (llama_cfg.get("model_gguf") or "").strip()
+        if chosen.filename:
+            # Selection succeeded (interactive or auto-recommended) — use it
+            if _manual_override and _manual_override != chosen.filename:
+                _pcb(f"[llama].model_gguf override: {_manual_override}", "warn")
+                chosen.filename = _manual_override
+                chosen.hf_filename = _manual_override
+            llama_cfg["model_gguf"] = chosen.filename
+            llama_cfg["model_name"] = chosen.filename
+        elif _manual_override:
+            # No selection result but a manual override is set — respect it
             chosen.filename = _manual_override
             chosen.hf_filename = _manual_override
-        llama_cfg["model_gguf"] = chosen.filename
-        llama_cfg["model_name"] = chosen.filename
-    elif _manual_override:
-        # No selection result but a manual override is set — respect it
-        chosen.filename = _manual_override
-        chosen.hf_filename = _manual_override
-        llama_cfg["model_gguf"] = _manual_override
-        llama_cfg["model_name"] = _manual_override
-        _pcb(f"Using manual model override: {_manual_override}", "warn")
+            llama_cfg["model_gguf"] = _manual_override
+            llama_cfg["model_name"] = _manual_override
+            _pcb(f"Using manual model override: {_manual_override}", "warn")
 
     # ── STEP 7.5 · Vision capability selection ───────────────────────────────
     _vision_cfg = _sec(buddy_cfg, "vision")
-    _force_vision = _as_bool(
-        _vision_cfg.get("force_vision_reselect"),
-        opts.force_vision_reselect,
-    )
+    _force_vision = _vision_cfg.get("force_vision_reselect", opts.force_vision_reselect)
     vision_choice: VisionChoice = get_or_select_vision(
         chosen,
         os_profile,
@@ -2385,8 +2324,10 @@ def bootstrap(
         label="embedder",
         download_enabled=opts.download_models,
     )
-    _pcb(f"Embedder {'ready' if embedder_path else 'unavailable'}: {embedder_model}",
-         "ok" if embedder_path else "warn")
+    _pcb(
+        f"Embedder {'ready' if embedder_path else 'unavailable'}: {embedder_model}",
+        "ok" if embedder_path else "warn",
+    )
     if not _st_present(reranker_model, data_dir):
         _pcb(f"Downloading reranker: {reranker_model}…", "running")
     reranker_path = _ensure_st_model(
@@ -2396,8 +2337,10 @@ def bootstrap(
         label="reranker",
         download_enabled=opts.download_models,
     )
-    _pcb(f"Reranker {'ready' if reranker_path else 'unavailable'}: {reranker_model}",
-         "ok" if reranker_path else "warn")
+    _pcb(
+        f"Reranker {'ready' if reranker_path else 'unavailable'}: {reranker_model}",
+        "ok" if reranker_path else "warn",
+    )
 
     # ── STEP 10 · Set env vars BEFORE first instantiation ────────────────────
     # EmbeddingProvider singleton reads BUDDY_EMBED_MODEL on first __new__().
@@ -2412,59 +2355,67 @@ def bootstrap(
     logger.info("BUDDY_EMBED_MODEL=%s", os.environ["BUDDY_EMBED_MODEL"])
     logger.info("BUDDY_RERANKER_MODEL=%s", os.environ["BUDDY_RERANKER_MODEL"])
 
-    # ── STEP 11 · Prompt integrity ────────────────────────────────────────────
-    _pcb("Verifying prompt integrity")
-    sp = _ui_step(opts.show_boot_ui, "Verifying prompt integrity")
-    if opts.verify_prompts_lock:
-        _verify_prompts_lock(
-            integrity,
-            strict=opts.strict_integrity,
-            prompts_dir=prompts_dir,
-            prompts_lock_file=prompts_lock_file,
-        )
-    sp.stop()
-    (_ui_ok if integrity.prompts_lock_ok else _ui_fail)(
-        "Prompts OK" if integrity.prompts_lock_ok else "Prompts FAILED"
-    )
-
-    # ── STEP 11.5 · SearXNG (if configured) ──────────────────────────────────
+    # ── STEP 11 · SearXNG (if configured) ────────────────────────────────────
     _searxng_started = False
     _searxng_dir = _runtime_root() / "searxng"
     _searxng_host = "127.0.0.1"
-    _searxng_port = int(
-        _sec(buddy_cfg, "web_search")
-        .get("searxng_url", "http://127.0.0.1:8888")
-        .split(":")[-1]
-        .split("/")[0]
-        if ":" in str(_sec(buddy_cfg, "web_search").get("searxng_url", ""))
-        else 8888
+    _searxng_ws_cfg = _sec(buddy_cfg, "web_search")
+    _searxng_override: bool = bool(_searxng_ws_cfg.get("searxng_override", False))
+    _searxng_use_external: bool = bool(
+        _searxng_ws_cfg.get("searxng_use_external", False)
     )
-    _searxng_scan_ports: List[int] = [
-        int(p)
-        for p in (
-            _sec(buddy_cfg, "web_search").get("searxng_scan_ports")
-            or [8888, 8889, 8890, 4000, 5000]
-        )
-        if str(p).isdigit()
-    ]
+    _searxng_external_url: str = str(_searxng_ws_cfg.get("searxng_external_url") or "")
+    _searxng_port: int = _parse_url_port(
+        _searxng_ws_cfg.get("searxng_url") or "http://127.0.0.1:8888", default=8888
+    )
+    _searxng_url: str = (
+        f"http://{_searxng_host}:{_searxng_port}"  # default; updated below
+    )
 
     if _web_engine == "searxng":
-        # ── Port scan: detect already-running SearXNG ─────────
-        sp = _ui_step(opts.show_boot_ui, "Scanning for existing SearXNG")
-        _found_searxng_port = _scan_searxng_ports(_searxng_host, _searxng_scan_ports)
-        sp.stop()
-        if _found_searxng_port and _found_searxng_port != _searxng_port:
-            _searxng_port = _found_searxng_port
-            _searxng_url = f"http://{_searxng_host}:{_searxng_port}"
-            _ui_ok(
-                f"SearXNG found on alternate port {_found_searxng_port}: {_searxng_url}"
+        # ── External SearXNG mode ──────────────────────────────
+        if _searxng_use_external and _searxng_external_url:
+            sp = _ui_step(opts.show_boot_ui, "Connecting to external SearXNG")
+            _ext_ok = _url_reachable(
+                _searxng_external_url, check_paths=["/search", "/"]
             )
-            _searxng_started = True
-        elif _found_searxng_port == _searxng_port:
-            _searxng_started = True  # already on configured port
+            sp.stop()
+            if _ext_ok:
+                _searxng_port = _parse_url_port(
+                    _searxng_external_url, default=_searxng_port
+                )
+                _searxng_url = _searxng_external_url.rstrip("/")
+                _searxng_started = True
+                _ui_ok(f"External SearXNG READY: {_searxng_url}")
+            else:
+                _ui_warn(f"External SearXNG unreachable: {_searxng_external_url}")
+                if opts.show_boot_ui and progress_cb is None:
+                    # Interactive terminal — ask the user
+                    _start_anyway = _wizard_yn(
+                        "External SearXNG is not responding. Start a local instance"
+                        " instead?",
+                        default=True,
+                    )
+                    if not _start_anyway:
+                        _ui_warn("SearXNG skipped — falling back to DuckDuckGo")
+                        _web_engine = "duckduckgo"
+                    # else fall through to local-start block below
+                else:
+                    # Headless / Textual — auto-fallback to local
+                    _ui_info("Textual mode: auto-starting local SearXNG")
 
-        if not _searxng_started:
-            sp = _ui_step(opts.show_boot_ui, "Starting SearXNG")
+        # ── Local SearXNG start ────────────────────────────────
+        if _web_engine == "searxng" and not _searxng_started:
+            if _searxng_override:
+                # Override mode: use searxng_url exactly — no free-port selection,
+                # no install/setup. SearXNG must already be running at this URL.
+                _ui_ok(f"SearXNG override: using {_searxng_url} as-is (setup skipped)")
+                _searxng_started = True
+            else:
+                _searxng_port = _find_free_port(_searxng_host, preferred=_searxng_port)
+                sp = _ui_step(opts.show_boot_ui, "Starting SearXNG")
+
+        if _web_engine == "searxng" and not _searxng_started and not _searxng_override:
             if not _searxng_installed(_searxng_dir):
                 sp.stop()
                 _ui_info("SearXNG not installed — running setup (first time only)...")
@@ -2497,14 +2448,13 @@ def bootstrap(
                 )
                 sp.stop()
                 if _searxng_started:
-                    _ui_ok(f"SearXNG online: http://{_searxng_host}:{_searxng_port}")
+                    _searxng_url = f"http://{_searxng_host}:{_searxng_port}"
+                    _ui_ok(f"SearXNG online: {_searxng_url}")
                 else:
                     _ui_warn("SearXNG failed to start — falling back to DuckDuckGo")
                     _web_engine = "duckduckgo"
             else:
                 sp.stop()
-        else:
-            _ui_ok(f"SearXNG READY: http://{_searxng_host}:{_searxng_port}")
 
     # ── STEP 12 · llama-server ────────────────────────────────────────────────
     _pcb("Starting llama-server")
@@ -2514,26 +2464,47 @@ def bootstrap(
     host = llama_cfg["host"]
     port = int(llama_cfg["port"])
     timeout = float(llama_cfg["ready_timeout_s"])
+    _llama_use_external: bool = bool(llama_cfg.get("use_external", False))
+    _llama_external_url: str = str(llama_cfg.get("external_url") or "")
 
-    # ── Port scan: detect already-running llama-server ────────────────────────
-    _llama_scan_ports: List[int] = [
-        int(p)
-        for p in (llama_cfg.get("scan_ports") or [8080, 8081, 8082, 8088, 8888, 11434])
-        if str(p).isdigit()
-    ]
-    # Ensure configured port is first in the list
-    if port not in _llama_scan_ports:
-        _llama_scan_ports = [port] + _llama_scan_ports
+    # ── External llama-server mode ─────────────────────────────────────────────
+    if _llama_use_external and _llama_external_url:
+        sp = _ui_step(opts.show_boot_ui, "Connecting to external llama-server")
+        _ext_llama_ok = _url_reachable(
+            _llama_external_url, check_paths=["/health", "/v1/models", "/"]
+        )
+        sp.stop()
+        if _ext_llama_ok:
+            port = _parse_url_port(_llama_external_url, default=port)
+            llama_cfg["port"] = port
+            _ui_ok(f"External llama-server READY: {_llama_external_url}")
+        else:
+            _ui_warn(f"External llama-server unreachable: {_llama_external_url}")
+            if opts.show_boot_ui and progress_cb is None:
+                _start_local = _wizard_yn(
+                    "External llama-server is not responding. Start a local instance"
+                    " instead?",
+                    default=True,
+                )
+                if not _start_local:
+                    integrity.violations.append("llama_external_unreachable")
+                else:
+                    _llama_use_external = False  # fall through to local-start
+            else:
+                # Headless / Textual — auto-fallback to local
+                _ui_info("Textual mode: auto-starting local llama-server")
+                _llama_use_external = False
 
-    sp = _ui_step(opts.show_boot_ui, "Scanning for existing llama-server")
-    _found_port = _scan_llama_ports(host, _llama_scan_ports)
-    sp.stop()
-    if _found_port and _found_port != port:
-        _ui_ok(f"llama-server found on alternate port {_found_port} — using it")
-        port = _found_port
+    # ── Pick a free port for local start ──────────────────────────────────────
+    if not _llama_use_external:
+        port = _find_free_port(host, preferred=port)
         llama_cfg["port"] = port
 
-    base_url = f"http://{host}:{port}"
+    base_url = (
+        _llama_external_url.rstrip("/")
+        if (_llama_use_external and _llama_external_url)
+        else f"http://{host}:{port}"
+    )
     llama_cfg["base_url"] = base_url
 
     llama_info: Dict[str, Any] = {
@@ -2552,10 +2523,11 @@ def bootstrap(
         "log_file": str(llama_server_log),
     }
 
-    pre = _probe(base_url, host=host, port=port)
-    llama_info.update(pre)
+    # ── If using external URL, probe and wait; otherwise spawn ────────────────
+    if _llama_use_external and _llama_external_url:
+        pre = _probe(base_url, host=host, port=port)
+        llama_info.update(pre)
 
-    if pre["listening"]:
         if pre["ready"]:
             _ui_ok(f"llama-server READY (external): {base_url}")
             llama_info["status"] = "ready"
@@ -2586,38 +2558,38 @@ def bootstrap(
         else:
             srv_args = _flatten(llama_cfg.get("server_args"))
 
-            # ── Dynamic context budget ────────────────────────────
-            try:
-                from buddy.buddy_core.context_budget import ContextBudget
-
-                os_profile_data = {}
+            # ── Dynamic context budget (skipped when [llama] override=true) ──
+            _budget = None
+            if not _llama_override:
                 try:
-                    import json as _json
+                    from buddy.buddy_core.context_budget import ContextBudget
 
-                    _op_path = paths.get("os_profile")
-                    if _op_path and Path(_op_path).exists():
-                        with open(_op_path, "r", encoding="utf-8") as _f:
-                            os_profile_data = _json.load(_f)
-                except Exception:
-                    pass
+                    model_size_bytes = os.path.getsize(model_path)
+                    model_size_gb = model_size_bytes / (1024**3)
+                    _budget = ContextBudget.from_hardware(
+                        os_profile, model_size_gb=model_size_gb
+                    )
 
-                _budget = ContextBudget.from_hardware(os_profile_data)
+                    # Apply toml override if configured
+                    _cb_cfg = buddy_cfg.get("context_budget") or {}
+                    _budget = ContextBudget.from_override(_budget, _cb_cfg)
 
-                # Apply toml override if configured
-                _cb_cfg = buddy_cfg.get("context_budget") or {}
-                _budget = ContextBudget.from_override(_budget, _cb_cfg)
+                    # Replace --ctx-size in server_args with computed n_ctx
+                    srv_args = _inject_ctx_size(srv_args, _budget.n_ctx)
 
-                # Replace --ctx-size in server_args with computed n_ctx
-                srv_args = _inject_ctx_size(srv_args, _budget.n_ctx)
-                state.context_budget = _budget
+                    _ui_ok(
+                        f"Context budget: {_budget.tier} "
+                        f"n_ctx={_budget.n_ctx} turns={_budget.recent_turns} "
+                        f"top_k={_budget.top_k_memories}"
+                    )
+                except Exception as _cb_err:
+                    logger.warning(
+                        "context_budget failed, using toml server_args: %r", _cb_err
+                    )
+            else:
                 _ui_ok(
-                    f"Context budget: {_budget.tier_label} "
-                    f"n_ctx={_budget.n_ctx} turns={_budget.recent_turns} "
-                    f"top_k={_budget.top_k_memories}"
-                )
-            except Exception as _cb_err:
-                logger.warning(
-                    "context_budget failed, using toml server_args: %r", _cb_err
+                    "Context budget: skipped (override mode — using toml server_args"
+                    " as-is)"
                 )
             # ─────────────────────────────────────────────────────
 
@@ -2633,6 +2605,15 @@ def bootstrap(
                 str(host),
                 "--port",
                 str(int(port)),
+                "--n-gpu-layers",
+                "-1",
+                "--batch-size",
+                "1024",
+                "--threads",
+                "-1",
+                "--flash-attn",
+                "on",
+                "--mmap",
                 *clean,
             ]
 
@@ -2716,6 +2697,8 @@ def bootstrap(
         integrity.violations.append("llama_not_ready_blocking_core_init")
 
     # ── Shutdown hook ─────────────────────────────────────────────────────────
+    # Idempotent — safe to call multiple times (clears proc/owned refs on first
+    # call so subsequent calls are no-ops).
     def _shutdown() -> None:
         proc = _proc_ref[0]
         owned = _owned_ref[0]
@@ -2728,176 +2711,149 @@ def bootstrap(
             logger.info("Shutting down SearXNG")
             stop_searxng(_state_dir)
 
-    # ── STEP 13 · Core objects ────────────────────────────────────────────────
-    _pcb("Creating core objects")
-    if llama_info["ready"]:
-        sp = _ui_step(opts.show_boot_ui, "Creating core objects")
-        artifacts = _create_artifacts(
-            db_path,
-            integrity,
-            llama_model=llama_cfg["model_name"],
-            llama_base_url=base_url,
-            os_profile=os_profile,
-            config={"buddy": buddy_cfg, "tools": tools_cfg, "runtime": runtime},
-        )
-        sp.stop()
-        missing_comps = artifacts.validate()
-        if missing_comps:
-            msg = f"missing_components:{missing_comps}"
-            (
-                integrity.violations if opts.strict_integrity else integrity.warnings
-            ).append(msg)
-            _ui_warn(f"Missing components: {missing_comps}")
+    # Register as a last-resort atexit handler so servers are cleaned up even
+    # if the process is killed before on_unmount fires (e.g. hard crash, OOM).
+    import atexit as _atexit
+
+    _atexit.register(_shutdown)
+
+    # ── STEPS 13-15 — wrapped so any unexpected exception also shuts down ────
+    # (The RuntimeError path at STEP 14 calls _shutdown() explicitly before
+    # raising, so it is re-raised cleanly. All other exceptions go through the
+    # except branch which also calls _shutdown() before propagating.)
+    try:
+        # ── STEP 13 · Core objects ────────────────────────────────────────────
+        _pcb("Creating core objects")
+        if llama_info["ready"]:
+            sp = _ui_step(opts.show_boot_ui, "Creating core objects")
+            artifacts = _create_artifacts(
+                db_path,
+                integrity,
+                llama_model=llama_cfg["model_name"],
+                llama_base_url=base_url,
+                os_profile=os_profile,
+                config={"buddy": buddy_cfg, "tools": tools_cfg, "runtime": runtime},
+            )
+            sp.stop()
+            missing_comps = artifacts.validate()
+            if missing_comps:
+                msg = f"missing_components:{missing_comps}"
+                (
+                    integrity.violations
+                    if opts.strict_integrity
+                    else integrity.warnings
+                ).append(msg)
+                _ui_warn(f"Missing components: {missing_comps}")
+            else:
+                _ui_ok("Core objects ready")
         else:
-            _ui_ok("Core objects ready")
-    else:
-        artifacts = BootstrapArtifacts()
+            artifacts = BootstrapArtifacts()
 
-    # ── STEP 14 · Strict enforcement ──────────────────────────────────────────
-    _pcb("Checking integrity")
-    if opts.strict_integrity and integrity.violations:
-        _shutdown()
-        _ui_fail("Bootstrap failed — see violations below")
-        for v in integrity.violations:
-            print(_c(f"    ✗  {v}", "bright_red"))
-        raise RuntimeError(f"Buddy bootstrap failed. violations={integrity.violations}")
+        # ── STEP 14 · Strict enforcement ──────────────────────────────────────
+        _pcb("Checking integrity")
+        if opts.strict_integrity and integrity.violations:
+            _shutdown()
+            _ui_fail("Bootstrap failed — see violations below")
+            for v in integrity.violations:
+                print(_c(f"    ✗  {v}", "bright_red"))
+            raise RuntimeError(
+                f"Buddy bootstrap failed. violations={integrity.violations}"
+            )
 
-    # ── STEP 15 · Boot report (only on success) ───────────────────────────────
-    _pcb("Writing boot report")
-    report = {
-        "version": 2,
-        "generated_at": now_iso,
-        "integrity": {
-            "prompts_lock_ok": integrity.prompts_lock_ok,
-            "os_profile_ok": integrity.os_profile_ok,
-            "violations": integrity.violations,
-            "warnings": integrity.warnings,
-            "tainted": integrity.tainted,
-        },
-        "deps": {"present": present, "missing": missing, "auto_installed": installed},
-        "models": {
-            "llm": llm_status,
-            "embedder": {
-                "hf_model": embedder_model,
-                "local_path": str(embedder_path) if embedder_path else None,
-            },
-            "reranker": {
-                "hf_model": reranker_model,
-                "local_path": str(reranker_path) if reranker_path else None,
-            },
-            "chosen": {
-                "filename": chosen.filename,
-                "label": chosen.label,
-                "tier": chosen.tier.value,
-            },
-        },
-        "llama": llama_info,
-        "os_summary": {
-            "username": os_profile.get("username"),
-            "preferred_name": os_profile.get("user_preferred_name"),
-            "platform": os_profile.get("platform", {}).get("system"),
-            "cpu_model": os_profile.get("cpu", {}).get("model"),
-            "logical_cores": os_profile.get("cpu", {}).get("logical_cores"),
-            "ram_gb": os_profile.get("ram", {}).get("total_gb"),
-            "gpu_backend": os_profile.get("gpu", {}).get("backend"),
-            "gpu_name": os_profile.get("gpu", {}).get("name"),
-            "disk_free_gb": os_profile.get("disk", {}).get("free_gb"),
-        },
-    }
-
-    if opts.write_boot_report:
-        try:
-            _write_json(boot_report_file, report)
-            logger.info("Boot report written: %s", boot_report_file)
-        except Exception as ex:
-            integrity.warnings.append(f"boot_report_write_failed:{ex!r}")
-
-    # ── STEP 16 · Online banner — live server data ──────────────────────────
-    _pcb("Buddy ready", "ok")
-    if opts.show_boot_ui and llama_info.get("ready"):
-        _term_clear()
+        # ── STEP 15 · Online banner — live server data ────────────────────────
+        _pcb("Buddy ready", "ok")
 
         # Query the running server for its actual runtime state.
-        # This reflects what the server is *actually* loaded with — correct
-        # even when an external server was already running with a different
-        # model or flags before Buddy started.
-        srv = _fetch_llama_server_props(base_url)
+        # Always fetch (not just for the boot banner) so the Textual InfoPane
+        # can read the values from runtime["llama_props"] on startup.
+        srv: Dict[str, Any] = {}
+        if llama_info.get("ready"):
+            srv = _fetch_llama_server_props(base_url)
 
-        # Model: prefer the GGUF filename the server loaded from disk (/props),
-        # fall back to the /v1/models id, last resort the config value.
-        model_display = (
-            srv.get("model_file") or srv.get("model_id") or chosen.filename or "unknown"
+            # llama.cpp /props does NOT expose n_gpu_layers or cache_type_k/v
+            # (they are CLI startup args, not runtime properties).  Parse them
+            # from the launch command so the Textual banner can display them.
+            _boot_cmd: List[str] = llama_info.get("cmd") or []
+            _arg_pairs = {
+                "--n-gpu-layers": "n_gpu_layers",
+                "-ngl":           "n_gpu_layers",
+                "--flash-attn":   "_flash_attn_raw",
+                "--cache-type-k": "_kv_k",
+                "--cache-type-v": "_kv_v",
+            }
+            _cmd_props: Dict[str, str] = {}
+            for _ci, _ctok in enumerate(_boot_cmd):
+                if _ctok in _arg_pairs and _ci + 1 < len(_boot_cmd):
+                    _cmd_props[_arg_pairs[_ctok]] = _boot_cmd[_ci + 1]
+
+            if "n_gpu_layers" in _cmd_props and srv.get("n_gpu_layers", "—") == "—":
+                srv["n_gpu_layers"] = _cmd_props["n_gpu_layers"]
+
+            # flash_attn: prefer /props (boolean) over CLI arg
+            if srv.get("flash_attn", "—") == "—" and "_flash_attn_raw" in _cmd_props:
+                _fa_raw = _cmd_props["_flash_attn_raw"].lower()
+                srv["flash_attn"] = "on" if _fa_raw in ("on", "1", "true") else "off"
+
+            # kv_cache: build display string from parsed CLI args
+            if srv.get("kv_cache", "—") == "—":
+                _kv_k = _cmd_props.get("_kv_k", "")
+                _kv_v = _cmd_props.get("_kv_v", "")
+                if _kv_k and _kv_v and _kv_k != _kv_v:
+                    srv["kv_cache"] = f"{_kv_k}/{_kv_v}"
+                elif _kv_k:
+                    srv["kv_cache"] = _kv_k
+
+        # Store for the Textual InfoPane — avoids a second HTTP round-trip
+        # and provides values (/props never exposes n_gpu_layers/kv_cache).
+        runtime["llama_props"] = srv
+
+        if opts.show_boot_ui and llama_info.get("ready"):
+            _term_clear()
+
+            # Model: prefer the GGUF filename the server loaded from disk (/props),
+            # fall back to the /v1/models id, last resort the config value.
+            model_display = (
+                srv.get("model_file")
+                or srv.get("model_id")
+                or chosen.filename
+                or "unknown"
+            )
+            if model_display in ("", "—"):
+                model_display = chosen.filename
+
+            # VRAM — append to gpu label if available
+            vram_gb = gpu_info.get("vram_gb")
+            vram_str = f"  ·  {vram_gb} GB VRAM" if vram_gb else ""
+            gpu_banner = f"{gpu_lbl}{vram_str}"
+
+            # Print the aurora gradient banner centred in the live terminal width.
+            print_banner_centered(
+                user_name=pref_name if pref_name else "friend",
+                gpu_label=gpu_banner,
+                ram_gb=str(ram_gb),
+                llm_label=f"llama.cpp  ·  {model_display}",
+                web_engine=_web_engine,
+                stt=_stt,
+                tts=_tts,
+            )
+
+        return BootstrapState(
+            project_root=str(PROJECT_ROOT),
+            package_root=str(PACKAGE_ROOT),
+            integrity=integrity,
+            artifacts=artifacts,
+            context_budget=_budget,
+            config={"buddy": buddy_cfg, "tools": tools_cfg, "runtime": runtime},
+            shutdown=_shutdown,
         )
-        if model_display in ("", "—"):
-            model_display = chosen.filename
 
-        # VRAM — append to gpu label if available
-        vram_gb = gpu_info.get("total_vram_gb")
-        vram_str = f"  ·  {vram_gb} GB VRAM" if vram_gb else ""
-        gpu_banner = f"{gpu_lbl}{vram_str}"
-
-        # Print the aurora gradient banner centred in the live terminal width.
-        print_banner_centered(
-            user_name=pref_name,
-            gpu_label=gpu_banner,
-            ram_gb=str(ram_gb),
-            llm_label=f"llama.cpp  ·  {model_display}",
-            web_engine=_web_engine,
-            stt=_stt,
-            tts=_tts,
-        )
-
-        # ── Live server detail block ──────────────────────────────────────
-        # Rows are built from what the server actually reported.
-        # Any field the server did not expose is omitted so the block stays
-        # clean regardless of llama.cpp version.
-        # detail_rows = [
-        #     ("endpoint", base_url),
-        #     ("model", model_display),
-        #     (
-        #         "context",
-        #         f"{srv['n_ctx']} tokens" if srv.get("n_ctx", "—") != "—" else "—",
-        #     ),
-        #     ("gpu layers", srv.get("n_gpu_layers", "—")),
-        #     ("threads", srv.get("n_threads", "—")),
-        #     ("batch", srv.get("n_batch", "—")),
-        #     ("kv cache", srv.get("kv_cache", "—")),
-        #     ("flash attn", srv.get("flash_attn", "—")),
-        #     ("slots", srv.get("n_slots", "—")),
-        # ]
-        # build = srv.get("build", "—")
-        # if build and build != "—":
-        #     detail_rows.append(("backend", build))
-
-        # # Drop rows the server did not populate
-        # detail_rows = [(k, v) for k, v in detail_rows if v and v != "—"]
-
-        # if detail_rows:
-        #     cols, _ = _term_size()
-        #     label_w = max(len(k) for k, _ in detail_rows)
-        #     inner = min(cols - 4, 80)
-        #     indent = " " * max(0, (cols - inner) // 2)
-        #     sep = indent + _c("─" * inner, "dim")
-
-        #     print()
-        #     print(sep)
-        #     print(indent + _c("  LLAMA SERVER  ·  LIVE CONFIGURATION", "dim"))
-        #     print(sep)
-        #     for key, val in detail_rows:
-        #         key_str = _raw_c(_logo_row_code(0), f"  {key:<{label_w}}  ")
-        #         val_str = _c(val, "white")
-        #         print(indent + key_str + val_str)
-        #     print(sep)
-        #     print()
-
-    return BootstrapState(
-        project_root=str(PROJECT_ROOT),
-        package_root=str(PACKAGE_ROOT),
-        integrity=integrity,
-        artifacts=artifacts,
-        config={"buddy": buddy_cfg, "tools": tools_cfg, "runtime": runtime},
-        shutdown=_shutdown,
-    )
+    except RuntimeError:
+        raise  # integrity violation — _shutdown() already called above
+    except BaseException:
+        # Unexpected crash after servers started — shut down before propagating.
+        logger.exception("bootstrap crashed after server start — forcing shutdown")
+        _shutdown()
+        raise
 
 
 if __name__ == "__main__":

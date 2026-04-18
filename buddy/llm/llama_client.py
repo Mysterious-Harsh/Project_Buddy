@@ -523,6 +523,11 @@ class LlamaClient:
         # Injected into the last user message as OAI content array (image_url entries).
         # Supports multiple images — one entry per image.
         images: Optional[List[str]] = None,
+        # JSON extraction (streaming-optimized, mirrors generate())
+        json_extract: bool = False,
+        json_validate: bool = False,
+        json_root: str = "object",
+        json_max_chars: int = 120_000,
     ) -> str:
         """
         Chat completion endpoint (/v1/chat/completions).
@@ -543,9 +548,13 @@ class LlamaClient:
             interrupt_event: Event to cancel request (thread-safe)
             images: Data URIs for vision input (["data:image/png;base64,...", ...]).
                     Injected into the last user message as image_url content blocks.
+            json_extract: Extract first valid JSON object/array from stream
+            json_validate: Validate extracted JSON (retries if invalid)
+            json_root: "object" | "array" | "either"
+            json_max_chars: Safety limit for JSON buffer
 
         Returns:
-            Generated text
+            Generated text (or extracted JSON if json_extract=True)
         """
         if not messages:
             raise ValueError("messages must be non-empty")
@@ -565,12 +574,31 @@ class LlamaClient:
             images=images,
         )
 
-        text, _stats = self._call(
+        # Streaming JSON extraction setup (mirrors generate())
+        json_capture = None
+        if stream and json_extract:
+            json_capture = _JsonCapture(root=json_root, max_chars=int(json_max_chars))
+
+        text = self._call(
             endpoint="/v1/chat/completions",
             payload=payload,
             on_delta=on_delta,
+            json_capture=json_capture,
+            json_validate=bool(json_validate) if json_extract else False,
             interrupt_event=interrupt_event,
         )
+
+        # Blocking mode JSON extraction
+        if json_extract and not stream:
+            extracted = self._extract_first_json_value(
+                text,
+                root=json_root,
+                validate=json_validate,
+                max_chars=int(json_max_chars),
+            )
+            if extracted is not None:
+                return extracted
+
         return text
 
     def generate(
@@ -595,11 +623,9 @@ class LlamaClient:
         json_root: str = "object",
         json_max_chars: int = 120_000,
         interrupt_event: Optional[threading.Event] = None,
-        # Vision: list of {"data": "<base64>", "id": N} dicts (Qwen3.5 multimodal)
-        image_data: Optional[List[Dict[str, Any]]] = None,
     ) -> str:
         """
-        Text completion endpoint (/v1/completions).
+        Text completion endpoint (/completions).
 
         Args:
             prompt: Input prompt
@@ -666,12 +692,6 @@ class LlamaClient:
 
         payload.update(user_opts)
 
-        # Vision: inject image_data for multimodal models (Qwen3.5).
-        # image_data uses the native /completion endpoint — NOT /v1/completions.
-        # Native format: {"content": "...", "stop": true} (no choices array).
-        if image_data:
-            payload["image_data"] = image_data
-
         # Streaming JSON extraction setup
         json_capture = None
         if stream and json_extract:
@@ -682,9 +702,8 @@ class LlamaClient:
         # restriction. Newer llama.cpp builds reject these on /v1/completions
         # because that endpoint is now strictly OpenAI-spec only (400 Bad Request).
         # Response parsing already handles the native {"content": "..."} format.
-        endpoint = "/completion"
-        text, _stats = self._call(
-            endpoint=endpoint,
+        text = self._call(
+            endpoint="/completion",
             payload=payload,
             on_delta=on_delta,
             json_capture=json_capture,
@@ -715,14 +734,7 @@ class LlamaClient:
         try:
             t0 = self._perf()
 
-            # Warm up both endpoints
-            _ = self.generate(
-                prompt="ready",
-                stream=False,
-                temperature=0.0,
-                max_tokens=1,
-            )
-            _ = self.chat(
+            self.chat(
                 messages=[{"role": "user", "content": "ready"}],
                 stream=False,
                 temperature=0.0,
@@ -775,7 +787,9 @@ class LlamaClient:
             for i in range(len(final_msgs) - 1, -1, -1):
                 if final_msgs[i].get("role") == "user":
                     original = final_msgs[i].get("content", "")
-                    content: List[Dict[str, Any]] = [{"type": "text", "text": str(original)}]
+                    content: List[Dict[str, Any]] = [
+                        {"type": "text", "text": str(original)}
+                    ]
                     for uri in images:
                         content.append({"type": "image_url", "image_url": {"url": uri}})
                     final_msgs[i] = {**final_msgs[i], "content": content}
@@ -1016,7 +1030,7 @@ class LlamaClient:
         json_capture: Optional[_JsonCapture] = None,
         json_validate: bool = False,
         interrupt_event: Optional[threading.Event] = None,
-    ) -> Tuple[str, LlamaStats]:
+    ) -> str:
         """
         Execute request with retry logic.
 
@@ -1030,9 +1044,13 @@ class LlamaClient:
         url = f"{self.base_url}{endpoint}"
         want_stream = bool(payload.get("stream", False))
 
-        summ = self._payload_summary(payload, endpoint)
         if self.debug:
-            logger.info("llama start: req_id=%s url=%s %s", req_id, url, summ)
+            logger.info(
+                "llama start: req_id=%s url=%s %s",
+                req_id,
+                url,
+                self._payload_summary(payload, endpoint),
+            )
 
         retries_used = 0
         last_err: Optional[Exception] = None
@@ -1057,58 +1075,41 @@ class LlamaClient:
                         interrupt_event=interrupt_event,
                     )
 
-                # Build enriched stats
-                stats = LlamaStats(
-                    total_s=rs.total_s,
-                    ttfb_s=rs.ttfb_s,
-                    chunks=rs.chunks,
-                    out_len=len(text),
-                    finish_reason=rs.finish_reason,
-                    prompt_tokens=rs.prompt_tokens,
-                    completion_tokens=rs.completion_tokens,
-                    total_tokens=rs.total_tokens,
-                    retries=retries_used,
-                    endpoint=endpoint,
-                    model=self.model,
-                    req_id=req_id,
-                    json_attempts=rs.json_attempts,
-                )
-
-                # Log warnings for edge cases
+                # Log warnings for edge cases directly from _RawStats
                 if not text:
                     logger.warning(
                         "llama empty_output: req_id=%s endpoint=%s finish=%s chunks=%d"
                         " ttfb=%s pt=%s ct=%s tt=%s done=%s json_attempts=%d",
                         req_id,
                         endpoint,
-                        stats.finish_reason or "-",
-                        stats.chunks,
-                        "-" if stats.ttfb_s is None else f"{stats.ttfb_s:.3f}s",
-                        stats.prompt_tokens if stats.prompt_tokens is not None else "-",
+                        rs.finish_reason or "-",
+                        rs.chunks,
+                        "-" if rs.ttfb_s is None else f"{rs.ttfb_s:.3f}s",
+                        rs.prompt_tokens if rs.prompt_tokens is not None else "-",
                         (
-                            stats.completion_tokens
-                            if stats.completion_tokens is not None
+                            rs.completion_tokens
+                            if rs.completion_tokens is not None
                             else "-"
                         ),
-                        stats.total_tokens if stats.total_tokens is not None else "-",
+                        rs.total_tokens if rs.total_tokens is not None else "-",
                         rs.done_seen if hasattr(rs, "done_seen") else "-",
-                        stats.json_attempts,
+                        rs.json_attempts,
                     )
 
-                if (stats.finish_reason or "").lower() == "length":
+                if (rs.finish_reason or "").lower() == "length":
                     logger.warning(
                         "llama truncated_by_length: req_id=%s endpoint=%s out_len=%d"
                         " pt=%s ct=%s tt=%s",
                         req_id,
                         endpoint,
-                        stats.out_len,
-                        stats.prompt_tokens if stats.prompt_tokens is not None else "-",
+                        len(text),
+                        rs.prompt_tokens if rs.prompt_tokens is not None else "-",
                         (
-                            stats.completion_tokens
-                            if stats.completion_tokens is not None
+                            rs.completion_tokens
+                            if rs.completion_tokens is not None
                             else "-"
                         ),
-                        stats.total_tokens if stats.total_tokens is not None else "-",
+                        rs.total_tokens if rs.total_tokens is not None else "-",
                     )
 
                 if self.debug:
@@ -1116,26 +1117,26 @@ class LlamaClient:
                         "llama ok: req_id=%s endpoint=%s total=%.3fs ttfb=%s chunks=%d"
                         " out_len=%d finish=%s pt=%s ct=%s tt=%s retries=%d"
                         " json_attempts=%d model=%s",
-                        stats.req_id,
-                        stats.endpoint,
-                        stats.total_s,
-                        "-" if stats.ttfb_s is None else f"{stats.ttfb_s:.3f}s",
-                        stats.chunks,
-                        stats.out_len,
-                        stats.finish_reason or "-",
-                        stats.prompt_tokens if stats.prompt_tokens is not None else "-",
+                        req_id,
+                        endpoint,
+                        rs.total_s,
+                        "-" if rs.ttfb_s is None else f"{rs.ttfb_s:.3f}s",
+                        rs.chunks,
+                        len(text),
+                        rs.finish_reason or "-",
+                        rs.prompt_tokens if rs.prompt_tokens is not None else "-",
                         (
-                            stats.completion_tokens
-                            if stats.completion_tokens is not None
+                            rs.completion_tokens
+                            if rs.completion_tokens is not None
                             else "-"
                         ),
-                        stats.total_tokens if stats.total_tokens is not None else "-",
-                        stats.retries,
-                        stats.json_attempts,
-                        stats.model,
+                        rs.total_tokens if rs.total_tokens is not None else "-",
+                        retries_used,
+                        rs.json_attempts,
+                        self.model,
                     )
 
-                return text, stats
+                return text
 
             except (
                 ConnectionError,
@@ -1201,8 +1202,6 @@ class LlamaClient:
                     preview,
                 )
                 resp.raise_for_status()
-
-            resp.raise_for_status()
 
             # Parse response
             try:
@@ -1702,8 +1701,6 @@ class LlamaClient:
 
 if __name__ == "__main__":
     import sys
-    from buddy.tests.test_prompt import test_planner_prompt
-    from buddy.tests.test_retrieval_prompt import test_retrieval_prompt
     from buddy.tests.test_brain_prompt import test_brain_prompt
 
     client = LlamaClient(
@@ -1727,7 +1724,7 @@ if __name__ == "__main__":
     try:
         print("\n[stream completion w/ json_extract+validate]")
         out = client.generate(
-            prompt=test_planner_prompt,
+            prompt=test_brain_prompt,
             stream=True,
             temperature=0.4,
             top_p=0.98,

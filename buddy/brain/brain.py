@@ -35,7 +35,6 @@ from buddy.prompts.reader_prompts import (
 from buddy.prompts.vision_prompts import (
     VISION_PROMPT,
     VISION_SCHEMA,
-    VISION_TASK_TEMPLATE,
 )
 
 import json
@@ -71,44 +70,56 @@ class LLM(Protocol):
         json_root: str = "object",
         json_max_chars: int = 120_000,
         interrupt_event: Optional[threading.Event] = None,
-        # Vision: list of {"data": "<base64>", "id": N} dicts
-        image_data: Optional[List[Dict[str, Any]]] = None,
+    ) -> str: ...
+    def chat(
+        self,
+        *,
+        messages: List[Dict[str, Any]],
+        system: Optional[str] = None,
+        stream: bool = True,
+        temperature: float = 0.0,
+        max_tokens: Optional[int] = None,
+        top_p: Optional[float] = None,
+        repeat_penalty: Optional[float] = None,
+        repeat_last_n: Optional[int] = None,
+        seed: Optional[int] = None,
+        stop: Optional[Union[str, List[str]]] = None,
+        options: Optional[Dict[str, Any]] = None,
+        on_delta: Optional[Callable[[str], None]] = None,
+        interrupt_event: Optional[threading.Event] = None,
+        # Vision: data URIs for multimodal input ["data:image/jpeg;base64,...", ...]
+        # Injected into the last user message as OAI content array (image_url entries).
+        # Supports multiple images — one entry per image.
+        images: Optional[List[str]] = None,
+        # JSON extraction (mirrors generate())
+        json_extract: bool = False,
+        json_validate: bool = False,
+        json_root: str = "object",
+        json_max_chars: int = 120_000,
     ) -> str: ...
 
 
-def _render_system_prompt(*, os_profile: Dict[str, Any]) -> str:
+def _render_system_prompt(*, username: str, os_profile: Dict[str, Any]) -> str:
     fallback = "You are Buddy — the user's trusted best friend and personal companion."
     try:
         compact = {
-            "username": os_profile.get("username", "user"),
             "platform": os_profile.get("platform", {}),
-            "os_hints": os_profile.get("os_hints", {}),
-            "cpu": {
-                "model": os_profile.get("cpu", {}).get("model"),
-                "logical_cores": os_profile.get("cpu", {}).get("logical_cores"),
-            },
-            "ram": {"total_gb": os_profile.get("ram", {}).get("total_gb")},
-            "gpu": {
-                "backend": os_profile.get("gpu", {}).get("backend"),
-                "name": os_profile.get("gpu", {}).get("name"),
-            },
+            "hardware": os_profile.get("hardware", {}),
+            "runtime": os_profile.get("runtime", {}),
+            "paths": os_profile.get("paths", {}),
         }
-        pref = (
-            str(
-                os_profile.get("user_preferred_name")
-                or os_profile.get("username")
-                or "User"
-            ).strip()
-            or "User"
-        )
+
         rendered = BUDDY_IDENTITY.format(
             os_profile=json.dumps(
                 compact, ensure_ascii=False, sort_keys=True, indent=2
             ),
-            user_preferred_name=pref,
+            user_preferred_name=username,
         ).strip()
         return rendered or fallback
     except Exception as ex:
+        logger.warning(
+            "Failed to render system prompt with os_profile=%r: %r", os_profile, ex
+        )
         return fallback
 
 
@@ -121,7 +132,8 @@ class Brain:
     - compose_context() contains context/memory formatting logic
     - PromptBuilder formats templates
     - OutputParser parses + validates
-    - LLM calls go through generate() only
+    - Text calls go through generate() via _call_llm_generate()
+    - Vision calls go through chat() with image_url content parts
     """
 
     def __init__(
@@ -134,8 +146,15 @@ class Brain:
         self.llm = llm
         self.parser = OutputParser()
         self.debug = bool(debug)
-        self.system_prompt = _render_system_prompt(os_profile=os_profile)
+        identity = os_profile.get("identity", {})
+        self.username = str(
+            identity.get("preferred_name") or identity.get("username") or "User"
+        ).strip()
+        self.system_prompt = _render_system_prompt(
+            username=self.username, os_profile=os_profile
+        )
         self._interrupt_event: Optional[threading.Event] = None
+        self._on_token: Optional[Callable[[str], None]] = None
 
     def _build_system_prompt(self, skills: list = []):
         return self.system_prompt + "\n" + "\n".join(skills)
@@ -201,6 +220,9 @@ class Brain:
     def set_interrupt(self, interrupt_event: threading.Event):
         self._interrupt_event = interrupt_event
 
+    def set_on_token(self, on_token: Callable[[str], None]):
+        self._on_token = on_token
+
     def run_memory_gate(
         self,
         *,
@@ -211,7 +233,6 @@ class Brain:
         repeat_penalty: float = 1.12,
         repeat_last_n: int = 128,
         stream: bool = True,
-        on_token: Optional[Callable[[str], None]] = None,
         llm_options: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
@@ -232,6 +253,7 @@ class Brain:
             BUDDY_OUTPUT.format(schema=RETRIEVAL_GATE_PROMPT_SCHEMA),
         ])
         prompt = build_prompt(
+            username=self.username,
             system=system_prompt,
             context=context,
             task_input=active_task,
@@ -244,7 +266,6 @@ class Brain:
             repeat_penalty=repeat_penalty,
             repeat_last_n=repeat_last_n,
             stream=bool(stream),
-            on_token=on_token,
             options=llm_options,
             # n_predict=256,  # tiny JSON: {ack_message, search_queries[], deep_recall}
             json_mode=True,  # ✅ MUST extract/validate JSON here
@@ -268,7 +289,6 @@ class Brain:
         repeat_penalty: float = 1.12,
         repeat_last_n: int = 128,
         stream: bool = True,
-        on_token: Optional[Callable[[str], None]] = None,
         llm_options: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
@@ -290,6 +310,7 @@ class Brain:
             BUDDY_OUTPUT.format(schema=BRAIN_PROMPT_SCHEMA),
         ])
         prompt = build_prompt(
+            username=self.username,
             system=system_prompt,
             context=context,
             task_input=active_task,
@@ -302,7 +323,6 @@ class Brain:
             repeat_penalty=repeat_penalty,
             repeat_last_n=repeat_last_n,
             stream=bool(stream),
-            on_token=on_token,
             options=llm_options,
             # n_predict=768,  # decision + memories JSON, CHAT response can be ~300 tokens
             json_mode=True,  # ✅ MUST extract/validate JSON here
@@ -327,7 +347,6 @@ class Brain:
         repeat_penalty: float = 1.08,
         repeat_last_n: int = 128,
         stream: bool = True,
-        on_token: Optional[Callable[[str], None]] = None,
         llm_options: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
@@ -348,6 +367,7 @@ class Brain:
             BUDDY_OUTPUT.format(schema=PLANNER_PROMPT_SCHEMA),
         ])
         prompt = build_prompt(
+            username=self.username,
             system=system_prompt,
             context=context,
             task_input=(planner_instructions + "\n\n" + active_task),
@@ -360,7 +380,6 @@ class Brain:
             repeat_penalty=repeat_penalty,
             repeat_last_n=repeat_last_n,
             stream=bool(stream),
-            on_token=on_token,
             options=llm_options,
             # n_predict=2048,  # steps[] with reasoning can be large for complex tasks
             json_mode=True,  # ✅ MUST extract/validate JSON here
@@ -387,7 +406,6 @@ class Brain:
         repeat_penalty: float = 1.12,
         repeat_last_n: int = 64,
         stream: bool = True,
-        on_token: Optional[Callable[[str], None]] = None,
         llm_options: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
@@ -415,6 +433,7 @@ class Brain:
             ),
         ])
         prompt = build_prompt(
+            username=self.username,
             system=system_prompt,
             context=context,
             task_input=instruction,
@@ -427,7 +446,6 @@ class Brain:
             repeat_penalty=repeat_penalty,
             repeat_last_n=repeat_last_n,
             stream=bool(stream),
-            on_token=on_token,
             options=llm_options,
             # n_predict=1024,  # THINK reasoning + JSON tool_call
             json_mode=True,  # executor MUST be strict JSON
@@ -449,7 +467,6 @@ class Brain:
         repeat_penalty: float = 1.12,
         repeat_last_n: int = 128,
         stream: bool = True,
-        on_token: Optional[Callable[[str], None]] = None,
         llm_options: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
@@ -469,6 +486,7 @@ class Brain:
             BUDDY_OUTPUT.format(schema=MEMORY_SUMMARY_PROMPT_SCHEMA),
         ])
         prompt = build_prompt(
+            username=self.username,
             system=system_prompt,
             context=context,
             task_input=(
@@ -485,7 +503,6 @@ class Brain:
             repeat_penalty=repeat_penalty,
             repeat_last_n=repeat_last_n,
             stream=bool(stream),
-            on_token=on_token,
             options=llm_options,
             # n_predict=512,  # summary JSON
             json_mode=True,  # ✅ MUST extract/validate JSON here
@@ -509,7 +526,6 @@ class Brain:
         repeat_penalty: float = 1.12,
         repeat_last_n: int = 128,
         stream: bool = True,
-        on_token: Optional[Callable[[str], None]] = None,
         llm_options: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
@@ -530,6 +546,7 @@ class Brain:
             BUDDY_OUTPUT.format(schema=RESPOND_PROMPT_SCHEMA),
         ])
         prompt = build_prompt(
+            username=self.username,
             system=system_prompt,
             context=context,
             task_input=active_task,
@@ -542,7 +559,6 @@ class Brain:
             repeat_penalty=repeat_penalty,
             repeat_last_n=repeat_last_n,
             stream=bool(stream),
-            on_token=on_token,
             options=llm_options,
             # n_predict=1024,  # response + memory_candidates JSON
             json_mode=True,  # ✅ MUST extract/validate JSON here
@@ -563,8 +579,10 @@ class Brain:
         rolling_context: str = "",
         temperature: float = 0.2,
         top_p: float = 0.98,
-        repeat_penalty: float = 1.0,
-        repeat_last_n: int = 64,
+        repeat_penalty: float = 1.12,
+        repeat_last_n: int = 128,
+        stream: bool = True,
+        llm_options: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
         Runs one paragraph through the reader prompt.
@@ -586,6 +604,7 @@ class Brain:
         ])
 
         prompt = build_prompt(
+            username=self.username,
             system=system_prompt,
             context=context,
             task_input=READER_TASK_TEMPLATE.format(
@@ -600,9 +619,8 @@ class Brain:
             top_p=top_p,
             repeat_penalty=repeat_penalty,
             repeat_last_n=repeat_last_n,
-            stream=False,
-            on_token=None,
-            options=None,
+            stream=stream,
+            options=llm_options,
             json_mode=True,
         )
 
@@ -623,78 +641,74 @@ class Brain:
         *,
         image_paths: "Union[str, List[str]]",
         query: str,
+        temperature: float = 0.2,
+        top_p: float = 0.98,
+        repeat_penalty: float = 1.12,
+        repeat_last_n: int = 128,
+        stream: bool = True,
+        llm_options: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
-        Analyze one or more images using the vision-capable LLM (Qwen3.5).
+        Analyze one or more images using the vision-capable LLM (Qwen VL).
 
-        Uses native llama.cpp /completion endpoint with image_data + [img-N] tokens.
+        Uses /v1/chat/completions with image_url content parts (OAI multimodal format).
         Returns a dict with keys: description, objects, text_found, key_finding.
         On failure returns {"error": str}.
 
         Called by VisionTool.execute() via the brain kwarg.
         """
-        import os as _os
+        from buddy.tools.vision.image_encoder import (
+            encode_image_to_data_uri,
+            is_image_path,
+        )
 
-        from buddy.tools.vision.image_encoder import encode_image, is_image_path
-
-        # Normalize to list
         if isinstance(image_paths, str):
             image_paths = [image_paths]
 
         if not image_paths:
             return {"error": "No image paths provided"}
 
-        # Encode all images — fail fast on first error
-        encoded: List[Dict[str, Any]] = []
-        for idx, path in enumerate(image_paths, start=1):
+        # Encode all images to data URIs — fail fast on first error
+        data_uris: List[str] = []
+        for path in image_paths:
             if not path or not is_image_path(path):
                 return {"error": f"Not a recognized image file: {path}"}
             try:
-                b64 = encode_image(path)
-            except (FileNotFoundError, ValueError, OSError) as exc:
+                data_uris.append(encode_image_to_data_uri(path))
+            except (FileNotFoundError, ValueError, OSError, ImportError) as exc:
                 logger.warning("run_vision encode failed path=%r err=%r", path, exc)
                 return {"error": str(exc)}
-            encoded.append(
-                {"id": idx, "data": b64, "filename": _os.path.basename(path)}
-            )
 
-        # Build image_data list and [img-N] prompt tokens
-        image_data = [{"data": img["data"], "id": img["id"]} for img in encoded]
-        img_tokens = " ".join(f"[img-{img['id']}]" for img in encoded)
-        filenames = ", ".join(img["filename"] for img in encoded)
-
-        # Build prompt
         system_prompt = self._build_system_prompt([
             VISION_PROMPT,
             BUDDY_OUTPUT.format(schema=VISION_SCHEMA),
         ])
-        now_iso, timezone = self._get_time_info()
-        context = self._build_context(now_iso=now_iso, timezone=timezone)
-        task_input = VISION_TASK_TEMPLATE.format(
-            img_tokens=img_tokens,
-            filename=filenames,
-            query=query,
-        )
-        prompt = build_prompt(
-            system=system_prompt,
-            context=context,
-            task_input=task_input,
-        )
+        messages = [{
+            "role": "user",
+            "content": (
+                f"User Query: {query}\n\nRespond with the JSON schema. key_finding must"
+                " directly answer the query."
+            ),
+        }]
+
+        logger.debug("run_vision | paths=%r query=%r", image_paths, query[:80])
 
         try:
-            raw = self.llm.generate(
-                prompt=prompt,
-                stream=False,
-                temperature=0.2,
-                top_p=0.98,
-                repeat_penalty=1.0,
-                repeat_last_n=64,
-                stop=["<|im_end|>"],
-                image_data=image_data,
+            raw = self.llm.chat(
+                messages=messages,
+                system=system_prompt,
+                images=data_uris,
+                temperature=temperature,
+                top_p=top_p,
+                repeat_penalty=repeat_penalty,
+                repeat_last_n=repeat_last_n,
+                stream=stream,
+                options=llm_options,
+                on_delta=self._on_token,
                 json_extract=True,
                 json_validate=True,
                 json_root="object",
-                json_max_chars=32_000,
+                stop=["</JSON>"],
             )
         except Exception as exc:
             logger.warning(
@@ -715,7 +729,7 @@ class Brain:
         except Exception:
             pass
 
-        # Fallback: raw text as description
+        # Fallback: raw text as key_finding
         return {
             "description": str(raw).strip(),
             "objects": [],
@@ -737,7 +751,6 @@ class Brain:
         repeat_penalty: float = 1.0,
         repeat_last_n: int = 64,
         n_predict: Optional[int] = None,
-        on_token: Optional[Callable[[str], None]],
         options: Optional[Dict[str, Any]],
         system: Optional[str] = None,
     ) -> str:
@@ -766,17 +779,38 @@ class Brain:
             repeat_last_n=int(repeat_last_n),
             n_predict=n_predict,
             options=opts,
-            on_delta=(on_token if stream else None),
-            # ✅ JSON pipeline toggles
+            on_delta=(self._on_token if self._on_token and stream else None),
             json_extract=bool(json_mode),
             json_validate=bool(json_mode),
             json_root="object",
             json_max_chars=120_000,
-            stop=["<|im_end|>"],
+            stop=["</JSON>"],
             interrupt_event=self._interrupt_event,
         )
 
         text = "" if out is None else str(out)
+        if text.endswith(
+            ("</THINK>", "</THINK>\n", "</THINK>\n\n", "\n</THINK>", "\n\n</THINK>")
+        ):
+            prompt = prompt + f"\n {text}" + "\n<JSON>"
+            text = self.llm.generate(
+                prompt=prompt,
+                system=system,
+                stream=bool(stream),
+                temperature=float(temperature),
+                top_p=float(top_p),
+                repeat_penalty=float(repeat_penalty),
+                repeat_last_n=int(repeat_last_n),
+                n_predict=n_predict,
+                options=opts,
+                on_delta=(self._on_token if self._on_token and stream else None),
+                json_extract=bool(json_mode),
+                json_validate=bool(json_mode),
+                json_root="object",
+                json_max_chars=120_000,
+                stop=["</JSON>"],
+                interrupt_event=self._interrupt_event,
+            )
 
         if self.debug:
             logger.debug(f"LLM output: \n {text}")

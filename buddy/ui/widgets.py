@@ -473,11 +473,15 @@ class InfoPane(Static):
         self._hw_line = "—"
         self._web = "—"
         self._voice_enabled = False
+        self._n_gpu_layers = "—"
+        self._kv_cache = "—"
+        self._flash_attn = "—"
 
     def on_mount(self) -> None:
         self._load_static()
         self.set_interval(1.0, self._tick)
         self._redraw()
+        asyncio.create_task(self._async_fetch_server_props())
 
     def _load_static(self) -> None:
         try:
@@ -492,12 +496,13 @@ class InfoPane(Static):
 
                 with open(op_path, "r", encoding="utf-8") as _f:
                     op = _json.load(_f)
-                self._user_name = op.get("user_preferred_name", "—")
-                ram_gb = (op.get("ram") or {}).get("total_gb", "?")
-                cores = (op.get("cpu") or {}).get("logical_cores", "?")
-                gpu = op.get("gpu") or {}
+                hw = op.get("hardware") or {}
+                self._user_name = (op.get("identity") or {}).get("preferred_name") or "—"
+                ram_gb = (hw.get("ram") or {}).get("total_gb", "?")
+                cores = (hw.get("cpu") or {}).get("logical_cores", "?")
+                gpu = hw.get("gpu") or {}
                 gpu_name = (gpu.get("name") or "")[:14]
-                vram = gpu.get("total_vram_gb")
+                vram = gpu.get("vram_gb")
                 hw_parts = [f"{ram_gb}GB", f"{cores}c"]
                 if gpu_name:
                     hw_parts.append(f"{gpu_name}" + (f"·{vram}GB" if vram else ""))
@@ -515,10 +520,88 @@ class InfoPane(Static):
             if cb:
                 self._n_ctx = str(getattr(cb, "n_ctx", "—"))
 
+            # llama_props is stored by boot.py — contains n_gpu_layers, kv_cache,
+            # flash_attn parsed from the launch command (not available via /props).
+            lp = runtime.get("llama_props") or {}
+            if lp.get("model_file"):
+                self._llm_label = lp["model_file"].replace(".gguf", "")[:28]
+            if lp.get("n_ctx"):
+                self._n_ctx = str(lp["n_ctx"])
+            if lp.get("n_gpu_layers") is not None:
+                self._n_gpu_layers = str(lp["n_gpu_layers"])
+            if lp.get("kv_cache"):
+                self._kv_cache = str(lp["kv_cache"])
+            if lp.get("flash_attn"):
+                self._flash_attn = str(lp["flash_attn"])
+
             web_cfg = buddy_cfg.get("web_search", {}) or {}
             self._web = str(web_cfg.get("engine", "duckduckgo"))
             feat_cfg = buddy_cfg.get("features", {}) or {}
             self._voice_enabled = bool(feat_cfg.get("enable_audio_stt", False))
+        except Exception:
+            pass
+
+    async def _async_fetch_server_props(self) -> None:
+        try:
+            cfg = getattr(self._state, "config", {}) or {}
+            runtime = cfg.get("runtime", {}) or {}
+            llama = runtime.get("llama", {}) or {}
+            base_url = (llama.get("base_url") or "http://127.0.0.1:8080").rstrip("/")
+
+            def _fetch() -> dict:
+                import requests as _req  # noqa: PLC0415
+
+                out: dict = {}
+                try:
+                    r = _req.get(base_url + "/props", timeout=(1.5, 5.0))
+                    if r.status_code == 200:
+                        p = r.json()
+                        raw = p.get("model_path") or p.get("model") or ""
+                        if raw:
+                            out["model_file"] = Path(raw).name
+                        n_ctx = p.get("n_ctx")
+                        if n_ctx is not None:
+                            out["n_ctx"] = str(n_ctx)
+                        n_gpu = p.get("n_gpu_layers")
+                        if n_gpu is not None:
+                            out["n_gpu_layers"] = str(n_gpu)
+                        kv_k = p.get("cache_type_k") or p.get("kv_cache_type")
+                        kv_v = p.get("cache_type_v")
+                        if kv_k and kv_v and kv_k != kv_v:
+                            out["kv_cache"] = f"{kv_k}/{kv_v}"
+                        elif kv_k:
+                            out["kv_cache"] = str(kv_k)
+                        fa = p.get("flash_attn")
+                        if fa is not None:
+                            out["flash_attn"] = "on" if fa else "off"
+                except Exception:
+                    pass
+                try:
+                    r = _req.get(base_url + "/v1/models", timeout=(1.5, 3.0))
+                    if r.status_code == 200:
+                        data = r.json().get("data") or []
+                        if data:
+                            mid = data[0].get("id") or ""
+                            if mid and not out.get("model_file"):
+                                out["model_file"] = mid
+                except Exception:
+                    pass
+                return out
+
+            props = await asyncio.to_thread(_fetch)
+
+            if props.get("model_file"):
+                self._llm_label = props["model_file"].replace(".gguf", "")[:28]
+            if props.get("n_ctx"):
+                self._n_ctx = props["n_ctx"]
+            if props.get("n_gpu_layers"):
+                self._n_gpu_layers = props["n_gpu_layers"]
+            if props.get("kv_cache"):
+                self._kv_cache = props["kv_cache"]
+            if props.get("flash_attn"):
+                self._flash_attn = props["flash_attn"]
+
+            self._redraw()
         except Exception:
             pass
 
@@ -591,6 +674,11 @@ class InfoPane(Static):
                 f"[{_DIM}]LLM  [/][{_BLUE}]{self._llm_label}[/]"
                 f"[{_DIM}] · {self._n_ctx}t[/]"
                 f"    [{_DIM}]State [/]{state_s}"
+            ),
+            (
+                f"[{_DIM}]     GPU {self._n_gpu_layers}L"
+                f"  ·  KV {self._kv_cache}"
+                f"  ·  FA {self._flash_attn}[/]"
             ),
             (
                 f"[{_DIM}]HW   {self._hw_line}[/]"

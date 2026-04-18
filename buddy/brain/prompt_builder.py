@@ -2,6 +2,7 @@ def build_prompt(
     system: str,
     context: str,
     task_input: str,
+    username: str,
     thinking: bool = True,
     think_tag: str = "<THINK>",
 ) -> str:
@@ -31,10 +32,10 @@ def build_prompt(
         f"{context}\n"
         "<|im_end|>\n"
         "<|im_start|>assistant\n"
-        "Understood. Ready.\n"
+        f"Buddy: Understood {username}. I am Ready.\n"
         "<|im_end|>"
     )
 
-    msg_block = f"<|im_start|>user\n{task_input}\n<|im_end|>"
+    msg_block = f"<|im_start|>user\nUser:{task_input}\n<|im_end|>"
 
     return "\n".join([sys_block, ctx_block, msg_block, prefill])

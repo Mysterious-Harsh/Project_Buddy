@@ -2,7 +2,6 @@
 #
 # Vision tool prompts — image analysis schema for the LLM.
 # Follows local-model-first rule: schema first, minimal prose, flat JSON.
-# VISION_TASK_TEMPLATE uses {img_tokens} for [img-N] llama.cpp image references.
 
 # ---------------------------------------------------------------------------
 # System prompt injected when brain.run_vision() is called.
@@ -10,19 +9,19 @@
 VISION_PROMPT = """
 VISION ANALYSIS
 
-Examine the image(s) carefully. Answer the user's query using only what you can see.
+Examine the image(s) carefully in very in details. Answer the user's query using only what you can see.
 
 RULES
 1. Return valid JSON only — no markdown fences, no prose outside the JSON object.
 2. All four fields are required. Use "" or [] when a field has no content.
 3. Never invent or guess — only report what is clearly visible.
 4. key_finding: most important field — give a specific, direct answer to the query.
-5. description: one dense paragraph — cover subject, setting, colors, layout, relationships.
-6. objects: list the most meaningful visible items/elements, most important first. Max 12.
-7. text_found: copy ALL readable text verbatim (signs, labels, UI text, code, captions). "" if none.
+5. description: one dense end to end detailed paragraph — cover subject, setting, colors, layout, relationships.
+6. objects: list the all meaningful visible items/elements, most important first.
+7. text_found: copy ALL the visible and readable text verbatim (signs, labels, UI text, code, captions) and must try to keep format, tags, markup exactly. "" if none.
 
 MULTI-IMAGE
-If multiple images are provided ([img-1], [img-2], ...):
+If multiple images are provided:
   - key_finding: give a comparative or combined answer as the query demands.
   - description: describe each image briefly (Image 1: ..., Image 2: ...) then summarize.
   - objects / text_found: merge across all images; note which image if ambiguous.
@@ -33,21 +32,10 @@ If multiple images are provided ([img-1], [img-2], ...):
 # ---------------------------------------------------------------------------
 VISION_SCHEMA = """{
   "description": "Dense paragraph: subject, setting, colors, layout, key relationships. For multiple images: 'Image 1: ... Image 2: ... Overall: ...'",
-  "objects": ["most important visible item", "second item", "...up to 12 items"],
-  "text_found": "All readable text copied verbatim. Empty string if no text is visible.",
+  "objects": ["most important visible item", "second item", "...up to 20 items"],
+  "text_found": "All readable text copied verbatim with format, tags, and markup preserved. Empty string if no text is visible.",
   "key_finding": "Specific, direct answer to the user's query. This is the primary output."
 }"""
-
-# ---------------------------------------------------------------------------
-# User turn template — {img_tokens} expands to "[img-1]" or "[img-1] [img-2] ..."
-# ---------------------------------------------------------------------------
-VISION_TASK_TEMPLATE = """\
-{img_tokens}
-File: {filename}
-Query: {query}
-
-Respond with the JSON schema. key_finding must directly answer the query.\
-"""
 
 # ---------------------------------------------------------------------------
 # Tool prompt shown to the executor when it selects this tool.
@@ -55,7 +43,7 @@ Respond with the JSON schema. key_finding must directly answer the query.\
 VISION_TOOL_PROMPT = """
 VISION TOOL
 
-Analyzes image files using native multimodal understanding (Qwen3.5).
+Analyzes image(s) full end-to-end and give best possible results to the user query.
 Supports PNG, JPG, JPEG, WEBP, GIF, BMP. Single image or multiple images.
 
 ═══════════════════════════════════════════════
@@ -71,20 +59,12 @@ Use this tool when:
 DO NOT use if:
   - No image file path was provided — ask the user for one
   - The file is not an image (use filesystem tool for documents, code, etc.)
-  - The model is not Qwen3.5 — vision requires a vision-capable model
 
 ═══════════════════════════════════════════════
 §2. CALL SCHEMA
 ═══════════════════════════════════════════════
-Single image:
-  path   : required — absolute path to the image file
-  query  : required — what to find, describe, or answer
-
-Multiple images:
   paths  : required — list of absolute paths
   query  : required — what to compare, find, or answer across images
-
-Rule: use "path" for one image, "paths" for two or more.
 
 ═══════════════════════════════════════════════
 §3. RESULT FIELDS (returned as text to responder)
@@ -95,21 +75,9 @@ Rule: use "path" for one image, "paths" for two or more.
   KEY_FINDING  — direct answer to the query — the primary output
   PATHS        — the image path(s) that were analyzed
 
-═══════════════════════════════════════════════
-§4. EXAMPLES
-═══════════════════════════════════════════════
-User: "what's in this screenshot?" with /home/user/screen.png
-→ {"path": "/home/user/screen.png", "query": "what is shown in this screenshot"}
-
-User: "read the text in this image" with /tmp/label.jpg
-→ {"path": "/tmp/label.jpg", "query": "read and extract all text visible in this image"}
-
-User: "compare these two charts" with chart_a.png and chart_b.png
-→ {"paths": ["/data/chart_a.png", "/data/chart_b.png"], "query": "compare these two charts and describe the key differences"}
 """.strip()
 
 VISION_TOOL_CALL_FORMAT = (
-    '{"path": "/absolute/path/to/image.png", "query": "describe what you see"}'
-    "\n"
-    '{"paths": ["/absolute/path/a.png", "/absolute/path/b.jpg"], "query": "compare these images"}'
+    '{"paths": ["/absolute/path/a.png", "/absolute/path/b.jpg"], "query": "String'
+    ' describing what to find, compare, or answer about the image(s)"}'
 )

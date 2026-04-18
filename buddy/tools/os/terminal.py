@@ -350,19 +350,17 @@ class Terminal:
             "name": self.tool_name,
             "version": self.version,
             "description": (
-                "Runs shell commands.\n"
-                "USE FOR:\n"
-                "  • Run code/scripts — python, node, go run, cargo run, java -jar, ruby, bash\n"
-                "  • Tests — pytest, jest, go test, cargo test, rspec\n"
-                "  • Compilers/builders — gcc, make, tsc, mvn, gradle\n"
-                "  • Package managers — pip, npm, yarn, brew, apt, cargo\n"
-                "  • Git and version control\n"
-                "  • System utilities, network commands (curl, ping, ssh)\n"
-                "  • Process management and installs\n"
-                "DO NOT USE FOR: read/write/search files — use filesystem tool instead.\n"
-                "PREFER structured tools over terminal when available; terminal returns raw text.\n"
-                "DAEMON AWARE: servers/watchers (uvicorn, npm start, tail -f, etc.) are "
-                "auto-detected, launched in background, and tracked in Terminal.daemons."
+                "Runs shell commands.\nUSE FOR:\n  • Run code/scripts — python, node,"
+                " go run, cargo run, java -jar, ruby, bash\n  • Tests — pytest, jest,"
+                " go test, cargo test, rspec\n  • Compilers/builders — gcc, make, tsc,"
+                " mvn, gradle\n  • Package managers — pip, npm, yarn, brew, apt,"
+                " cargo\n  • Git and version control\n  • System utilities, network"
+                " commands (curl, ping, ssh)\n  • Process management and installs\nDO"
+                " NOT USE FOR: read/write/search files — use filesystem tool"
+                " instead.\nPREFER structured tools over terminal when available;"
+                " terminal returns raw text.\nDAEMON AWARE: servers/watchers (uvicorn,"
+                " npm start, tail -f, etc.) are auto-detected, launched in background,"
+                " and tracked in Terminal.daemons."
             ),
             "prompt": TERMINAL_TOOL_PROMPT,
             "error_prompt": TERMINAL_ERROR_RECOVERY_PROMPT,
@@ -380,10 +378,13 @@ class Terminal:
     # Execution
     # --------------------------
 
-    def execute(
+    async def execute(
         self,
         call: TerminalCall,
         on_progress: Optional[Callable[[str, bool], None]] = None,
+        goal: str = "",
+        brain: Optional[Any] = None,
+        **_kwargs: Any,
     ) -> Dict[str, Any]:
 
         cwd = call.cwd

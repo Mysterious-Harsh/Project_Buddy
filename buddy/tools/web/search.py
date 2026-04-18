@@ -30,17 +30,20 @@ logger = get_logger("web_search")
 # ==========================================================
 
 _MAX_RESULTS_HARD_LIMIT = 20
-_DEFAULT_MAX_RESULTS    = 5
-_SNIPPET_CAP            = 400
-_SEARXNG_TIMEOUT_S      = 8
+_DEFAULT_MAX_RESULTS = 5
+_SNIPPET_CAP = 400
+_SEARXNG_TIMEOUT_S = 8
 _USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/124.0.0.0 Safari/537.36"
 )
+
+
 def _user_config_path() -> Path:
     """Resolve ~/.buddy/config/buddy.toml (user data dir, platform-aware)."""
     import os as _os
+
     if _os.name == "nt":
         base = _os.environ.get("LOCALAPPDATA") or _os.environ.get("APPDATA")
         root = (Path(base) / "Buddy") if base else (Path.home() / "Buddy")
@@ -74,9 +77,9 @@ def _load_config() -> Dict[str, Any]:
 
 
 class WebSearchCall(BaseModel):
-    query:       str = Field(..., min_length=1)
+    query: str = Field(..., min_length=1)
     max_results: int = Field(default=_DEFAULT_MAX_RESULTS)
-    region:      str = Field(default="wt-wt")
+    region: str = Field(default="wt-wt")
     safe_search: bool = Field(default=True)
 
     @model_validator(mode="after")
@@ -105,11 +108,12 @@ class WebSearch:
             "name": TOOL_NAME,
             "version": "3.0.0",
             "description": (
-                "Search the web. Returns title, URL, and a short snippet (≤400 chars) per result. "
-                "Snippets are ONLY sufficient for: weather, prices, scores, and one-sentence facts. "
-                "For everything else (articles, documentation, explanations, how-to, code, news details) "
-                "you MUST add a web_fetch step AFTER this step and pass these URLs as input. "
-                "Do NOT skip web_fetch when the user needs actual content."
+                "Search the web. Returns title, URL, and a short snippet (≤400 chars)"
+                " per result. Snippets are ONLY sufficient for: weather, prices,"
+                " scores, and one-sentence facts. For everything else (articles,"
+                " documentation, explanations, how-to, code, news details) you MUST add"
+                " a web_fetch step AFTER this step and pass these URLs as input. Do NOT"
+                " skip web_fetch when the user needs actual content."
             ),
             "engine": cfg.get("engine", "duckduckgo"),
             "prompt": WEB_SEARCH_TOOL_PROMPT,
@@ -120,7 +124,7 @@ class WebSearch:
     def parse_call(self, payload: Dict[str, Any]) -> WebSearchCall:
         return WebSearchCall.model_validate(payload)
 
-    def execute(
+    async def execute(
         self,
         call: WebSearchCall,
         *,
@@ -130,7 +134,7 @@ class WebSearch:
         if on_progress:
             on_progress(f"Searching: {call.query}", False)
 
-        cfg    = _load_config()
+        cfg = _load_config()
         engine = cfg.get("engine", "duckduckgo")
 
         if engine == "searxng":
@@ -163,15 +167,19 @@ class WebSearch:
 
         results = [
             {
-                "title":   str(item.get("title") or ""),
-                "url":     str(item.get("url") or ""),
+                "title": str(item.get("title") or ""),
+                "url": str(item.get("url") or ""),
                 "snippet": str(item.get("content") or "")[:_SNIPPET_CAP],
             }
             for item in raw[: call.max_results]
         ]
         return {
-            "OK": True, "ENGINE": "searxng", "QUERY": call.query,
-            "RESULTS": results, "TOTAL_FOUND": len(results), "ERROR": None,
+            "OK": True,
+            "ENGINE": "searxng",
+            "QUERY": call.query,
+            "RESULTS": results,
+            "TOTAL_FOUND": len(results),
+            "ERROR": None,
         }
 
     # ── DuckDuckGo ────────────────────────────────────────
@@ -181,30 +189,39 @@ class WebSearch:
             from ddgs import DDGS  # type: ignore
 
             with DDGS() as ddgs:
-                raw = list(ddgs.text(
-                    call.query,
-                    region=call.region,
-                    safesearch="moderate" if call.safe_search else "off",
-                    max_results=call.max_results,
-                ))
+                raw = list(
+                    ddgs.text(
+                        call.query,
+                        region=call.region,
+                        safesearch="moderate" if call.safe_search else "off",
+                        max_results=call.max_results,
+                    )
+                )
         except Exception as e:
             return {
-                "OK": False, "ENGINE": "duckduckgo", "QUERY": call.query,
-                "RESULTS": [], "TOTAL_FOUND": 0,
+                "OK": False,
+                "ENGINE": "duckduckgo",
+                "QUERY": call.query,
+                "RESULTS": [],
+                "TOTAL_FOUND": 0,
                 "ERROR": f"{type(e).__name__}: {e}",
             }
 
         results = [
             {
-                "title":   str(item.get("title") or ""),
-                "url":     str(item.get("href") or item.get("url") or ""),
+                "title": str(item.get("title") or ""),
+                "url": str(item.get("href") or item.get("url") or ""),
                 "snippet": str(item.get("body") or "")[:_SNIPPET_CAP],
             }
             for item in raw
         ]
         return {
-            "OK": True, "ENGINE": "duckduckgo", "QUERY": call.query,
-            "RESULTS": results, "TOTAL_FOUND": len(results), "ERROR": None,
+            "OK": True,
+            "ENGINE": "duckduckgo",
+            "QUERY": call.query,
+            "RESULTS": results,
+            "TOTAL_FOUND": len(results),
+            "ERROR": None,
         }
 
 
@@ -212,7 +229,7 @@ class WebSearch:
 # Registry contract
 # ==========================================================
 
-TOOL_NAME  = "web_search"
+TOOL_NAME = "web_search"
 TOOL_CLASS = WebSearch
 
 

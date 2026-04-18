@@ -129,6 +129,31 @@ class OutputParser:
         """Parse/validate FinalRespond from the Respond prompt output."""
         data = self._extract_json_object(raw_text)
 
+        # Normalize memory_candidates: single dict → list (LLM drift safety)
+        if isinstance(data.get("memory_candidates"), dict):
+            data["memory_candidates"] = [data["memory_candidates"]]
+
+        # Coerce each candidate so one bad entry doesn't kill the entire parse.
+        # A bad memory_type or out-of-range salience would otherwise cause
+        # FinalRespond validation to fail and return {}, silently losing all
+        # discovered facts about the user's system/environment.
+        candidates = data.get("memory_candidates")
+        if isinstance(candidates, list):
+            norm = []
+            for c in candidates:
+                if not isinstance(c, dict):
+                    continue
+                mt = str(c.get("memory_type", "flash") or "flash").strip().lower()
+                if mt not in ("flash", "short", "long", "discard"):
+                    mt = "flash"
+                c["memory_type"] = mt
+                try:
+                    c["salience"] = max(0.0, min(1.0, float(c.get("salience", 0.3) or 0.3)))
+                except Exception:
+                    c["salience"] = 0.3
+                norm.append(c)
+            data["memory_candidates"] = norm
+
         # 1) strict validate
         model = self._validate(FinalRespond, data)
         if model:

@@ -211,7 +211,7 @@ def get_or_select_vision(
     model_hf_filename: str = str(getattr(model, "hf_filename", ""))
 
     if show_ui:
-        ram_gb: float = float((os_profile.get("ram") or {}).get("total_gb") or 0)
+        ram_gb: float = float(((os_profile.get("hardware") or {}).get("ram") or {}).get("total_gb") or 0)
         total_gb = float(getattr(model, "size_gb", 0)) + mmproj_size_gb
         print(
             f"\n  {_c('VISION SETUP', 'accent')}"
@@ -225,7 +225,7 @@ def get_or_select_vision(
         want = _prompt_vision_yn(default_yes=ram_gb >= total_gb)
     else:
         # Headless — auto-enable if RAM allows
-        ram_gb = float((os_profile.get("ram") or {}).get("total_gb") or 0)
+        ram_gb = float(((os_profile.get("hardware") or {}).get("ram") or {}).get("total_gb") or 0)
         total_gb = float(getattr(model, "size_gb", 0)) + mmproj_size_gb
         want = ram_gb >= total_gb
 

@@ -40,29 +40,58 @@ from buddy.prompts.filesystem_prompts import (
 # action is known, so the LLM only sees the one relevant field set.
 _ACTION_EXAMPLES: Dict[str, str] = {
     # Patch / modify
-    "patch":      '{"action": "patch", "path": "/file.py", "old_str": "exact text to find", "new_str": "replacement text", "replace_all": false, "confirmed": false}',
+    "patch": (
+        '{"action": "patch", "path": "/file.py", "old_str": "exact text to find",'
+        ' "new_str": "replacement text", "replace_all": false, "confirmed": false}'
+    ),
     # Discovery
-    "info":       '{"action": "info", "path": "~"}',
-    "list":       '{"action": "list", "path": "~/Documents"}',
-    "tree":       '{"action": "tree", "path": "~/project", "depth": 3}',
-    "search":     '{"action": "search", "path": "~", "pattern": "*.py", "recursive": true, "max_results": 20}',
-    "grep":       '{"action": "grep", "path": "/project", "content_query": "def login", "pattern": "*.py", "context_lines": 2}',
+    "info": '{"action": "info", "path": "~"}',
+    "list": '{"action": "list", "path": "~/Documents"}',
+    "tree": '{"action": "tree", "path": "~/project", "depth": 3}',
+    "search": (
+        '{"action": "search", "path": "~", "pattern": "*.py", "recursive": true,'
+        ' "max_results": 20}'
+    ),
+    "grep": (
+        '{"action": "grep", "path": "/project", "content_query": "def login",'
+        ' "pattern": "*.py", "context_lines": 2}'
+    ),
     # Read — format-specific examples (all use action="read", keys are example selectors only)
-    "read":       '{"action": "read", "path": "/file.txt", "max_chars": 8000}',
-    "read_table": '{"action": "read", "path": "/data.csv", "max_chars": 8000, "pandas_query": "col > value", "columns": ["col1", "col2"]}',
-    "read_pdf":   '{"action": "read", "path": "/doc.pdf", "max_chars": 8000, "search_pattern": "keyword"}',
-    "read_docx":  '{"action": "read", "path": "/doc.docx", "max_chars": 8000, "search_pattern": "keyword"}',
-    "read_lines": '{"action": "read_lines", "path": "/file.txt", "start_line": 10, "end_line": 50}',
+    "read": '{"action": "read", "path": "/file.txt", "max_chars": 8000}',
+    "read_table": (
+        '{"action": "read", "path": "/data.csv", "max_chars": 8000, "pandas_query":'
+        ' "col > value", "columns": ["col1", "col2"]}'
+    ),
+    "read_pdf": (
+        '{"action": "read", "path": "/doc.pdf", "max_chars": 8000, "search_pattern":'
+        ' "keyword"}'
+    ),
+    "read_docx": (
+        '{"action": "read", "path": "/doc.docx", "max_chars": 8000, "search_pattern":'
+        ' "keyword"}'
+    ),
+    "read_lines": (
+        '{"action": "read_lines", "path": "/file.txt", "start_line": 10,'
+        ' "end_line": 50}'
+    ),
     # Write / modify
-    "write":      '{"action": "write", "path": "/file.txt", "content": "full file text here", "confirmed": false}',
-    "append":     '{"action": "append", "path": "/file.txt", "content": "text to add at end"}',
+    "write": (
+        '{"action": "write", "path": "/file.txt", "content": "full file text here",'
+        ' "confirmed": false}'
+    ),
+    "append": (
+        '{"action": "append", "path": "/file.txt", "content": "text to add at end"}'
+    ),
     # Manage
-    "mkdir":      '{"action": "mkdir", "path": "~/new/folder"}',
-    "delete":     '{"action": "delete", "path": "/file.txt", "confirmed": false}',
-    "copy":       '{"action": "copy", "path": "/src.txt", "destination": "/dst/"}',
-    "move":       '{"action": "move", "path": "/src.txt", "destination": "/dst/newname.txt", "confirmed": false}',
-    "open":       '{"action": "open", "path": "/file.txt"}',
-    "diff":       '{"action": "diff", "path": "/file1.txt", "destination": "/file2.txt"}',
+    "mkdir": '{"action": "mkdir", "path": "~/new/folder"}',
+    "delete": '{"action": "delete", "path": "/file.txt", "confirmed": false}',
+    "copy": '{"action": "copy", "path": "/src.txt", "destination": "/dst/"}',
+    "move": (
+        '{"action": "move", "path": "/src.txt", "destination": "/dst/newname.txt",'
+        ' "confirmed": false}'
+    ),
+    "open": '{"action": "open", "path": "/file.txt"}',
+    "diff": '{"action": "diff", "path": "/file1.txt", "destination": "/file2.txt"}',
 }
 
 # Action trigger regex patterns — pre-compiled at module load.
@@ -72,146 +101,203 @@ _ACTION_EXAMPLES: Dict[str, str] = {
 # Keys read_table / read_pdf / read_docx are example-selector keys only —
 # they map to action="read" in _ACTION_EXAMPLES but show format-specific fields.
 _ACTION_TRIGGERS: tuple = (
-    ("read_lines", (
-        r"\bread[_\s]lines?\b",         # read_lines, read line, read lines
-        r"\bline[_\s]range\b",          # line range
-        r"\bstart[_\s]line\b",          # start_line
-        r"\bend[_\s]line\b",            # end_line
-        r"\bspecific\s+lines?\b",       # specific lines
-        r"\blines?\s+\d+",              # lines 10-50
-    )),
-    ("read_table", (
-        r"\.(csv|tsv|xlsx?|parquet|feather|orc)\b",   # any tabular extension in path
-        r"\bread\s+(csv|tsv|excel|spreadsheet|table|tabular|parquet|feather)\b",
-        r"\bspreadsheet\b",
-        r"\bpandas[_\s]query\b",
-        r"\bdata\s*frame\b",
-        r"\btabular\b",
-    )),
-    ("read_pdf", (
-        r"\.pdf\b",                     # .pdf anywhere in hint
-        r"\bread\s+pdf\b",
-        r"\bpdf\s+(file|document|report)\b",
-        r"\bopen\s+pdf\b",
-    )),
-    ("read_docx", (
-        r"\.docx?\b",                   # .doc or .docx anywhere in hint
-        r"\bread\s+(word|docx?)\b",
-        r"\bword\s+(file|document|doc)\b",
-        r"\bdocx?\s+file\b",
-    )),
-    ("search", (
-        r"\bsearch\b",
-        r"\bfind\s+(a\s+)?file\b",      # find file, find a file
-        r"\blocate\s+(a\s+)?file\b",
-        r"\blook\s+for\s+(a\s+)?file\b",
-        r"\bfind\s+by\s+name\b",
-        r"\bfile\s+named\b",
-    )),
-    ("grep", (
-        r"\bgrep\b",
-        r"\bfind\s+(lines?|text)\b",
-        r"\bsearch\s+(lines?|text|inside|in\s+file)\b",
-        r"\blines?\s+matching\b",
-        r"\btext\s+in\s+(file|files)\b",
-        r"\bcontent[_\s]search\b",
-        r"\bsearch\s+inside\b",
-        r"\bfind\s+in\s+file\b",
-    )),
-    ("read", (
-        r"\bread\b",                    # generic text read — fallback after format-specific
-        r"\bview\s+file\b",
-        r"\bshow\s+file\b",
-        r"\bdisplay\s+file\b",
-        r"\bfile\s+content\b",
-        r"\bcat\b",
-    )),
-    ("patch", (
-        r"\bpatch\b",
-        r"\bedit\s+(a\s+|the\s+)?file\b",
-        r"\bmodify\s+(a\s+|the\s+)?file\b",
-        r"\breplace\s+(text|string|line|word)\b",
-        r"\bfind\s+and\s+replace\b",
-        r"\bsearch\s+and\s+replace\b",
-        r"\bchange\s+(a\s+|the\s+)?(line|text|string|word)\b",
-        r"\bold[_\s]str\b",
-        r"\bnew[_\s]str\b",
-        r"\binline\s+edit\b",
-    )),
-    ("write", (
-        r"\bwrite\b",
-        r"\bcreate\s+(a\s+)?file\b",
-        r"\boverwrite\b",
-        r"\bsave\s+(to\s+)?(a\s+)?file\b",
-        r"\bnew\s+file\b",
-        r"\bwrite\s+(to|into|content)\b",
-    )),
-    ("append", (
-        r"\bappend\b",
-        r"\badd\s+to\s+(a\s+)?file\b",
-        r"\badd\s+text\b",
-        r"\binsert\s+at\s+end\b",
-        r"\bwrite\s+at\s+end\b",
-        r"\badd\s+line\b",
-    )),
-    ("delete", (
-        r"\bdelete\b",
-        r"\bremove\s+(a\s+)?(file|dir|directory|folder)\b",
-        r"\berase\s+(a\s+)?file\b",
-        r"\brm\b",
-        r"\bunlink\b",
-    )),
-    ("copy", (
-        r"\bcopy\b",
-        r"\bcp\b",
-        r"\bduplicate\s+(a\s+)?(file|dir|folder)\b",
-    )),
-    ("move", (
-        r"\bmove\b",
-        r"\brename\b",
-        r"\bmv\b",
-        r"\brelocate\b",
-    )),
-    ("mkdir", (
-        r"\bmkdir\b",
-        r"\b(make|create)\s+(a\s+)?(dir|directory|folder)\b",
-        r"\bnew\s+(dir|directory|folder)\b",
-    )),
-    ("tree", (
-        r"\btree\b",
-        r"\b(dir|directory|folder)\s+structure\b",
-        r"\bshow\s+(the\s+)?tree\b",
-        r"\bdirectory\s+tree\b",
-    )),
-    ("list", (
-        r"\blist\b",
-        r"\bls\b",
-        r"\bdirectory\s+listing\b",
-        r"\blist\s+(files?|dirs?|folder|directory)\b",
-        r"\bshow\s+files?\b",
-    )),
-    ("info", (
-        r"\binfo\b",
-        r"\bstat\b",
-        r"\bfile\s+(info|details|metadata|size|type)\b",
-        r"\bfile\s+exists?\b",
-        r"\bpath\s+exists?\b",
-        r"\bcheck\s+(if\s+)?(file|path)\b",
-    )),
-    ("open", (
-        r"\bopen\s+with\b",
-        r"\blaunch\s+(the\s+)?(app|application|file)\b",
-        r"\bopen\s+in\b",
-        r"\bdefault\s+app\b",
-        r"\bopen\s+application\b",
-    )),
-    ("diff", (
-        r"\bdiff\b",
-        r"\bcompare\s+(two\s+|the\s+)?files?\b",
-        r"\bdifferences?\s+between\b",
-        r"\bchanges?\s+between\b",
-        r"\bfile\s+comparison\b",
-    )),
+    (
+        "read_lines",
+        (
+            r"\bread[_\s]lines?\b",  # read_lines, read line, read lines
+            r"\bline[_\s]range\b",  # line range
+            r"\bstart[_\s]line\b",  # start_line
+            r"\bend[_\s]line\b",  # end_line
+            r"\bspecific\s+lines?\b",  # specific lines
+            r"\blines?\s+\d+",  # lines 10-50
+        ),
+    ),
+    (
+        "read_table",
+        (
+            r"\.(csv|tsv|xlsx?|parquet|feather|orc)\b",  # any tabular extension in path
+            r"\bread\s+(csv|tsv|excel|spreadsheet|table|tabular|parquet|feather)\b",
+            r"\bspreadsheet\b",
+            r"\bpandas[_\s]query\b",
+            r"\bdata\s*frame\b",
+            r"\btabular\b",
+        ),
+    ),
+    (
+        "read_pdf",
+        (
+            r"\.pdf\b",  # .pdf anywhere in hint
+            r"\bread\s+pdf\b",
+            r"\bpdf\s+(file|document|report)\b",
+            r"\bopen\s+pdf\b",
+        ),
+    ),
+    (
+        "read_docx",
+        (
+            r"\.docx?\b",  # .doc or .docx anywhere in hint
+            r"\bread\s+(word|docx?)\b",
+            r"\bword\s+(file|document|doc)\b",
+            r"\bdocx?\s+file\b",
+        ),
+    ),
+    (
+        "search",
+        (
+            r"\bsearch\b",
+            r"\bfind\s+(a\s+)?file\b",  # find file, find a file
+            r"\blocate\s+(a\s+)?file\b",
+            r"\blook\s+for\s+(a\s+)?file\b",
+            r"\bfind\s+by\s+name\b",
+            r"\bfile\s+named\b",
+        ),
+    ),
+    (
+        "grep",
+        (
+            r"\bgrep\b",
+            r"\bfind\s+(lines?|text)\b",
+            r"\bsearch\s+(lines?|text|inside|in\s+file)\b",
+            r"\blines?\s+matching\b",
+            r"\btext\s+in\s+(file|files)\b",
+            r"\bcontent[_\s]search\b",
+            r"\bsearch\s+inside\b",
+            r"\bfind\s+in\s+file\b",
+        ),
+    ),
+    (
+        "read",
+        (
+            r"\bread\b",  # generic text read — fallback after format-specific
+            r"\bview\s+file\b",
+            r"\bshow\s+file\b",
+            r"\bdisplay\s+file\b",
+            r"\bfile\s+content\b",
+            r"\bcat\b",
+        ),
+    ),
+    (
+        "patch",
+        (
+            r"\bpatch\b",
+            r"\bedit\s+(a\s+|the\s+)?file\b",
+            r"\bmodify\s+(a\s+|the\s+)?file\b",
+            r"\breplace\s+(text|string|line|word)\b",
+            r"\bfind\s+and\s+replace\b",
+            r"\bsearch\s+and\s+replace\b",
+            r"\bchange\s+(a\s+|the\s+)?(line|text|string|word)\b",
+            r"\bold[_\s]str\b",
+            r"\bnew[_\s]str\b",
+            r"\binline\s+edit\b",
+        ),
+    ),
+    (
+        "write",
+        (
+            r"\bwrite\b",
+            r"\bcreate\s+(a\s+)?file\b",
+            r"\boverwrite\b",
+            r"\bsave\s+(to\s+)?(a\s+)?file\b",
+            r"\bnew\s+file\b",
+            r"\bwrite\s+(to|into|content)\b",
+        ),
+    ),
+    (
+        "append",
+        (
+            r"\bappend\b",
+            r"\badd\s+to\s+(a\s+)?file\b",
+            r"\badd\s+text\b",
+            r"\binsert\s+at\s+end\b",
+            r"\bwrite\s+at\s+end\b",
+            r"\badd\s+line\b",
+        ),
+    ),
+    (
+        "delete",
+        (
+            r"\bdelete\b",
+            r"\bremove\s+(a\s+)?(file|dir|directory|folder)\b",
+            r"\berase\s+(a\s+)?file\b",
+            r"\brm\b",
+            r"\bunlink\b",
+        ),
+    ),
+    (
+        "copy",
+        (
+            r"\bcopy\b",
+            r"\bcp\b",
+            r"\bduplicate\s+(a\s+)?(file|dir|folder)\b",
+        ),
+    ),
+    (
+        "move",
+        (
+            r"\bmove\b",
+            r"\brename\b",
+            r"\bmv\b",
+            r"\brelocate\b",
+        ),
+    ),
+    (
+        "mkdir",
+        (
+            r"\bmkdir\b",
+            r"\b(make|create)\s+(a\s+)?(dir|directory|folder)\b",
+            r"\bnew\s+(dir|directory|folder)\b",
+        ),
+    ),
+    (
+        "tree",
+        (
+            r"\btree\b",
+            r"\b(dir|directory|folder)\s+structure\b",
+            r"\bshow\s+(the\s+)?tree\b",
+            r"\bdirectory\s+tree\b",
+        ),
+    ),
+    (
+        "list",
+        (
+            r"\blist\b",
+            r"\bls\b",
+            r"\bdirectory\s+listing\b",
+            r"\blist\s+(files?|dirs?|folder|directory)\b",
+            r"\bshow\s+files?\b",
+        ),
+    ),
+    (
+        "info",
+        (
+            r"\binfo\b",
+            r"\bstat\b",
+            r"\bfile\s+(info|details|metadata|size|type)\b",
+            r"\bfile\s+exists?\b",
+            r"\bpath\s+exists?\b",
+            r"\bcheck\s+(if\s+)?(file|path)\b",
+        ),
+    ),
+    (
+        "open",
+        (
+            r"\bopen\s+with\b",
+            r"\blaunch\s+(the\s+)?(app|application|file)\b",
+            r"\bopen\s+in\b",
+            r"\bdefault\s+app\b",
+            r"\bopen\s+application\b",
+        ),
+    ),
+    (
+        "diff",
+        (
+            r"\bdiff\b",
+            r"\bcompare\s+(two\s+|the\s+)?files?\b",
+            r"\bdifferences?\s+between\b",
+            r"\bchanges?\s+between\b",
+            r"\bfile\s+comparison\b",
+        ),
+    ),
 )
 
 # Pre-compile all trigger patterns at module load — search at runtime is fast.
@@ -234,20 +320,47 @@ _GLOB_CHARS = set("*?[")
 # Truly unreadable binary formats — no text extractor available.
 # Redirect to open action. pdf/docx/doc/xlsx/xls removed — they have extractors.
 _BINARY_EXTENSIONS = {
-    ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".ico",
-    ".mp3", ".mp4", ".wav", ".flac", ".aac", ".ogg",
-    ".avi", ".mov", ".mkv", ".wmv",
-    ".zip", ".tar", ".gz", ".bz2", ".xz", ".rar", ".7z",
-    ".exe", ".dll", ".so", ".dylib", ".bin",
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".gif",
+    ".bmp",
+    ".webp",
+    ".ico",
+    ".mp3",
+    ".mp4",
+    ".wav",
+    ".flac",
+    ".aac",
+    ".ogg",
+    ".avi",
+    ".mov",
+    ".mkv",
+    ".wmv",
+    ".zip",
+    ".tar",
+    ".gz",
+    ".bz2",
+    ".xz",
+    ".rar",
+    ".7z",
+    ".exe",
+    ".dll",
+    ".so",
+    ".dylib",
+    ".bin",
     ".pptx",
-    ".db", ".sqlite", ".sqlite3",
-    ".pyc", ".pyo",
+    ".db",
+    ".sqlite",
+    ".sqlite3",
+    ".pyc",
+    ".pyo",
 }
 
 # Extensions handled by dedicated extractors in _read strategy chain.
 _TABULAR_EXTENSIONS = {".csv", ".tsv", ".xlsx", ".xls", ".parquet", ".feather", ".orc"}
-_PDF_EXTENSIONS     = {".pdf"}
-_DOCX_EXTENSIONS    = {".docx", ".doc"}
+_PDF_EXTENSIONS = {".pdf"}
+_DOCX_EXTENSIONS = {".docx", ".doc"}
 
 _DESTRUCTIVE_ACTIONS = {"write", "patch", "delete", "move"}
 
@@ -255,6 +368,7 @@ _DESTRUCTIVE_ACTIONS = {"write", "patch", "delete", "move"}
 # ==========================================================
 # Path helpers
 # ==========================================================
+
 
 def _resolve_path(raw: str) -> str:
     """Expand ~ and $VAR, resolve to absolute path."""
@@ -270,7 +384,7 @@ def _human_size(n: Optional[int]) -> str:
         return "unknown size"
     if n < 1024:
         return f"{n} B"
-    if n < 1024 ** 2:
+    if n < 1024**2:
         return f"{n / 1024:.1f} KB"
     return f"{n / 1024 ** 2:.1f} MB"
 
@@ -303,14 +417,16 @@ _ACTION_ALIASES: Dict[str, str] = {
 
 
 class FilesystemCall(BaseModel):
-    action: str   # validated + normalized in pre-validator
+    action: str  # validated + normalized in pre-validator
     path: str
 
     # search / grep / list
     pattern: Optional[str] = None
     content_query: Optional[str] = None
     recursive: bool = True
-    max_results: int = Field(default=_DEFAULT_MAX_RESULTS, ge=1, le=_MAX_RESULTS_HARD_LIMIT)
+    max_results: int = Field(
+        default=_DEFAULT_MAX_RESULTS, ge=1, le=_MAX_RESULTS_HARD_LIMIT
+    )
     file_types: Optional[List[str]] = None
     case_sensitive: bool = False
     regex: bool = False
@@ -340,15 +456,17 @@ class FilesystemCall(BaseModel):
     destination: Optional[str] = None
 
     # multi-format read fields
-    search_pattern: Optional[str] = None   # text/regex: filters lines (text/pdf/docx) or rows (table)
-    pandas_query: Optional[str] = None     # pandas query expression, tabular only
-    columns: Optional[List[str]] = None    # select columns, tabular only
-    sheet_name: Optional[str] = None       # Excel sheet name, default: first sheet
+    search_pattern: Optional[str] = (
+        None  # text/regex: filters lines (text/pdf/docx) or rows (table)
+    )
+    pandas_query: Optional[str] = None  # pandas query expression, tabular only
+    columns: Optional[List[str]] = None  # select columns, tabular only
+    sheet_name: Optional[str] = None  # Excel sheet name, default: first sheet
 
     # patch fields
-    old_str: Optional[str] = None          # exact text to find (required for patch)
-    new_str: Optional[str] = None          # replacement text (empty string = deletion)
-    replace_all: bool = False              # replace all occurrences vs only first unique match
+    old_str: Optional[str] = None  # exact text to find (required for patch)
+    new_str: Optional[str] = None  # replacement text (empty string = deletion)
+    replace_all: bool = False  # replace all occurrences vs only first unique match
 
     # confirmation gate for destructive actions
     confirmed: bool = False
@@ -372,7 +490,11 @@ class FilesystemCall(BaseModel):
         # grep field smart-fix: if grep/search has pattern with no glob chars
         # and no content_query, the LLM probably put the search query in pattern
         action = values.get("action", "")
-        if action == "grep" and not values.get("content_query") and values.get("pattern"):
+        if (
+            action == "grep"
+            and not values.get("content_query")
+            and values.get("pattern")
+        ):
             pat = str(values["pattern"])
             if not any(c in pat for c in _GLOB_CHARS):
                 values["content_query"] = pat
@@ -382,7 +504,8 @@ class FilesystemCall(BaseModel):
         if values.get("file_types"):
             values["file_types"] = [
                 t.lstrip(".").strip().lower()
-                for t in values["file_types"] if str(t).strip()
+                for t in values["file_types"]
+                if str(t).strip()
             ]
 
         return values
@@ -390,8 +513,22 @@ class FilesystemCall(BaseModel):
     @model_validator(mode="after")
     def _validate_action_and_paths(self) -> "FilesystemCall":
         _valid_actions = {
-            "search", "read", "read_lines", "list", "tree", "open", "info",
-            "write", "append", "patch", "delete", "copy", "move", "mkdir", "grep", "diff",
+            "search",
+            "read",
+            "read_lines",
+            "list",
+            "tree",
+            "open",
+            "info",
+            "write",
+            "append",
+            "patch",
+            "delete",
+            "copy",
+            "move",
+            "mkdir",
+            "grep",
+            "diff",
         }
         if self.action not in _valid_actions:
             raise ValueError(
@@ -406,6 +543,7 @@ class FilesystemCall(BaseModel):
 # ==========================================================
 # Result helpers
 # ==========================================================
+
 
 def _iso(ts: float) -> str:
     return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -422,8 +560,13 @@ def _entry_dict(p: Path) -> Dict[str, Any]:
             "modified": _iso(stat.st_mtime),
         }
     except OSError:
-        return {"name": p.name, "path": str(p), "type": "unknown",
-                "size_bytes": None, "modified": None}
+        return {
+            "name": p.name,
+            "path": str(p),
+            "type": "unknown",
+            "size_bytes": None,
+            "modified": None,
+        }
 
 
 def _matches_file_types(p: Path, file_types: Optional[List[str]]) -> bool:
@@ -493,27 +636,25 @@ class Filesystem:
             "name": self.tool_name,
             "version": self.version,
             "description": (
-                "ALL file and directory operations. Never use terminal for file work.\n"
-                "\n"
-                "ACTIONS — always write the action name in your step hints:\n"
-                "  FIND   → search (file by name/glob) | grep (lines matching text, returns line numbers)\n"
-                "  READ   → read (text/CSV/Excel/Parquet/PDF/DOCX) | read_lines (by line range)\n"
-                "           list (dir contents) | tree (recursive structure) | info (size/type/exists) | diff\n"
-                "  WRITE  → write (create or overwrite) | append (add to end) | patch (replace exact text)\n"
-                "  MANAGE → mkdir | copy | move | delete | open (launch with default app)\n"
-                "\n"
-                "SEARCH vs GREP:\n"
-                "  search → which FILES match a name pattern or contain text (file-level)\n"
-                "  grep   → which LINES match + line numbers (use when you need a line number for read_lines or patch)\n"
-                "\n"
-                "TABULAR (.csv/.xlsx/.parquet): use pandas_query='col > val' or columns=['a','b'] to filter.\n"
-                "CONFIRMED GATE: write/patch/move/delete first call returns PREVIEW (no changes).\n"
-                "                Call again with confirmed=true to execute.\n"
-                "\n"
-                "HINT RULE: always include the action name in planner hints, e.g.:\n"
-                "  'use grep action to find def login in *.py files'\n"
-                "  'use write action to create config.toml'\n"
-                "  'use patch action to replace old_str in app.py'"
+                "ALL file and directory operations. Never use terminal for file"
+                " work.\n\nACTIONS — always write the action name in your step hints:\n"
+                "  FIND   → search (file by name/glob) | grep (lines matching text,"
+                " returns line numbers)\n  READ   → read"
+                " (text/CSV/Excel/Parquet/PDF/DOCX) | read_lines (by line range)\n     "
+                "      list (dir contents) | tree (recursive structure) | info"
+                " (size/type/exists) | diff\n  WRITE  → write (create or overwrite) |"
+                " append (add to end) | patch (replace exact text)\n  MANAGE → mkdir |"
+                " copy | move | delete | open (launch with default app)\n\nSEARCH vs"
+                " GREP:\n  search → which FILES match a name pattern or contain text"
+                " (file-level)\n  grep   → which LINES match + line numbers (use when"
+                " you need a line number for read_lines or patch)\n\nTABULAR"
+                " (.csv/.xlsx/.parquet): use pandas_query='col > val' or"
+                " columns=['a','b'] to filter.\nCONFIRMED GATE: write/patch/move/delete"
+                " first call returns PREVIEW (no changes).\n                Call again"
+                " with confirmed=true to execute.\n\nHINT RULE: always include the"
+                " action name in planner hints, e.g.:\n  'use grep action to find def"
+                " login in *.py files'\n  'use write action to create config.toml'\n "
+                " 'use patch action to replace old_str in app.py'"
             ),
             "prompt": FILESYSTEM_TOOL_PROMPT,
             "error_prompt": FILESYSTEM_ERROR_RECOVERY_PROMPT,
@@ -538,7 +679,7 @@ class Filesystem:
     def parse_call(self, payload: Dict[str, Any]) -> FilesystemCall:
         return FilesystemCall.model_validate(payload)
 
-    def execute(
+    async def execute(
         self,
         call: FilesystemCall,
         on_progress: Optional[Callable[[str, bool], None]] = None,
@@ -547,36 +688,43 @@ class Filesystem:
         **_kwargs: Any,
     ) -> Dict[str, Any]:
         if on_progress:
-            on_progress(f"{call.action}: {call.path}", False)
+            _FS_VERB = {
+                "read": "Reading", "read_lines": "Reading", "read_pdf": "Reading",
+                "write": "Writing", "append": "Writing", "patch": "Writing",
+                "list": "Listing", "tree": "Listing", "info": "Checking",
+                "search": "Searching", "grep": "Searching",
+                "delete": "Deleting", "move": "Moving", "copy": "Copying",
+                "mkdir": "Creating folder",
+            }
+            _action = str(call.action or "").lower()
+            _verb = _FS_VERB.get(_action, _action.capitalize())
+            on_progress(f"{_verb} · {call.path}", False)
 
         try:
             dispatch = {
-                "search":     self._search,
-                "read":       self._read,
+                "search": self._search,
+                "read": self._read,
                 "read_lines": self._read_lines,
-                "list":       self._list,
-                "tree":       self._tree,
-                "open":       self._open,
-                "info":       self._info,
-                "write":      self._write,
-                "append":     self._append,
-                "patch":      self._patch,
-                "delete":     self._delete,
-                "copy":       self._copy,
-                "move":       self._move,
-                "mkdir":      self._mkdir,
-                "grep":       self._grep,
-                "diff":       self._diff,
+                "list": self._list,
+                "tree": self._tree,
+                "open": self._open,
+                "info": self._info,
+                "write": self._write,
+                "append": self._append,
+                "patch": self._patch,
+                "delete": self._delete,
+                "copy": self._copy,
+                "move": self._move,
+                "mkdir": self._mkdir,
+                "grep": self._grep,
+                "diff": self._diff,
             }
             result = dispatch[call.action](call)
 
             # Apply TextReader on large read/grep results when llm + goal available
-            if (
-                goal and brain
-                and call.action in ("read", "grep")
-                and result.get("OK")
-            ):
+            if goal and brain and call.action in ("read", "grep") and result.get("OK"):
                 from buddy.brain.text_reader import maybe_read
+
                 content_key = "content" if "content" in result else "output"
                 raw = result.get(content_key, "")
                 if isinstance(raw, str):
@@ -619,7 +767,7 @@ class Filesystem:
 
         for p in candidates:
             if not call.show_hidden and any(
-                part.startswith(".") for part in p.parts[len(root.parts):]
+                part.startswith(".") for part in p.parts[len(root.parts) :]
             ):
                 continue
             if p.is_file() and not _matches_file_types(p, call.file_types):
@@ -652,7 +800,10 @@ class Filesystem:
 
         result = _ok("search", call.path, RESULTS=matches, TOTAL_FOUND=total)
         if total > call.max_results:
-            result["NOTE"] = f"Showing {call.max_results} of {total}. Increase max_results or narrow pattern."
+            result["NOTE"] = (
+                f"Showing {call.max_results} of {total}. Increase max_results or narrow"
+                " pattern."
+            )
         return result
 
     # ----------------------------------------------------------
@@ -664,7 +815,9 @@ class Filesystem:
         if not p.exists():
             return _err("read", call.path, f"File not found: {call.path}")
         if p.is_dir():
-            return _err("read", call.path, "Path is a directory — use list or tree instead.")
+            return _err(
+                "read", call.path, "Path is a directory — use list or tree instead."
+            )
 
         ext = p.suffix.lower()
 
@@ -725,7 +878,8 @@ class Filesystem:
         if call.search_pattern:
             try:
                 matched = self._apply_search_to_text(
-                    raw, call.search_pattern,
+                    raw,
+                    call.search_pattern,
                     context_lines=call.context_lines,
                     case_sensitive=call.case_sensitive,
                     use_regex=call.regex,
@@ -733,7 +887,9 @@ class Filesystem:
             except ValueError as exc:
                 return _err("read", call.path, f"search_pattern error: {exc}")
             content = "\n".join(matched)
-            result = _ok("read", call.path,
+            result = _ok(
+                "read",
+                call.path,
                 FORMAT="text",
                 CONTENT=content[: call.max_chars],
                 TOTAL_FOUND=len(matched),
@@ -749,7 +905,9 @@ class Filesystem:
 
         # No filter — return full content
         truncated = len(raw) > call.max_chars
-        result = _ok("read", call.path,
+        result = _ok(
+            "read",
+            call.path,
             FORMAT="text",
             CONTENT=raw[: call.max_chars] if truncated else raw,
         )
@@ -759,13 +917,16 @@ class Filesystem:
         if truncated:
             result["TRUNCATED"] = True
             result["NOTE"] = (
-                f"Showing first {call.max_chars} chars of {stat.st_size if stat else '?'} bytes. "
-                "Use read_lines with start_line/end_line to read other sections, "
-                "or search_pattern to filter content."
+                f"Showing first {call.max_chars} chars of"
+                f" {stat.st_size if stat else '?'} bytes. Use read_lines with"
+                " start_line/end_line to read other sections, or search_pattern to"
+                " filter content."
             )
         return result
 
-    def _try_read_table(self, p: Path, call: FilesystemCall) -> Optional[Dict[str, Any]]:
+    def _try_read_table(
+        self, p: Path, call: FilesystemCall
+    ) -> Optional[Dict[str, Any]]:
         """Read tabular file via pandas. Returns None if pandas not installed or file unreadable."""
         try:
             import pandas as pd
@@ -780,7 +941,13 @@ class Filesystem:
                 df = pd.read_csv(str(p), sep="\t" if ext == ".tsv" else ",")
             elif ext in {".xlsx", ".xls"}:
                 xl = pd.ExcelFile(str(p))
-                sheet_used = call.sheet_name if call.sheet_name in xl.sheet_names else xl.sheet_names[0]
+                if (
+                    isinstance(call.sheet_name, str)
+                    and call.sheet_name in xl.sheet_names
+                ):
+                    sheet_used = call.sheet_name
+                else:
+                    sheet_used = str(xl.sheet_names[0])
                 df = pd.read_excel(str(p), sheet_name=sheet_used)
             elif ext == ".parquet":
                 df = pd.read_parquet(str(p))
@@ -803,33 +970,45 @@ class Filesystem:
             if valid:
                 df = df[valid]
             else:
-                return _err("read", call.path,
-                    f"None of columns {call.columns} found. Available: {all_columns}")
+                return _err(
+                    "read",
+                    call.path,
+                    f"None of columns {call.columns} found. Available: {all_columns}",
+                )
 
         # pandas_query filter
         if call.pandas_query:
             try:
                 df = df.query(call.pandas_query)
             except Exception as exc:
-                return _err("read", call.path,
+                return _err(
+                    "read",
+                    call.path,
                     f"pandas_query error: {exc}. "
                     f"Available columns: {all_columns}. "
-                    "Check column names and query syntax.")
+                    "Check column names and query syntax.",
+                )
 
         # search_pattern row filter
         if call.search_pattern:
             try:
                 flags = 0 if call.case_sensitive else re.IGNORECASE
                 mask = df.apply(
-                    lambda row: row.astype(str).str.contains(
-                        call.search_pattern, flags=flags,
-                        regex=bool(call.regex), na=False,
-                    ).any(),
+                    lambda row: row.astype(str)
+                    .str.contains(
+                        call.search_pattern,
+                        flags=flags,
+                        regex=bool(call.regex),
+                        na=False,
+                    )
+                    .any(),
                     axis=1,
                 )
                 df = df[mask]
             except Exception as exc:
-                return _err("read", call.path, f"search_pattern row filter error: {exc}")
+                return _err(
+                    "read", call.path, f"search_pattern row filter error: {exc}"
+                )
 
         rows_after = len(df)
         rendered = self._render_dataframe(df)
@@ -851,17 +1030,18 @@ class Filesystem:
                 "COLUMNS": all_columns,
                 **extra,
                 "PREVIEW": (
-                    f"Table has {rows_after} rows × {len(df.columns)} cols "
-                    f"({rows_total} total rows). "
-                    f"Output ({len(rendered):,} chars) exceeds max_chars ({call.max_chars:,}). "
-                    f"Columns: {all_columns}. First 2 rows:\n{preview}\n"
-                    f"Filter with pandas_query='col > value' or search_pattern='text' "
-                    f"or columns=['col1','col2']."
+                    f"Table has {rows_after} rows × {len(df.columns)} cols"
+                    f" ({rows_total} total rows). Output ({len(rendered):,} chars)"
+                    f" exceeds max_chars ({call.max_chars:,}). Columns: {all_columns}."
+                    f" First 2 rows:\n{preview}\nFilter with pandas_query='col > value'"
+                    " or search_pattern='text' or columns=['col1','col2']."
                 ),
                 "NOTE": "Call again with a filter to get results.",
             }
 
-        result = _ok("read", call.path,
+        result = _ok(
+            "read",
+            call.path,
             FORMAT="table",
             CONTENT=rendered,
             ROWS_TOTAL=rows_total,
@@ -879,6 +1059,7 @@ class Filesystem:
 
         try:
             import pdfplumber
+
             with pdfplumber.open(str(p)) as pdf:
                 pages = [pg.extract_text() or "" for pg in pdf.pages]
             text = "\n\n".join(pages).strip()
@@ -890,9 +1071,13 @@ class Filesystem:
         if text is None:
             try:
                 import PyPDF2
+
                 with open(str(p), "rb") as f:
                     reader = PyPDF2.PdfReader(f)
-                    pages = [reader.pages[i].extract_text() or "" for i in range(len(reader.pages))]
+                    pages = [
+                        reader.pages[i].extract_text() or ""
+                        for i in range(len(reader.pages))
+                    ]
                 text = "\n\n".join(pages).strip()
             except ImportError:
                 return None  # neither library available
@@ -901,7 +1086,10 @@ class Filesystem:
 
         if not text:
             result = _ok("read", call.path, FORMAT="pdf", CONTENT="")
-            result["NOTE"] = "PDF contains no extractable text — may be a scanned image. Use open to view."
+            result["NOTE"] = (
+                "PDF contains no extractable text — may be a scanned image. Use open to"
+                " view."
+            )
             return result
 
         return self._finalize_text_result(call, text, fmt="pdf")
@@ -910,6 +1098,7 @@ class Filesystem:
         """Extract text from DOCX via python-docx. Returns None if library unavailable."""
         try:
             from docx import Document
+
             doc = Document(str(p))
             text = "\n".join(para.text for para in doc.paragraphs if para.text.strip())
         except ImportError:
@@ -931,7 +1120,8 @@ class Filesystem:
         if call.search_pattern:
             try:
                 matched = self._apply_search_to_text(
-                    text, call.search_pattern,
+                    text,
+                    call.search_pattern,
                     context_lines=call.context_lines,
                     case_sensitive=call.case_sensitive,
                     use_regex=call.regex,
@@ -939,19 +1129,25 @@ class Filesystem:
             except ValueError as exc:
                 return _err("read", call.path, f"search_pattern error: {exc}")
             content = "\n".join(matched)
-            result = _ok("read", call.path,
+            result = _ok(
+                "read",
+                call.path,
                 FORMAT=fmt,
                 CONTENT=content[: call.max_chars],
                 TOTAL_FOUND=len(matched),
             )
             if not matched:
-                result["NOTE"] = f"No lines matched search_pattern in {fmt.upper()} text."
+                result["NOTE"] = (
+                    f"No lines matched search_pattern in {fmt.upper()} text."
+                )
             elif len(content) > call.max_chars:
                 result["TRUNCATED"] = True
             return result
 
         truncated = len(text) > call.max_chars
-        result = _ok("read", call.path,
+        result = _ok(
+            "read",
+            call.path,
             FORMAT=fmt,
             CONTENT=text[: call.max_chars] if truncated else text,
         )
@@ -964,11 +1160,18 @@ class Filesystem:
         return result
 
     def _apply_search_to_text(
-        self, text: str, pattern: str, *,
-        context_lines: int, case_sensitive: bool, use_regex: bool,
+        self,
+        text: str,
+        pattern: str,
+        *,
+        context_lines: int,
+        case_sensitive: bool,
+        use_regex: bool,
     ) -> List[str]:
         """Filter text lines by pattern. Returns matching lines with context."""
-        matcher = _compile_pattern(pattern, case_sensitive=case_sensitive, use_regex=use_regex)
+        matcher = _compile_pattern(
+            pattern, case_sensitive=case_sensitive, use_regex=use_regex
+        )
         lines = text.splitlines()
         seen: set = set()
         result: List[str] = []
@@ -992,8 +1195,8 @@ class Filesystem:
                 for c in cols
             }
             header = " | ".join(str(c).ljust(col_w[c]) for c in cols)
-            sep    = "-+-".join("-" * col_w[c] for c in cols)
-            rows   = [
+            sep = "-+-".join("-" * col_w[c] for c in cols)
+            rows = [
                 " | ".join(str(v).ljust(col_w[c]) for c, v in zip(cols, row))
                 for row in df.itertuples(index=False, name=None)
             ]
@@ -1014,7 +1217,9 @@ class Filesystem:
                     f"Cannot read {call.path} as text — binary or unsupported format. "
                     "I can open it with the default application instead. Shall I?"
                 ),
-                "NOTE": "Call again with confirmed=true to open, or check the file path.",
+                "NOTE": (
+                    "Call again with confirmed=true to open, or check the file path."
+                ),
             }
         return self._open(call)
 
@@ -1029,10 +1234,16 @@ class Filesystem:
         if p.is_dir():
             return _err("read_lines", call.path, "Path is a directory.")
         if _is_likely_binary(p):
-            return _err("read_lines", call.path, f"Binary file ({p.suffix}) cannot be read as text.")
+            return _err(
+                "read_lines",
+                call.path,
+                f"Binary file ({p.suffix}) cannot be read as text.",
+            )
 
         try:
-            lines = p.read_text(encoding=call.encoding, errors="replace").splitlines(keepends=True)
+            lines = p.read_text(encoding=call.encoding, errors="replace").splitlines(
+                keepends=True
+            )
         except OSError as exc:
             return _err("read_lines", call.path, str(exc))
 
@@ -1041,12 +1252,17 @@ class Filesystem:
         end = min(total, call.end_line or total)
 
         if start > total:
-            return _err("read_lines", call.path,
-                f"start_line={start} exceeds file length ({total} lines).")
+            return _err(
+                "read_lines",
+                call.path,
+                f"start_line={start} exceeds file length ({total} lines).",
+            )
 
         content = "".join(lines[start - 1 : end])
         truncated = len(content) > call.max_chars
-        result = _ok("read_lines", call.path,
+        result = _ok(
+            "read_lines",
+            call.path,
             CONTENT=content[: call.max_chars] if truncated else content,
             LINE_COUNT=total,
             START_LINE=start,
@@ -1054,7 +1270,10 @@ class Filesystem:
         )
         if truncated:
             result["TRUNCATED"] = True
-            result["NOTE"] = f"Content truncated at {call.max_chars} chars. Use a smaller line range."
+            result["NOTE"] = (
+                f"Content truncated at {call.max_chars} chars. Use a smaller line"
+                " range."
+            )
         return result
 
     # ----------------------------------------------------------
@@ -1074,7 +1293,8 @@ class Filesystem:
             return _err("list", call.path, f"Permission denied: {call.path}")
 
         results = [
-            _entry_dict(child) for child in entries
+            _entry_dict(child)
+            for child in entries
             if call.show_hidden or not child.name.startswith(".")
         ]
         return _ok("list", call.path, RESULTS=results, TOTAL_FOUND=len(results))
@@ -1097,11 +1317,15 @@ class Filesystem:
             if current_depth > call.depth:
                 return
             try:
-                children = sorted(directory.iterdir(), key=lambda x: (x.is_file(), x.name.lower()))
+                children = sorted(
+                    directory.iterdir(), key=lambda x: (x.is_file(), x.name.lower())
+                )
             except PermissionError:
                 lines.append(f"{prefix}└── [permission denied]")
                 return
-            visible = [c for c in children if call.show_hidden or not c.name.startswith(".")]
+            visible = [
+                c for c in children if call.show_hidden or not c.name.startswith(".")
+            ]
             for i, child in enumerate(visible):
                 if entry_count[0] >= call.max_results:
                     lines.append(f"{prefix}└── ... ({len(visible) - i} more entries)")
@@ -1116,7 +1340,9 @@ class Filesystem:
                     _walk(child, prefix + extension, current_depth + 1)
 
         _walk(root, "", 1)
-        return _ok("tree", call.path,
+        return _ok(
+            "tree",
+            call.path,
             TREE_TEXT="\n".join(lines),
             TOTAL_FOUND=entry_count[0],
         )
@@ -1155,7 +1381,9 @@ class Filesystem:
             stat = p.stat()
         except OSError as exc:
             return _err("info", call.path, str(exc))
-        result = _ok("info", call.path,
+        result = _ok(
+            "info",
+            call.path,
             EXISTS=True,
             IS_FILE=p.is_file(),
             IS_DIR=p.is_dir(),
@@ -1189,8 +1417,7 @@ class Filesystem:
                 )
             else:
                 preview = (
-                    f"Will CREATE {call.path} "
-                    f"with {len(content)} chars of content."
+                    f"Will CREATE {call.path} with {len(content)} chars of content."
                 )
             if not content:
                 preview += " NOTE: content is empty — is this intentional?"
@@ -1231,11 +1458,19 @@ class Filesystem:
         if not p.exists():
             return _err("patch", call.path, f"File not found: {call.path}")
         if p.is_dir():
-            return _err("patch", call.path, "Path is a directory — patch requires a file.")
+            return _err(
+                "patch", call.path, "Path is a directory — patch requires a file."
+            )
         if _is_likely_binary(p):
-            return _err("patch", call.path, f"Binary file ({p.suffix}) — patch works on text files only.")
+            return _err(
+                "patch",
+                call.path,
+                f"Binary file ({p.suffix}) — patch works on text files only.",
+            )
         if not call.old_str:
-            return _err("patch", call.path, "old_str is required — the exact text to find.")
+            return _err(
+                "patch", call.path, "old_str is required — the exact text to find."
+            )
 
         try:
             original = p.read_text(encoding="utf-8", errors="replace")
@@ -1246,15 +1481,21 @@ class Filesystem:
         new_str = call.new_str if call.new_str is not None else ""
 
         if count == 0:
-            return _err("patch", call.path,
+            return _err(
+                "patch",
+                call.path,
                 "old_str not found in file. "
-                "Check exact whitespace, indentation, and line endings.")
+                "Check exact whitespace, indentation, and line endings.",
+            )
 
         if count > 1 and not call.replace_all:
-            return _err("patch", call.path,
+            return _err(
+                "patch",
+                call.path,
                 f"Found {count} occurrences of old_str. "
                 "Set replace_all=true to replace all occurrences, "
-                "or add more surrounding context to old_str to make it unique.")
+                "or add more surrounding context to old_str to make it unique.",
+            )
 
         patched = (
             original.replace(call.old_str, new_str)
@@ -1263,14 +1504,16 @@ class Filesystem:
         )
 
         # Build unified diff for the preview
-        diff_lines = list(difflib.unified_diff(
-            original.splitlines(keepends=True),
-            patched.splitlines(keepends=True),
-            fromfile=call.path,
-            tofile=call.path,
-            lineterm="",
-            n=2,
-        ))
+        diff_lines = list(
+            difflib.unified_diff(
+                original.splitlines(keepends=True),
+                patched.splitlines(keepends=True),
+                fromfile=call.path,
+                tofile=call.path,
+                lineterm="",
+                n=2,
+            )
+        )
         diff_text = "\n".join(diff_lines[:60])  # cap preview at 60 lines
 
         if not call.confirmed:
@@ -1280,8 +1523,9 @@ class Filesystem:
                 else "replace 1 occurrence"
             )
             return _needs_confirmation(
-                "patch", call.path,
-                f"Will PATCH {call.path} — {action_desc}:\n{diff_text}"
+                "patch",
+                call.path,
+                f"Will PATCH {call.path} — {action_desc}:\n{diff_text}",
             )
 
         try:
@@ -1289,7 +1533,9 @@ class Filesystem:
         except OSError as exc:
             return _err("patch", call.path, str(exc))
 
-        return _ok("patch", call.path,
+        return _ok(
+            "patch",
+            call.path,
             OCCURRENCES=count,
             SIZE_BYTES=len(patched.encode("utf-8")),
         )
@@ -1309,13 +1555,22 @@ class Filesystem:
                     size = _human_size(p.stat().st_size)
                 except OSError:
                     size = "unknown size"
-                preview = f"Will permanently DELETE file {call.path} ({size}). Cannot be undone."
+                preview = (
+                    f"Will permanently DELETE file {call.path} ({size}). Cannot be"
+                    " undone."
+                )
             else:
                 try:
                     count = sum(1 for _ in p.rglob("*"))
-                    preview = f"Will permanently DELETE directory {call.path} and all {count} items inside it. Cannot be undone."
+                    preview = (
+                        f"Will permanently DELETE directory {call.path} and all"
+                        f" {count} items inside it. Cannot be undone."
+                    )
                 except Exception:
-                    preview = f"Will permanently DELETE directory {call.path} and all its contents. Cannot be undone."
+                    preview = (
+                        f"Will permanently DELETE directory {call.path} and all its"
+                        " contents. Cannot be undone."
+                    )
             return _needs_confirmation("delete", call.path, preview)
 
         try:
@@ -1370,7 +1625,10 @@ class Filesystem:
             return _err("move", call.path, "Source and destination are the same path.")
 
         if not call.confirmed:
-            exists_note = f"Destination {dst} {'already exists and will be replaced' if dst.exists() else 'does not exist'}."
+            exists_note = (
+                "Destination"
+                f" {dst} {'already exists and will be replaced' if dst.exists() else 'does not exist'}."
+            )
             preview = f"Will MOVE {call.path} → {dst}. {exists_note} Cannot be undone."
             return _needs_confirmation("move", call.path, preview)
 
@@ -1404,33 +1662,48 @@ class Filesystem:
 
         query = call.content_query or ""
         if not query:
-            return _err("grep", call.path,
+            return _err(
+                "grep",
+                call.path,
                 "grep requires content_query (the text/regex to find). "
-                "Use pattern to filter which files to search.")
+                "Use pattern to filter which files to search.",
+            )
 
         try:
-            matcher = _compile_pattern(query, case_sensitive=call.case_sensitive, use_regex=call.regex)
+            matcher = _compile_pattern(
+                query, case_sensitive=call.case_sensitive, use_regex=call.regex
+            )
         except ValueError as exc:
             return _err("grep", call.path, str(exc))
 
         if root.is_file():
             if _is_likely_binary(root):
-                return _err("grep", call.path, f"Binary file ({root.suffix}) cannot be grepped.")
+                return _err(
+                    "grep", call.path, f"Binary file ({root.suffix}) cannot be grepped."
+                )
             files_to_search = [root]
         else:
             file_pattern = call.pattern or "*"
             try:
-                candidates = root.rglob(file_pattern) if call.recursive else root.glob(file_pattern)
+                candidates = (
+                    root.rglob(file_pattern)
+                    if call.recursive
+                    else root.glob(file_pattern)
+                )
             except Exception as exc:
                 return _err("grep", call.path, f"Glob pattern error: {exc}")
             files_to_search = [
-                p for p in candidates
+                p
+                for p in candidates
                 if p.is_file()
                 and not _is_likely_binary(p)
                 and _matches_file_types(p, call.file_types)
-                and (call.show_hidden or not any(
-                    part.startswith(".") for part in p.parts[len(root.parts):]
-                ))
+                and (
+                    call.show_hidden
+                    or not any(
+                        part.startswith(".") for part in p.parts[len(root.parts) :]
+                    )
+                )
             ]
 
         results: List[Dict[str, Any]] = []
@@ -1438,7 +1711,9 @@ class Filesystem:
 
         for file_path in files_to_search:
             try:
-                lines = file_path.read_text(encoding="utf-8", errors="ignore").splitlines()
+                lines = file_path.read_text(
+                    encoding="utf-8", errors="ignore"
+                ).splitlines()
             except OSError:
                 continue
             for i, line in enumerate(lines):
@@ -1446,8 +1721,12 @@ class Filesystem:
                     continue
                 total += 1
                 if len(results) < call.max_results:
-                    ctx_before = [l.rstrip() for l in lines[max(0, i - call.context_lines): i]]
-                    ctx_after = [l.rstrip() for l in lines[i + 1: i + 1 + call.context_lines]]
+                    ctx_before = [
+                        l.rstrip() for l in lines[max(0, i - call.context_lines) : i]
+                    ]
+                    ctx_after = [
+                        l.rstrip() for l in lines[i + 1 : i + 1 + call.context_lines]
+                    ]
                     entry: Dict[str, Any] = {
                         "path": str(file_path),
                         "line_number": i + 1,
@@ -1461,9 +1740,14 @@ class Filesystem:
 
         result = _ok("grep", call.path, RESULTS=results, TOTAL_FOUND=total)
         if total > call.max_results:
-            result["NOTE"] = f"Showing {call.max_results} of {total} matches. Increase max_results or narrow query."
+            result["NOTE"] = (
+                f"Showing {call.max_results} of {total} matches. Increase max_results"
+                " or narrow query."
+            )
         elif total == 0:
-            result["NOTE"] = "No matches. Try case_sensitive=false, regex=false, or a broader query."
+            result["NOTE"] = (
+                "No matches. Try case_sensitive=false, regex=false, or a broader query."
+            )
         return result
 
     # ----------------------------------------------------------
@@ -1472,32 +1756,53 @@ class Filesystem:
 
     def _diff(self, call: FilesystemCall) -> Dict[str, Any]:
         if not call.destination:
-            return _err("diff", call.path, "destination (second file path) is required for diff.")
+            return _err(
+                "diff",
+                call.path,
+                "destination (second file path) is required for diff.",
+            )
         a, b = Path(call.path), Path(call.destination)
         for p, label in [(a, "path"), (b, "destination")]:
             if not p.exists():
                 return _err("diff", call.path, f"{label} does not exist: {p}")
             if p.is_dir():
-                return _err("diff", call.path, f"{label} is a directory — diff requires two files.")
+                return _err(
+                    "diff",
+                    call.path,
+                    f"{label} is a directory — diff requires two files.",
+                )
             if _is_likely_binary(p):
-                return _err("diff", call.path, f"{label} is binary ({p.suffix}) — cannot diff.")
+                return _err(
+                    "diff", call.path, f"{label} is binary ({p.suffix}) — cannot diff."
+                )
         try:
-            a_lines = a.read_text(encoding="utf-8", errors="replace").splitlines(keepends=True)
-            b_lines = b.read_text(encoding="utf-8", errors="replace").splitlines(keepends=True)
+            a_lines = a.read_text(encoding="utf-8", errors="replace").splitlines(
+                keepends=True
+            )
+            b_lines = b.read_text(encoding="utf-8", errors="replace").splitlines(
+                keepends=True
+            )
         except OSError as exc:
             return _err("diff", call.path, str(exc))
 
-        diff = list(difflib.unified_diff(
-            a_lines, b_lines,
-            fromfile=str(a), tofile=str(b), lineterm="",
-        ))
+        diff = list(
+            difflib.unified_diff(
+                a_lines,
+                b_lines,
+                fromfile=str(a),
+                tofile=str(b),
+                lineterm="",
+            )
+        )
 
         if not diff:
             return _ok("diff", call.path, IDENTICAL=True)
 
         diff_text = "\n".join(diff)
         truncated = len(diff_text) > call.max_chars
-        result = _ok("diff", call.path,
+        result = _ok(
+            "diff",
+            call.path,
             IDENTICAL=False,
             DIFF_TEXT=diff_text[: call.max_chars] if truncated else diff_text,
         )

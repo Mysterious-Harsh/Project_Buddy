@@ -160,33 +160,33 @@ class PlannerResult(BuddyBaseModel):
     {
       "status": "success" | "followup" | "refusal",
       "message": "",        // followup question or refusal reason; "" on success
-      "responder_note": "", // briefing for Responder; populated on success only
+      "responder_instruction": "", // briefing for Responder; populated on success only
       "steps": [ ... ]
     }
 
     Invariants:
-    - status="success"  => steps non-empty, message="", responder_note non-empty
-    - status="followup" => steps=[], message non-empty, responder_note=""
-    - status="refusal"  => steps=[], message non-empty, responder_note=""
+    - status="success"  => steps non-empty, message="", responder_instruction non-empty
+    - status="followup" => steps=[], message non-empty, responder_instruction=""
+    - status="refusal"  => steps=[], message non-empty, responder_instruction=""
     """
 
     status: Literal["success", "followup", "refusal"] = "success"
     message: str = ""
-    responder_note: str = ""
+    responder_instruction: str = ""
 
     steps: List[PlannerStep] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _validate_planner_contract(self) -> "PlannerResult":
         self.message = (self.message or "").strip()
-        self.responder_note = (self.responder_note or "").strip()
+        self.responder_instruction = (self.responder_instruction or "").strip()
 
         if self.status == "followup":
             if not self.message:
                 raise ValueError("status=followup requires non-empty message")
             if self.steps:
                 raise ValueError("status=followup requires steps=[]")
-            self.responder_note = ""
+            self.responder_instruction = ""
             return self
 
         if self.status == "refusal":
@@ -194,7 +194,7 @@ class PlannerResult(BuddyBaseModel):
                 raise ValueError("status=refusal requires non-empty message")
             if self.steps:
                 raise ValueError("status=refusal requires steps=[]")
-            self.responder_note = ""
+            self.responder_instruction = ""
             return self
 
         # success branch

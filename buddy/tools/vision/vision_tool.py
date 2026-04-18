@@ -14,16 +14,14 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional
+import asyncio
 
 from buddy.logger.logger import get_logger
 from buddy.prompts.vision_prompts import (
     VISION_TOOL_PROMPT,
     VISION_TOOL_CALL_FORMAT,
 )
-from buddy.tools.vision.image_encoder import (
-    encode_image,
-    is_image_path,
-)
+from buddy.tools.vision.image_encoder import is_image_path
 
 logger = get_logger("vision_tool")
 
@@ -36,15 +34,17 @@ _SUPPORTED_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tiff", ".
 # Call schema
 # ==========================================================
 
+
 @dataclass
 class VisionCall:
-    paths: List[str]   # one or more absolute image paths
-    query: str         # what to find / answer about the image(s)
+    paths: List[str]  # one or more absolute image paths
+    query: str  # what to find / answer about the image(s)
 
 
 # ==========================================================
 # Tool
 # ==========================================================
+
 
 class VisionTool:
     """
@@ -127,7 +127,7 @@ class VisionTool:
 
     # ── Execute ────────────────────────────────────────────
 
-    def execute(
+    async def execute(
         self,
         call: VisionCall,
         *,
@@ -143,12 +143,16 @@ class VisionTool:
         Returns a result dict compatible with the executor/responder pipeline.
         """
         if brain is None:
-            logger.error("vision_tool.execute called without brain — cannot analyze image")
+            logger.error(
+                "vision_tool.execute called without brain — cannot analyze image"
+            )
             return {
                 "OK": False,
                 "ACTION": "analyze",
-                "PATH": call.path,
-                "ERROR": "Vision tool requires brain access. This is a configuration error.",
+                "PATHS": call.paths,
+                "ERROR": (
+                    "Vision tool requires brain access. This is a configuration error."
+                ),
             }
 
         # Check vision capability (best-effort; don't block if model_selector unavailable)
@@ -156,7 +160,7 @@ class VisionTool:
 
         filenames = ", ".join(os.path.basename(p) for p in call.paths)
         if on_progress:
-            on_progress(f"Analyzing image(s): {filenames}", False)
+            on_progress(f"Analysing · {filenames}", False)
 
         logger.info(
             "vision_tool.execute | paths=%r query=%r",
@@ -164,13 +168,16 @@ class VisionTool:
             call.query[:80],
         )
 
-        result = brain.run_vision(
+        result = await asyncio.to_thread(
+            brain.run_vision,
             image_paths=call.paths,
             query=call.query,
         )
 
         if "error" in result:
-            logger.warning("vision_tool failed | paths=%r error=%r", call.paths, result["error"])
+            logger.warning(
+                "vision_tool failed | paths=%r error=%r", call.paths, result["error"]
+            )
             return {
                 "OK": False,
                 "ACTION": "analyze",
@@ -206,6 +213,7 @@ class VisionTool:
 # Vision capability check (non-blocking warning)
 # ==========================================================
 
+
 def _warn_if_not_vision_capable(brain: Any) -> None:
     """
     Log a warning if the active model is not flagged as vision_capable.
@@ -214,8 +222,11 @@ def _warn_if_not_vision_capable(brain: Any) -> None:
     """
     try:
         from buddy.buddy_core.model_selector import LLMOption
+
         state = getattr(brain, "_state", None) or getattr(brain, "state", None)
-        model: Optional[LLMOption] = getattr(state, "llm_model", None) if state else None
+        model: Optional[LLMOption] = (
+            getattr(state, "llm_model", None) if state else None
+        )
         if model is not None and not getattr(model, "vision_capable", False):
             logger.warning(
                 "vision_tool: model '%s' (family=%s) is not flagged vision_capable. "
@@ -230,6 +241,7 @@ def _warn_if_not_vision_capable(brain: Any) -> None:
 # ==========================================================
 # Registry entry point
 # ==========================================================
+
 
 def get_tool() -> VisionTool:
     return VisionTool()

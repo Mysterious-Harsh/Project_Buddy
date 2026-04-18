@@ -2,24 +2,51 @@
 # BUDDY CONFIGURATION
 # =========================================
 
+# -----------------------------------------
+# General
+# -----------------------------------------
 [general]
 name = "Buddy"
 sleep_after_idle_sec = 5
 
 # -----------------------------------------
 # Bootstrap
+# strict_integrity: if true, any integrity violation aborts boot.
+#                   Set false only for debugging — Buddy may be unstable.
+# force_model_reselect: force the model selector UI even if a saved choice exists.
+# force_vision_reselect: force vision setup even if a saved choice exists.
 # -----------------------------------------
 [bootstrap]
 show_boot_ui = true
+strict_integrity = true
 download_models = true
 force_model_reselect = false
 force_vision_reselect = false
 
 # -----------------------------------------
 # LLM (llama.cpp — llama-server)
-# model_gguf: leave EMPTY — [model_choice] is the single source of truth.
-#             Set only to manually force a specific GGUF regardless of model_choice.
+#
+# override:     false → dynamic mode (hardware-aware model selector + context budget).
+#               true  → manual mode: model_gguf MUST be set; host/port/server_args
+#                        used exactly as written; model selector and context budget
+#                        are both skipped entirely.
+#
+# model_gguf:   leave EMPTY in dynamic mode — model_choice is the source of truth.
+#               REQUIRED when override = true.
+#
+# use_external: true → connect to an already-running llama-server at external_url
+#               instead of starting a local one. Falls back to local if unreachable.
+# external_url: full base URL of the external server (e.g. "http://192.168.1.10:8080").
+#               Only used when use_external = true.
+#
+# port:         preferred port for the local server. A free port is chosen
+#               automatically if this one is already in use (dynamic mode only).
+#
+# server_args:  extra flags passed to llama-server.
+#               Dynamic mode: --ctx-size is replaced by the computed context budget.
+#               Override mode: args are passed exactly as written — no substitution.
 # -----------------------------------------
+
 [llama]
 base_url = "http://127.0.0.1:8080"
 host = "127.0.0.1"
@@ -27,7 +54,9 @@ port = 8080
 model_gguf = ""
 model_name = "local-model"
 ready_timeout_s = 180.0
-scan_ports = [8080, 8081, 8082, 8088, 8888, 11434]
+override = false
+use_external = false
+external_url = ""
 server_args = [
   "--ctx-size", "16384",
   "--threads", "8",
@@ -37,10 +66,12 @@ server_args = [
   "--no-webui"
 ]
 
+
+
 # -----------------------------------------
 # Voice & Audio
-# speech_trigger_mult: raise for noisy rooms, lower for quiet ones
-# beam_size: 1 = fastest, 5 = more accurate
+# speech_trigger_mult: raise for noisy rooms, lower for quiet ones.
+# beam_size: 1 = fastest, 5 = more accurate.
 # -----------------------------------------
 [voice]
 enabled = true
@@ -53,7 +84,7 @@ speech_trigger_mult = 3.0
 whisper_vad_filter = true
 use_silero_vad = true
 enable_beep = true
-beam_size = 5
+beam_size = 2
 
 # -----------------------------------------
 # Memory
@@ -73,11 +104,25 @@ permissions_auto_approve = false
 # -----------------------------------------
 # Web Search
 # engine: "searxng" | "duckduckgo"
+#
+# searxng_override:     true → use searxng_url exactly as written; no free-port
+#                       selection, no install/setup. SearXNG must already be running.
+#
+# searxng_use_external: true → connect to searxng_external_url instead of starting
+#                       a local instance. Falls back to local if unreachable.
+# searxng_external_url: full URL of the external SearXNG (e.g. "http://10.0.0.5:8888").
+#                       Only used when searxng_use_external = true.
+#
+# searxng_url:          preferred URL/port for the local SearXNG instance.
+#                       A free port is chosen automatically if this one is in use
+#                       (dynamic mode only — ignored when searxng_override = true).
 # -----------------------------------------
 [web_search]
 engine = "duckduckgo"
 searxng_url = "http://127.0.0.1:8888"
-searxng_scan_ports = [8888, 8889, 8890, 4000, 5000]
+searxng_override = false
+searxng_use_external = false
+searxng_external_url = ""
 
 # -----------------------------------------
 # Features
@@ -103,18 +148,19 @@ max_conversation_turn = 12
 
 # -----------------------------------------
 # Dynamic Context Budget
-# Auto-computed from hardware. Set override = true to pin manual values.
+# Auto-computed from hardware at boot. Ignored when [llama] override = true.
+# Set override = true here to pin manual values instead of hardware auto-compute.
 # -----------------------------------------
 [context_budget]
 override = false
 n_ctx = 16384
 recent_turns = 14
 top_k_memories = 10
-pre_rerank_k = 20
+pre_rerank_k = 12
 
-# ============================================================
+# -----------------------------------------
 # Vector Store
-# ============================================================
+# -----------------------------------------
 [vector_store]
 backend = "local"
 
@@ -124,10 +170,11 @@ method = "qwen3"
 qwen_model = "Qwen/Qwen3-Reranker-0.6B"
 dense_threshold = 0.24
 rerank_threshold = 0.24
-rerank_min_keep = 4
+rerank_min_keep = 0
+skip_rerank_above = 0.92
 
 # -----------------------------------------
-# User (set by first-boot wizard)
+# User (set by first-boot wizard — do not edit manually)
 # -----------------------------------------
 [user]
 language = "en"

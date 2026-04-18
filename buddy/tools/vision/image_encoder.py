@@ -10,19 +10,10 @@ import os
 from pathlib import Path
 from typing import List
 
-_IMAGE_EXTENSIONS = frozenset({".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tiff", ".tif"})
+_IMAGE_EXTENSIONS = frozenset(
+    {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tiff", ".tif"}
+)
 _MAX_SIZE_BYTES = 20 * 1024 * 1024  # 20 MB guard
-
-_MIME_MAP: dict = {
-    ".png":  "image/png",
-    ".jpg":  "image/jpeg",
-    ".jpeg": "image/jpeg",
-    ".webp": "image/webp",
-    ".gif":  "image/gif",
-    ".bmp":  "image/bmp",
-    ".tiff": "image/tiff",
-    ".tif":  "image/tiff",
-}
 
 
 def is_image_path(token: str) -> bool:
@@ -55,7 +46,8 @@ def encode_image(path: str) -> str:
     ext = p.suffix.lower()
     if ext not in _IMAGE_EXTENSIONS:
         raise ValueError(
-            f"Unrecognized image extension '{ext}'. Supported: {sorted(_IMAGE_EXTENSIONS)}"
+            f"Unrecognized image extension '{ext}'. Supported:"
+            f" {sorted(_IMAGE_EXTENSIONS)}"
         )
 
     size = p.stat().st_size
@@ -69,20 +61,65 @@ def encode_image(path: str) -> str:
     with open(p, "rb") as f:
         data = f.read()
 
-    return base64.b64encode(data).decode("ascii")
+    return base64.b64encode(data).decode("utf-8")
 
 
 def encode_image_to_data_uri(path: str) -> str:
     """
-    Read an image file and return a data URI: data:image/png;base64,...
+    Read an image file and return a data URI for /v1/chat/completions image_url.
 
-    Used by llama_client.chat(images=[...]) for the OAI /v1/chat/completions
-    multimodal format. Reuses encode_image() for all validation.
+    JPEG/PNG  → read bytes directly, no conversion.
+    All other formats (WEBP, GIF, BMP, TIFF, ...) → convert to PNG via Pillow:
+      - Animated formats: first frame only.
+      - Transparency preserved: RGBA if alpha channel present, RGB otherwise.
+
+    Raises:
+        FileNotFoundError / ValueError / OSError  — same as encode_image()
+        ImportError  — non-JPEG/PNG image but Pillow not installed
     """
     p = Path(path).expanduser().resolve()
-    mime = _MIME_MAP.get(p.suffix.lower(), "image/jpeg")
-    b64 = encode_image(path)
-    return f"data:{mime};base64,{b64}"
+    ext = p.suffix.lower()
+
+    # JPEG and PNG: pass bytes through directly
+    if ext in (".jpg", ".jpeg"):
+        return f"data:image/jpeg;base64,{encode_image(path)}"
+    if ext == ".png":
+        return f"data:image/png;base64,{encode_image(path)}"
+
+    # All other formats: validate first, then convert via Pillow
+    # encode_image() runs all size/existence/extension checks
+    encode_image(path)  # validation only — we discard the return value
+
+    try:
+        from PIL import Image  # type: ignore
+    except ImportError:
+        raise ImportError(
+            f"Pillow is required to convert {ext!r} images to PNG. "
+            "Install with: pip install Pillow"
+        )
+
+    import io
+
+    with Image.open(str(p)) as img:
+        # Animated formats (GIF, WEBP): use first frame only
+        try:
+            img.seek(0)
+        except EOFError:
+            pass
+
+        # Preserve alpha channel if present, otherwise strip to RGB
+        has_alpha = img.mode in ("RGBA", "LA", "PA") or (
+            img.mode == "P" and "transparency" in img.info
+        )
+        target_mode = "RGBA" if has_alpha else "RGB"
+        if img.mode != target_mode:
+            img = img.convert(target_mode)
+
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+
+    b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
+    return f"data:image/png;base64,{b64}"
 
 
 def extract_image_paths(text: str) -> List[str]:

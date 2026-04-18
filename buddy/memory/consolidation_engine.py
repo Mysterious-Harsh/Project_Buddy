@@ -210,6 +210,18 @@ _AROUSAL_KEYWORDS: frozenset = frozenset([
 # ── v4.1-patch: ALL-CAPS emotional emphasis detector (PATCH-3) ───────────────
 _CAPS_RE = re.compile(r"\b[A-Z]{3,}\b")
 
+# ── v4.1p2: Negation window — words that negate a following arousal keyword ──
+# If any of these appear within 2 tokens before a keyword, the keyword hit is
+# discounted.  This prevents "not in pain" or "no longer desperate" from
+# falsely boosting arousal.
+_NEGATION_WORDS: frozenset = frozenset([
+    "not", "no", "never", "neither", "nor", "without", "hardly", "barely",
+    "scarcely", "none", "nothing", "nobody", "nowhere", "cannot", "can't",
+    "won't", "don't", "doesn't", "didn't", "isn't", "aren't", "wasn't",
+    "weren't", "hasn't", "haven't", "hadn't", "shouldn't", "wouldn't",
+    "couldn't", "no longer", "not really", "not at all",
+])
+
 # ── v4.1-patch: importance threshold for hard-delete protection (PATCH-1) ────
 _HARD_DELETE_IMP_PROTECT: float = 0.80
 
@@ -457,18 +469,67 @@ def _build_access_times(m: MemoryEntry, *, now: float) -> List[float]:
 # =============================================================================
 
 
+def _negation_window(tokens: list[str], idx: int, window: int = 2) -> bool:
+    """Return True if any of the `window` tokens before index idx is a negation word.
+
+    Handles both single-word negations ("not", "never") and two-word phrases
+    ("no longer", "not at all") by checking bigrams in the window too.
+    """
+    start = max(0, idx - window)
+    pre = tokens[start:idx]
+    # Single-word negations
+    for t in pre:
+        if t in _NEGATION_WORDS:
+            return True
+    # Two-word phrases (e.g. "no longer", "not at all")
+    for i in range(len(pre) - 1):
+        bigram = pre[i] + " " + pre[i + 1]
+        if bigram in _NEGATION_WORDS:
+            return True
+    return False
+
+
 def _compute_arousal(m: MemoryEntry) -> float:
     """Estimate emotional arousal from text content. Returns [0, 1].
 
     v4.1 PATCH-3: Added ALL-CAPS detection. Writing in CAPS (URGENT, NEVER,
     CRITICAL) is a genuine emotional emphasis signal in human text production.
     Weight distribution: imp=0.50, keywords=0.30, caps=0.12, punct=0.08.
+
+    v4.1p2 FIX: Negation-aware keyword scoring.
+    "I was not in pain" and "not excited" previously scored as aroused.
+    Now each keyword hit is discounted if any negation word appears within
+    2 tokens before it (sliding window check on tokenised text).
     """
     text = str(getattr(m, "text", "") or "").lower()
     text_raw = str(getattr(m, "text", "") or "")
     imp = float(getattr(m, "importance", 0.0) or 0.0)
 
-    kw_hits = sum(1 for kw in _AROUSAL_KEYWORDS if kw in text)
+    # Tokenise once for negation-window checks
+    tokens = text.split()
+
+    kw_hits = 0
+    for kw in _AROUSAL_KEYWORDS:
+        if kw not in text:
+            continue
+        # Multi-word keywords (e.g. "no longer" in the keyword set are negations,
+        # not arousal terms, so they won't appear here — all arousal keywords
+        # are single tokens or hyphenated).
+        # Find the position of each keyword token and check negation window.
+        kw_tokens = kw.split()
+        kw_len = len(kw_tokens)
+        for i, tok in enumerate(tokens):
+            # Match single-token keyword
+            if kw_len == 1 and tok == kw:
+                if not _negation_window(tokens, i):
+                    kw_hits += 1
+                break
+            # Multi-token keyword (e.g. compound phrases)
+            if i + kw_len <= len(tokens) and tokens[i: i + kw_len] == kw_tokens:
+                if not _negation_window(tokens, i):
+                    kw_hits += 1
+                break
+
     kw_score = min(1.0, kw_hits / 3.0)
 
     punct = text.count("!") + text.count("?")
@@ -503,12 +564,28 @@ def _compute_temporal_gradient(m: MemoryEntry, *, now: float) -> float:
     This is additive, not multiplicative, to avoid over-amplifying
     already-strong memories.
 
+    BUG FIX (v4.1p2): The reference point is now max(created_at, last_accessed).
+    The Murre & Dros 24h bump is specifically about un-replayed memories
+    consolidating during the first sleep after encoding.  If a memory was
+    accessed at hour 12, that access resets the consolidation trace — the
+    bump should be computed relative to the LAST replay, not the encoding time.
+    Using created_at alone gave a spurious boost to memories that had already
+    been retrieved and reinforced.
+
     Returns: float in [0, _TEMPORAL_GRADIENT_MAX]
     """
     created_at = float(getattr(m, "created_at", now) or now)
-    age_sec = max(0.0, now - created_at)
+    last_accessed = getattr(m, "last_accessed", None)
+    # Use the most recent replay event as the reference point.
+    # If the memory has never been accessed since encoding, last_accessed is None
+    # and we fall back to created_at (correct — no replay has occurred).
+    if last_accessed is not None:
+        reference = max(float(created_at), float(last_accessed))
+    else:
+        reference = float(created_at)
+    age_sec = max(0.0, now - reference)
     dist = age_sec - _TEMPORAL_GRADIENT_PEAK_SEC
-    # Gaussian centered at 24h
+    # Gaussian centered at 24h from the last replay reference
     boost = _TEMPORAL_GRADIENT_MAX * math.exp(
         -(dist * dist) / (2 * _TEMPORAL_GRADIENT_WIDTH_SEC**2)
     )
@@ -1086,7 +1163,7 @@ def _apply_summary_cluster(
     v4: provisional window extended to budget.provisional_window_days (14d) [P12].
     """
     items: List[Tuple[float, str]] = []
-    latest_memory_creation: float = 0.0
+    all_creation_times: List[float] = []
     max_access_count: int = 0
     for mid in cluster.ids:
         m = id_map.get(mid)
@@ -1096,13 +1173,23 @@ def _apply_summary_cluster(
         created_at = getattr(m, "created_at", now)
         access_count = getattr(m, "access_count", 0)
         if created_at:
-            if created_at > latest_memory_creation:
-                latest_memory_creation = created_at
+            all_creation_times.append(float(created_at))
         if access_count:
             if access_count > max_access_count:
                 max_access_count = access_count
         if text:
             items.append((created_at, text))
+
+    # BUG FIX (v4.1p2): Use centroid (mean) of cluster member timestamps instead
+    # of the newest member's timestamp.  Using the newest member caused a summary
+    # of old memories to inherit a recent creation time, triggering a spurious 24h
+    # temporal gradient boost when the newest member happened to be ~24h old.
+    # The centroid better represents "when did this cluster of knowledge form?"
+    centroid_creation: float = (
+        sum(all_creation_times) / len(all_creation_times)
+        if all_creation_times
+        else now
+    )
 
     if not items:
         raise ValueError("cluster has no usable text items")
@@ -1162,7 +1249,7 @@ def _apply_summary_cluster(
         role="buddy",
         memory_type="long" if cluster.avg_strength >= 0.65 else "short",
         importance=importance,
-        created_at=latest_memory_creation,
+        created_at=centroid_creation,
         last_accessed=None,
         access_count=max_access_count,
         consolidation_status="candidate",

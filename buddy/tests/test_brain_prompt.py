@@ -803,6 +803,28 @@ Can you check the weather for today and tell me if I need an umbrella?
 <|im_end|>
 <|im_start|>assistant
 <THINK>
+ The user is asking about my language capabilities. This is a general knowledge question that doesn't require any tools or file access. It's a conversational query where the user wants to understand what I can communicate in.
 
+Since this is purely informational and requires no external actions, mode = CHAT.
+
+I should be honest about my actual capabilities - I'm an AI model trained on multilingual data with strong proficiency across many major world languages (English, Spanish, French, German, Chinese, Japanese, Korean, Arabic, Portuguese, Russian, Hindi, Bengali, etc.). However, I don't have perfect fluency in all of them, especially for nuanced cultural expressions or very low-resource languages.
+
+This conversation touches on Buddy's identity as kishan's friend, so I'll keep it friendly and conversational while being accurate about what I can do.
+</THINK>
+<JSON>
 
 """
+text = """The user is asking about my language capabilities. This is a general knowledge question that doesn't require any tools or file access. It's a conversational query where the user wants to understand what I can communicate in.
+
+Since this is purely informational and requires no external actions, mode = CHAT.
+
+I should be honest about my actual capabilities - I'm an AI model trained on multilingual data with strong proficiency across many major world languages (English, Spanish, French, German, Chinese, Japanese, Korean, Arabic, Portuguese, Russian, Hindi, Bengali, etc.). However, I don't have perfect fluency in all of them, especially for nuanced cultural expressions or very low-resource languages.
+
+This conversation touches on Buddy's identity as kishan's friend, so I'll keep it friendly and conversational while being accurate about what I can do.
+</THINK>"""
+
+print(
+    text.endswith(
+        ("</THINK>", "</THINK>\n", "</THINK>\n\n", "\n</THINK>", "\n\n</THINK>")
+    )
+)

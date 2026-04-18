@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import sqlite3
 import tempfile
@@ -48,9 +49,6 @@ class SQLiteStore:
         # check_same_thread=False because MemoryManager can call across threads (tests + CLI)
         self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
-
-        # Cache prepared statements for frequently used operations
-        self._prepared_statements = {}
 
         self._apply_pragmas()
         self._init_schema()
@@ -252,12 +250,6 @@ class SQLiteStore:
         except (TypeError, ValueError):
             return default
 
-    def _get_prepared_statement(self, sql: str) -> sqlite3.Cursor:
-        """Cache prepared statements to avoid recompilation overhead."""
-        if sql not in self._prepared_statements:
-            self._prepared_statements[sql] = self._conn.prepare(sql)  # type: ignore
-        return self._prepared_statements[sql]
-
     def _row_to_entry(self, row: sqlite3.Row) -> MemoryEntry:
         """
         Optimized row-to-entry conversion with minimal object creation.
@@ -430,6 +422,25 @@ class SQLiteStore:
             return None
         return self._row_to_entry(row)
 
+    def batch_get_memories(self, memory_ids: List[str]) -> Dict[str, MemoryEntry]:
+        """
+        Fetch multiple memories in a single query.
+
+        Returns:
+            Dict mapping id → MemoryEntry for every id found (deleted excluded).
+            Missing ids are silently absent from the result.
+        """
+        ids = [str(mid) for mid in memory_ids if mid]
+        if not ids:
+            return {}
+        placeholders = ",".join("?" * len(ids))
+        cur = self._conn.cursor()
+        cur.execute(
+            f"SELECT * FROM memories WHERE id IN ({placeholders}) AND deleted=0;",
+            ids,
+        )
+        return {str(row["id"]): self._row_to_entry(row) for row in cur.fetchall()}
+
     def list_recent(self, limit: int = 50) -> List[MemoryEntry]:
         """Optimized recent memories listing with early termination."""
         limit = min(int(limit), 1000)  # Prevent excessive memory usage
@@ -504,26 +515,99 @@ class SQLiteStore:
         )
         self._conn.commit()
 
+    # Spacing-effect constants (Cepeda et al. 2006)
+    # Boost = BASE * sigmoid(hours_since_last_access / HALF_LIFE_HOURS)
+    # A retrieval after 24h gap earns ~2× the boost of an immediate re-retrieval.
+    # Cap prevents a single very-spaced touch from over-boosting.
+    _TOUCH_BASE: float = 0.10        # max boost per touch
+    _TOUCH_HALF_LIFE_H: float = 24.0  # gap at which sigmoid = 0.5 → boost = BASE/2
+    _TOUCH_MIN: float = 0.01          # minimum boost even for massed retrieval
+
+    def _spacing_boost(self, last_accessed: Optional[float], now: float) -> float:
+        """Compute spacing-weighted strength bump for a single touch.
+
+        Cepeda et al. (2006) show spaced retrievals are exponentially more
+        beneficial than massed ones.  We model this as:
+
+            boost = BASE × sigmoid(hours_gap / HALF_LIFE)
+
+        where hours_gap is the interval since the last access.
+        - No prior access (first retrieval): hours_gap = 0 → boost ≈ BASE/2
+        - Accessed 24h ago: hours_gap = 24 → boost ≈ BASE/2   (inflection)
+        - Accessed 72h ago: hours_gap = 72 → boost ≈ BASE×0.95 (near max)
+        - Accessed 1s ago (massed): hours_gap ≈ 0 → boost ≈ _TOUCH_MIN
+
+        Returns float in [_TOUCH_MIN, _TOUCH_BASE].
+        """
+        if last_accessed is None:
+            hours_gap = 0.0
+        else:
+            hours_gap = max(0.0, (now - float(last_accessed)) / 3600.0)
+        sig = 1.0 / (1.0 + math.exp(-hours_gap / self._TOUCH_HALF_LIFE_H))
+        boost = self._TOUCH_BASE * sig
+        return float(max(self._TOUCH_MIN, min(self._TOUCH_BASE, boost)))
+
     def touch(self, memory_id: str) -> None:
         """Update access metadata and bump consolidation_strength (P17).
 
-        Repeated recall reinforces a memory (+0.05 per touch, capped at 1.0),
-        consistent with ACT-R base-level learning.
+        Repeated recall reinforces a memory, consistent with ACT-R base-level
+        learning.  Boost is spacing-weighted (Cepeda et al. 2006): retrievals
+        after longer gaps strengthen the memory more than massed re-retrievals.
         """
+        now = time.time()
+        # Read last_accessed first so we can compute spacing-weighted boost.
         cur = self._conn.cursor()
+        cur.execute(
+            "SELECT last_accessed FROM memories WHERE id=? AND deleted=0;",
+            (str(memory_id),),
+        )
+        row = cur.fetchone()
+        if row is None:
+            return
+        last_accessed = row[0]
+        boost = self._spacing_boost(last_accessed, now)
         cur.execute(
             """
             UPDATE memories
             SET last_accessed=?,
                 access_count=access_count+1,
-                consolidation_strength=MIN(1.0, consolidation_strength+0.05)
+                consolidation_strength=MIN(1.0, consolidation_strength+?)
             WHERE id=? AND deleted=0;
             """,
-            (time.time(), str(memory_id)),
+            (now, boost, str(memory_id)),
         )
-        # Only commit if update actually happened (affected_rows > 0)
         if cur.rowcount > 0:
             self._conn.commit()
+
+    def batch_touch(self, memory_ids: List[str]) -> None:
+        """Touch multiple memories with spacing-weighted strength boosts (P-perf)."""
+        if not memory_ids:
+            return
+        now = time.time()
+        placeholders = ",".join("?" * len(memory_ids))
+        cur = self._conn.cursor()
+        cur.execute(
+            f"SELECT id, last_accessed FROM memories "
+            f"WHERE id IN ({placeholders}) AND deleted=0;",
+            [str(mid) for mid in memory_ids],
+        )
+        rows = {str(row[0]): row[1] for row in cur.fetchall()}
+        params = []
+        for mid in memory_ids:
+            last_accessed = rows.get(str(mid))
+            boost = self._spacing_boost(last_accessed, now)
+            params.append((now, boost, str(mid)))
+        cur.executemany(
+            """
+            UPDATE memories
+            SET last_accessed=?,
+                access_count=access_count+1,
+                consolidation_strength=MIN(1.0, consolidation_strength+?)
+            WHERE id=? AND deleted=0;
+            """,
+            params,
+        )
+        self._conn.commit()
 
     def soft_delete(self, memory_id: str) -> None:
         cur = self._conn.cursor()
@@ -616,15 +700,13 @@ class SQLiteStore:
         Consolidation candidates listing.
 
         Rule:
-        - eligible if COALESCE(last_consolidated_at, created_at) <= now - 2 days
+        - eligible if last_consolidated_at is NULL (never processed)
+          OR last_consolidated_at < now - cooldown_seconds (cooldown expired)
         - includes flash/short/long INCLUDING summary memories
         - excludes deleted rows only
-        - orders by most recently used (last_accessed fallback to created_at)
+        - orders by least-recently-processed first, then importance desc
         """
         limit = min(int(limit), 1000)
-
-        now = time.time()
-        min_age_sec = 1.0 * 24.0 * 3600.0  # 2 days
         cutoff = time.time() - cooldown_seconds
 
         cur = self._conn.cursor()
@@ -1060,8 +1142,6 @@ class SQLiteStore:
     # ------------------------------------------------------
     def close(self) -> None:
         try:
-            # Clear prepared statement cache
-            self._prepared_statements.clear()
             self._conn.close()
         except Exception:
             pass

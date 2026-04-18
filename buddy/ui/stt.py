@@ -63,6 +63,19 @@ try:
 except ImportError:
     pass
 
+# ── Optional scipy resampling (polyphase, anti-aliased) ──────────────────────
+# Preferred over linear interpolation: applies a low-pass filter before
+# decimation so frequencies above the output Nyquist (8 kHz) don't alias
+# back into the speech band. Matters for fricatives (s, f, sh, z) at 48kHz.
+_SCIPY_RESAMPLE_AVAILABLE = False
+try:
+    from math import gcd as _gcd
+    from scipy.signal import resample_poly as _resample_poly  # type: ignore
+
+    _SCIPY_RESAMPLE_AVAILABLE = True
+except ImportError:
+    pass
+
 # =============================================================================
 # Tuning constants
 # =============================================================================
@@ -401,14 +414,28 @@ def _log_audio_devices() -> None:
 
 def _resample_to_16k(pcm_i16: np.ndarray, src_sr: int) -> np.ndarray:
     """
-    Resample int16 PCM from src_sr to 16000 Hz using linear interpolation.
+    Resample int16 PCM from src_sr to 16000 Hz.
     Returns a float32 array in [-1, 1] ready for Silero / Whisper.
-    Fast enough for real-time use: O(n) numpy ops, no external deps.
+
+    Uses scipy polyphase resampling when available (preferred):
+      • Applies a proper anti-alias low-pass filter before decimation.
+      • Prevents high-frequency speech content (fricatives: s, f, sh, z)
+        from folding back into the 0–8 kHz band at 48→16 kHz ratios.
+    Falls back to linear interpolation when scipy is not installed.
     If src_sr == 16000 the array is just normalised and returned.
     """
     audio = pcm_i16.astype(np.float32) / 32768.0
     if src_sr == DEFAULT_SAMPLE_RATE:
         return audio
+    if _SCIPY_RESAMPLE_AVAILABLE:
+        # Polyphase resampling: integer up/down ratios computed from GCD.
+        # 48kHz→16kHz: gcd=16000, up=1, down=3  (fast: tiny filter).
+        # 44.1kHz→16kHz: gcd=200, up=160, down=441 (still sub-ms for 32ms clips).
+        g = _gcd(DEFAULT_SAMPLE_RATE, int(src_sr))
+        up = DEFAULT_SAMPLE_RATE // g
+        down = int(src_sr) // g
+        return _resample_poly(audio, up, down).astype(np.float32)
+    # Fallback: linear interpolation — fast, no deps, acceptable quality at 16kHz.
     n_src = len(audio)
     n_dst = int(round(n_src * DEFAULT_SAMPLE_RATE / src_sr))
     if n_dst <= 0:
@@ -450,6 +477,9 @@ def _make_beep_pcm(
 
 _MODEL_CACHE: dict = {}
 _MODEL_CACHE_LOCK = threading.Lock()
+# Per-key locks prevent two threads from loading the same model simultaneously.
+_MODEL_LOAD_LOCKS: dict = {}
+_MODEL_LOAD_LOCKS_LOCK = threading.Lock()
 
 
 def _load_whisper(
@@ -458,37 +488,51 @@ def _load_whisper(
     """
     Load (or return cached) WhisperModel, trying compute-types in preference order.
     Returns (model, effective_compute_type).
-    Thread-safe: two threads loading the same key won't double-load.
+    Thread-safe: per-key locks prevent two threads from double-loading the same model.
     """
     for ct in _compute_type_candidates(user_ct):
         key = f"{size}|{download_root}|{ct}"
+
+        # Fast path: already cached.
         with _MODEL_CACHE_LOCK:
             if key in _MODEL_CACHE:
                 return _MODEL_CACHE[key], ct
 
-        try:
-            try:
-                wm = WhisperModel(
-                    size,
-                    device="auto",
-                    compute_type=ct,
-                    download_root=download_root,
-                    num_workers=1,
-                    cpu_threads=4,
-                )
-            except TypeError:
-                # Older faster-whisper doesn't accept num_workers / cpu_threads
-                wm = WhisperModel(
-                    size, device="auto", compute_type=ct, download_root=download_root
-                )
+        # Acquire a per-key load lock so only one thread loads each key.
+        with _MODEL_LOAD_LOCKS_LOCK:
+            if key not in _MODEL_LOAD_LOCKS:
+                _MODEL_LOAD_LOCKS[key] = threading.Lock()
+            key_lock = _MODEL_LOAD_LOCKS[key]
 
+        with key_lock:
+            # Re-check: another thread may have loaded while we waited.
             with _MODEL_CACHE_LOCK:
-                _MODEL_CACHE[key] = wm
-            logger.info("[STT] Whisper loaded: size=%s compute_type=%s", size, ct)
-            return wm, ct
+                if key in _MODEL_CACHE:
+                    return _MODEL_CACHE[key], ct
 
-        except Exception as exc:
-            logger.debug("[STT] Whisper compute_type=%s failed: %r", ct, exc)
+            try:
+                try:
+                    wm = WhisperModel(
+                        size,
+                        device="auto",
+                        compute_type=ct,
+                        download_root=download_root,
+                        num_workers=1,
+                        cpu_threads=4,
+                    )
+                except TypeError:
+                    # Older faster-whisper doesn't accept num_workers / cpu_threads
+                    wm = WhisperModel(
+                        size, device="auto", compute_type=ct, download_root=download_root
+                    )
+
+                with _MODEL_CACHE_LOCK:
+                    _MODEL_CACHE[key] = wm
+                logger.info("[STT] Whisper loaded: size=%s compute_type=%s", size, ct)
+                return wm, ct
+
+            except Exception as exc:
+                logger.debug("[STT] Whisper compute_type=%s failed: %r", ct, exc)
 
     raise RuntimeError(f"WhisperModel '{size}' failed for all compute-type candidates")
 
@@ -626,6 +670,7 @@ class SpeechToText:
         "_cbw",
         "enable_beep",
         "_beep_pcm",
+        "on_segment_end",   # called after every segment (transcribed or rejected)
     )
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -644,6 +689,7 @@ class SpeechToText:
         on_text: Optional[Callable[[str], None]] = None,
         on_interrupt: Optional[Callable[[], None]] = None,
         on_speech_start: Optional[Callable[[], None]] = None,
+        on_segment_end: Optional[Callable[[], None]] = None,
         max_queue_frames: int = MAX_QUEUE_FRAMES,
         debug: bool = False,
         compute_type: str = "",
@@ -656,6 +702,7 @@ class SpeechToText:
         self.on_text = on_text
         self.on_interrupt = on_interrupt
         self.on_speech_start = on_speech_start
+        self.on_segment_end = on_segment_end
         self.language = language
         self.sample_rate = int(sample_rate)
         self.beam_size = int(beam_size)
@@ -690,7 +737,7 @@ class SpeechToText:
         )
 
         # ── transcription worker ─────────────────────────────────────────────
-        self._tx_q: "queue.Queue[Optional[np.ndarray]]" = queue.Queue(maxsize=8)
+        self._tx_q: "queue.Queue[Optional[Tuple[np.ndarray, int]]]" = queue.Queue(maxsize=8)
         self._tx_stop: threading.Event = threading.Event()
         self._tx_thread: Optional[threading.Thread] = None
 
@@ -799,7 +846,10 @@ class SpeechToText:
             silent = np.zeros(DEFAULT_SAMPLE_RATE // 2, dtype=np.float32)
             list(
                 self._whisper.transcribe(
-                    silent, language=self._language_norm, beam_size=1, vad_filter=False
+                    silent,
+                    language=self._language_norm,
+                    beam_size=self.beam_size,  # must match production to JIT the beam-search path
+                    vad_filter=False,
                 )[0]
             )
             logger.debug("[STT] Whisper warm-up done.")
@@ -939,11 +989,10 @@ class SpeechToText:
     def _on_speech_detected(self) -> None:
         """
         Called by both VAD back-ends the instant real speech is confirmed.
-        Plays the confirmation beep and submits the on_interrupt and
-        on_speech_start callbacks.
-        Centralising all actions here ensures they are always in sync.
+        Submits on_interrupt (cancel active response) and on_speech_start (mic UI).
+        Beep is NOT played here — it plays at segment end (do_tx=True) so it
+        never bleeds into the recording buffer via acoustic coupling.
         """
-        self._play_beep()
         self._cbw.submit(self.on_interrupt)
         self._cbw.submit(self.on_speech_start)
 
@@ -1138,6 +1187,8 @@ class SpeechToText:
             return
 
         # ── Calibration ───────────────────────────────────────────────────────
+        blocking_calib = self.calibration_sec > 0.0
+        calib_end = time.time() + self.calibration_sec if blocking_calib else 0.0
         baseline = 0.0006
         calib_energies: List[float] = []
         calib_frames = 0
@@ -1150,8 +1201,12 @@ class SpeechToText:
         # samples; at 48kHz we need 512*(48000/16000)=1536 raw samples per chunk.
         silero_raw_chunk = int(SILERO_CHUNK * vad_sr / DEFAULT_SAMPLE_RATE)
 
-        # ── Pre-roll — stores raw int16 chunks (sized by Silero chunk) ────────
-        preroll_cap = max(2, int(PREROLL_SEC * vad_sr / silero_raw_chunk) + 2)
+        # ── Pre-roll — stores raw int16 OUTER FRAMES (not Silero chunks) ────────
+        # preroll_cap must be based on outer-frame size (DEFAULT_BLOCKSIZE), not
+        # silero_raw_chunk. At 48kHz with blocksize=512: each outer frame = 10.67ms
+        # but one Silero chunk = 32ms (1536 raw samples). Using silero_raw_chunk
+        # would cap the deque at only ~181ms instead of the intended PREROLL_SEC.
+        preroll_cap = max(2, int(PREROLL_SEC * vad_sr / DEFAULT_BLOCKSIZE) + 2)
         preroll: Deque[np.ndarray] = deque(maxlen=preroll_cap)
 
         # ── Staging buffer — always consumed, never left stale ────────────────
@@ -1170,7 +1225,12 @@ class SpeechToText:
         voiced = False
         dbg_last = 0.0
 
-        logger.info("[STT/Silero] Starting (calibrating in background)…")
+        if blocking_calib:
+            logger.info(
+                "[STT/Silero] Calibrating for %.2fs — stay quiet", self.calibration_sec
+            )
+        else:
+            logger.info("[STT/Silero] Starting (background calibration)…")
 
         while self._running and not self._muted:
             # ── 1. Fetch one audio frame ──────────────────────────────────────
@@ -1200,15 +1260,19 @@ class SpeechToText:
                 calib_energies.append(e)
                 baseline = baseline * (1.0 - NOISE_ALPHA) + e * NOISE_ALPHA
                 calib_frames += 1
-                if calib_frames >= CALIB_FRAMES:
-                    baseline = max(
-                        baseline,
-                        float(np.median(np.asarray(calib_energies, dtype=np.float32))),
-                    )
-                    calibrated = True
-                    logger.info("[STT/Silero] Calibrated. baseline=%.6f", baseline)
-                if calib_frames < CALIB_GATE:
-                    continue
+                if blocking_calib:
+                    if now >= calib_end:
+                        baseline = self._finalize_baseline(baseline, calib_energies)
+                        calibrated = True
+                        logger.info("[STT/Silero] Calibrated. baseline=%.6f", baseline)
+                    continue  # block VAD triggers for the full calibration window
+                else:
+                    if calib_frames >= CALIB_FRAMES:
+                        baseline = self._finalize_baseline(baseline, calib_energies)
+                        calibrated = True
+                        logger.info("[STT/Silero] Calibrated. baseline=%.6f", baseline)
+                    if calib_frames < CALIB_GATE:
+                        continue
 
             # ── 4. Baseline adaptation (idle + quiet only) ────────────────────
             if not recording and e < baseline * CEILING_MULT:
@@ -1226,10 +1290,17 @@ class SpeechToText:
             stage_len += pcm.size
 
             ran_inference = False
+            any_voiced = False   # True if ANY chunk in this outer frame was voiced
+            chunks_run = 0       # count of non-cooldown Silero inferences this frame
             while stage_len >= silero_raw_chunk:
-                combined = np.concatenate(stage)
-                chunk_i16 = combined[:silero_raw_chunk]
-                leftover = combined[silero_raw_chunk:]
+                # Fast path: avoid np.concatenate when stage is already a single array.
+                # At 16kHz this is always the case (1 outer frame = 1 Silero chunk).
+                if len(stage) == 1:
+                    arr = stage[0]
+                else:
+                    arr = np.concatenate(stage)
+                chunk_i16 = arr[:silero_raw_chunk]
+                leftover = arr[silero_raw_chunk:]
                 stage = [leftover] if leftover.size else []
                 stage_len = leftover.size
 
@@ -1261,9 +1332,17 @@ class SpeechToText:
 
                 if not in_cooldown:
                     thr = SILERO_THRESH_END if recording else SILERO_THRESH_START
-                    voiced = speech_prob >= thr
+                    if speech_prob >= thr:
+                        any_voiced = True   # accumulate across all chunks this frame
                     ran_inference = True
+                    chunks_run += 1
                 # During cooldown: inference ran (state updated) but result ignored
+
+            # Single voiced/unvoiced verdict for this outer frame.
+            # Using any_voiced (not just the last chunk) means that if chunks 1–2
+            # are voiced and chunk 3 is unvoiced, the frame correctly counts as
+            # voiced — earlier results are no longer discarded.
+            voiced = any_voiced
 
             if in_cooldown:
                 continue
@@ -1322,7 +1401,11 @@ class SpeechToText:
                     last_voiced = now
                     below_for = 0.0
                 else:
-                    below_for += frame_sec
+                    # Accumulate silence in Silero-chunk units (always 32 ms each),
+                    # not in outer-frame units. At 48kHz the outer frame is 10.67ms
+                    # but represents 32ms of audio per Silero chunk — using frame_sec
+                    # would undercount by 3×, weakening the STOP_SUSTAIN_SEC guard.
+                    below_for += chunks_run * (SILERO_CHUNK / DEFAULT_SAMPLE_RATE)
             # Non-inference frames: hold below_for steady (neither add nor reset)
 
             time_rec = now - speech_start if speech_start else 0.0
@@ -1336,7 +1419,10 @@ class SpeechToText:
             ) or time_rec >= MAX_RECORD_SEC:
                 do_tx = time_rec >= MIN_SPEECH_SEC
                 if do_tx:
-                    self._enqueue(self._concat_i16(audio_buf))
+                    self._play_beep()
+                    self._enqueue(self._concat_i16(audio_buf), vad_sr)
+                else:
+                    self._cbw.submit(self.on_segment_end)
                 if self.debug:
                     logger.info(
                         "[STT/Silero] RECORD end | dur=%.2fs prob=%.3f → %s",
@@ -1396,6 +1482,11 @@ class SpeechToText:
         calib_frames = 0
         calib_end = 0.0
         baseline = 0.0006
+
+        # Snapshot: self.sample_rate was set to dev_sr when the stream opened.
+        # Passing it explicitly to _enqueue avoids a race if the device reconnects
+        # with a different native SR before the clip is transcribed.
+        vad_sr = self.sample_rate
 
         if blocking_calib:
             calib_end = time.time() + self.calibration_sec
@@ -1523,7 +1614,6 @@ class SpeechToText:
             # ZCR is NOT used in any trigger or keep decision.
             # Vowels (ZCR 0.010–0.025) would block vowel-initial words if gated.
             # Hum rejection is handled by onset flatness (energy envelope).
-            speech_like = True
             zcr = 0.0
             if self.debug and e >= start_thr * 0.20:
                 n = pcm.size
@@ -1533,7 +1623,6 @@ class SpeechToText:
                     if n > 1
                     else 0.0
                 )
-                speech_like = zcr >= ZCR_MIN
 
             if not recording:
                 # onset_e_win: track energy ramp for flatness check
@@ -1667,7 +1756,10 @@ class SpeechToText:
                 do_tx = time_rec >= MIN_SPEECH_SEC and not is_knock
 
                 if do_tx:
-                    self._enqueue(self._concat_i16(audio_buf))
+                    self._play_beep()
+                    self._enqueue(self._concat_i16(audio_buf), vad_sr)
+                else:
+                    self._cbw.submit(self.on_segment_end)
 
                 if self.debug:
                     voice_r = voiced_frames / total_frames if total_frames else 0.0
@@ -1694,13 +1786,14 @@ class SpeechToText:
     # Transcription worker  (stt-tx thread)
     # =========================================================================
 
-    def _enqueue(self, clip: np.ndarray) -> None:
-        """Push a clip to the transcription queue, dropping oldest if full."""
+    def _enqueue(self, clip: np.ndarray, sr: int) -> None:
+        """Push a (clip, sample_rate) pair to the transcription queue, dropping oldest if full."""
         if clip.size == 0:
             return
+        item: Tuple[np.ndarray, int] = (clip, sr)
         while True:
             try:
-                self._tx_q.put_nowait(clip)
+                self._tx_q.put_nowait(item)
                 return
             except queue.Full:
                 try:
@@ -1728,19 +1821,26 @@ class SpeechToText:
 
             if item is None:
                 break
-            if not isinstance(item, np.ndarray) or item.size == 0:
+            clip, clip_sr = item
+            if not isinstance(clip, np.ndarray) or clip.size == 0:
+                self._cbw.submit(self.on_segment_end)
                 continue
 
-            text = self._transcribe(item)
+            text = self._transcribe(clip, clip_sr)
             if text:
                 self._cbw.submit(self.on_text, text)
+            # Always signal segment done so the mic UI returns to idle,
+            # even when Whisper returns empty (noise, hallucination filter, etc.)
+            self._cbw.submit(self.on_segment_end)
 
-    def _transcribe(self, clip_i16: np.ndarray) -> str:
-        """Convert int16 PCM to float32, resample to 16kHz if needed, run Whisper."""
+    def _transcribe(self, clip_i16: np.ndarray, sr: int) -> str:
+        """Convert int16 PCM to float32, resample to 16kHz if needed, run Whisper.
+        sr must be the sample rate at which the clip was recorded (snapshotted at
+        VAD loop start), NOT self.sample_rate which may have changed on reconnect."""
         if self._whisper is None:
             return ""
         # faster-whisper always expects 16kHz. Resample if stream opened at dev_sr.
-        audio = _resample_to_16k(clip_i16, self.sample_rate)
+        audio = _resample_to_16k(clip_i16, sr)
         # _resample_to_16k returns float32 in [-1, 1] — no further conversion needed
         try:
             segs, _ = self._whisper.transcribe(

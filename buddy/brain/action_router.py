@@ -11,6 +11,16 @@ from buddy.logger.logger import get_logger
 
 logger = get_logger("action_router")
 
+# Maps tool name → action verb shown in the spinner during executor + tool execution.
+# Tools may override this with a more specific label via their own on_progress call.
+_TOOL_VERB: Dict[str, str] = {
+    "filesystem": "Reading",
+    "terminal":   "Executing",
+    "web_search": "Searching",
+    "web_fetch":  "Fetching",
+    "vision":     "Analysing",
+}
+
 
 @dataclass(frozen=True)
 class PlanOutcome:
@@ -205,6 +215,14 @@ class ActionRouter:
         self.stack = FollowupStack(ui_output=self._ui_output, ui_input=self._ui_input)
         self.errors = ErrorStack(max_depth=3)
         self._max_step_attempts = int(max_step_attempts)
+
+        from buddy.tools.registry import ToolRegistry
+
+        self._registry = ToolRegistry()
+        _tools = self._registry.available_tools()
+        self._available_tools_str = json.dumps(_tools, ensure_ascii=False, indent=2)
+        self._registry_tools: List[str] = [t["name"] for t in _tools]
+
         logger.debug("ActionRouter initialized with brain=%s", type(brain).__name__)
 
     async def action(
@@ -226,22 +244,17 @@ class ActionRouter:
         )
         now_iso, timezone = self._get_time_info()
 
-        # Import registry directly (your requirement)
-        from buddy.tools.registry import ToolRegistry
-
-        registry = ToolRegistry()
-        available_tools = registry.available_tools()
-        available_tools_str = json.dumps(available_tools, ensure_ascii=False, indent=2)
+        registry = self._registry
+        available_tools_str = self._available_tools_str
 
         # ── log what the planner will see ────────────────────────────────────
-        tool_names = [t["name"] for t in available_tools]
         logger.info(
             "┌─ PLANNER INPUT ─────────────────────────────────────────\n"
             "│  tools (%d): %s\n"
             "│  intent: %s\n"
             "└─────────────────────────────────────────────────────────",
-            len(tool_names),
-            ", ".join(tool_names),
+            len(self._registry_tools),
+            ", ".join(self._registry_tools),
             planner_instructions[:120],
         )
 
@@ -251,10 +264,7 @@ class ActionRouter:
         t0 = time.perf_counter()
         planner_parsed: Dict[str, Any] = {}
         if on_token:
-            preview = (
-                planner_instructions.replace("\r", " ").replace("\n", " ").strip()[:80]
-            )
-            on_token(f"Planning {preview}", False)
+            on_token("Planning", False)
         while True:
 
             planner_payload = await asyncio.to_thread(
@@ -264,7 +274,6 @@ class ActionRouter:
                 available_tools=available_tools_str,
                 memories=memories,
                 stream=True,
-                on_token=on_token,
                 llm_options=llm_options,
             )
             planner_parsed = planner_payload.get("parsed") or planner_payload or {}
@@ -283,8 +292,7 @@ class ActionRouter:
 
         # ── log the plan the planner produced ────────────────────────────────
         _steps_raw = planner_parsed.get("steps") or []
-        _plan_status = str(planner_parsed.get("status") or "").strip().lower()
-        if _plan_status == "refusal":
+        if _status == "refusal":
             logger.info(
                 "┌─ PLAN: REFUSED (%.2fs) ──────────────────────────────────\n"
                 "│  reason: %s\n"
@@ -292,7 +300,7 @@ class ActionRouter:
                 planner_dt,
                 str(planner_parsed.get("message") or "")[:200],
             )
-        elif _plan_status == "followup":
+        elif _status == "followup":
             logger.info(
                 "┌─ PLAN: FOLLOWUP (%.2fs) ─────────────────────────────────\n"
                 "│  question: %s\n"
@@ -322,7 +330,9 @@ class ActionRouter:
                 "planner returned no steps and no refusal/followup (%.2fs)", planner_dt
             )
 
-        responder_note = str(planner_parsed.get("responder_note") or "").strip()
+        responder_instruction = str(
+            planner_parsed.get("responder_instruction") or ""
+        ).strip()
         steps = (
             (planner_parsed.get("steps") or [])
             if isinstance(planner_parsed, dict)
@@ -333,7 +343,7 @@ class ActionRouter:
                 "now_iso": now_iso,
                 "timezone": timezone,
                 "planner": planner_parsed,
-                "responder_note": responder_note,
+                "responder_instruction": responder_instruction,
                 "step_execution_map": {},
             }
 
@@ -389,12 +399,11 @@ class ActionRouter:
                 output_name,
                 input_steps,
             )
-            # Optional: show executor acknowledgement
-
-            if ack:
+            # Show tool-mapped action verb in the spinner
+            if on_token:
+                step_verb = _TOOL_VERB.get(tool_name, f"Executing · {tool_name}")
                 try:
-                    if on_token:
-                        on_token(ack, False)
+                    on_token(step_verb, False)
                 except Exception:
                     pass
 
@@ -442,6 +451,10 @@ class ActionRouter:
             # reset per-step error context
             self.errors.clear()
 
+            # serialize once — neither changes between retry attempts
+            instruction_json = json.dumps(instruction, indent=2, ensure_ascii=False)
+            prior_outputs_json = json.dumps(prior_outputs, indent=2, ensure_ascii=False)
+
             # ==================================================
             # Per-step attempt loop (executor -> tool -> retry on error)
             # ==================================================
@@ -469,16 +482,13 @@ class ActionRouter:
                 t0 = time.perf_counter()
                 exec_payload = await asyncio.to_thread(
                     self.brain.run_executor,
-                    instruction=json.dumps(instruction, indent=2, ensure_ascii=False),
-                    prior_outputs=json.dumps(
-                        prior_outputs, indent=2, ensure_ascii=False
-                    ),
+                    instruction=instruction_json,
+                    prior_outputs=prior_outputs_json,
                     step_followups=self.stack.appendix,
                     step_errors=self.errors.appendix,
                     tool_info=tool_prompt,
                     tool_call_format=tool_call_format,
                     stream=True,
-                    on_token=on_token,
                     llm_options=llm_options,
                 )
                 exec_ms = int((time.perf_counter() - t0) * 1000)
@@ -609,7 +619,7 @@ class ActionRouter:
                     attempt += 1
                     continue
 
-                tool_exec_result = tool.execute(
+                tool_exec_result = await tool.execute(
                     call_obj,
                     on_progress=on_token,
                     goal=user_message,
@@ -679,7 +689,7 @@ class ActionRouter:
                     "step %d attempt %d tool_ok_false -> retry evidence=%r ",
                     step_id,
                     attempt,
-                    json.dumps(tool_exec_result, ensure_ascii=False, indent=2),
+                    str(tool_exec_result)[:200],
                 )
 
                 attempt += 1
@@ -692,15 +702,13 @@ class ActionRouter:
                 logger.error("plan halted at step %d", step_id)
                 break
 
-        logger.debug(
-            "step_execution_map=%s",
-            json.dumps(step_execution_map, indent=2, ensure_ascii=False),
-        )
+        if logger.isEnabledFor(10):  # DEBUG
+            logger.debug("step_execution_map=%s", step_execution_map)
         return {
             "now_iso": now_iso,
             "timezone": timezone,
             "planner": planner_parsed,
-            "responder_note": responder_note,
+            "responder_instruction": responder_instruction,
             "step_execution_map": step_execution_map,
         }
 

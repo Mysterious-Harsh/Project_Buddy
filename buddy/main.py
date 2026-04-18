@@ -49,7 +49,8 @@
 
 # from buddy.buddy_core.boot import bootstrap
 # from buddy.buddy_core.pipeline import handle_turn
-# from buddy.logger.logger import get_logger
+from buddy.logger.logger import get_logger
+
 # from buddy.tools.vision.image_encoder import extract_image_paths
 # from buddy.ui.boot_ui import AURORA, _ANSI_RE, _is_tty  # single palette source
 # from buddy.ui.stt import SpeechToText
@@ -70,7 +71,7 @@
 #     except ImportError:
 #         pass
 
-# logger = get_logger("main")
+logger = get_logger("main")
 
 
 # # ==========================================================
