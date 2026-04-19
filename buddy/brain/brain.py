@@ -415,8 +415,7 @@ class Brain:
         if step_errors == "":
             step_errors = None
         context = self._build_context(
-            now_iso=now_iso,
-            timezone=timezone,
+            datetime_block=self._get_time_info(),
             prior_outputs=prior_outputs,
             step_followups=step_followups,
             step_errors=step_errors,
@@ -586,8 +585,7 @@ class Brain:
         now_iso, timezone = self._get_time_info()
 
         context = self._build_context(
-            now_iso=now_iso,
-            timezone=timezone,
+            datetime_block=self._get_time_info(),
             prior_outputs=rolling_context if rolling_context else READER_CONTEXT_EMPTY,
         )
 
@@ -816,12 +814,14 @@ class Brain:
     @classmethod
     def _get_location(cls) -> str:
         import time as _t
+
         now_mono = _t.monotonic()
         if cls._location and (now_mono - cls._location_ts) < cls._LOCATION_TTL:
             return cls._location
         try:
             import urllib.request
             import json as _json
+
             with urllib.request.urlopen("http://ip-api.com/json", timeout=3) as r:
                 data = _json.loads(r.read())
             if data.get("status") == "success":
@@ -840,7 +840,10 @@ class Brain:
 
         tz_name = now.tzname() or "UTC"
         offset = now.utcoffset()
-        total_sec = int(offset.total_seconds())
+        if offset is None:
+            total_sec = 0
+        else:
+            total_sec = int(offset.total_seconds())
         sign = "+" if total_sec >= 0 else "-"
         abs_sec = abs(total_sec)
         utc_offset = f"UTC{sign}{abs_sec // 3600:02d}:{(abs_sec % 3600) // 60:02d}"
