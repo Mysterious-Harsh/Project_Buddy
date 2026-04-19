@@ -409,7 +409,7 @@ class Brain:
         Runs the Executor prompt (single-step execution).
         Strict validation via OutputParser.parse_executor().
         """
-        now_iso, timezone = self._get_time_info()
+
         if step_followups == "":
             step_followups = None
         if step_errors == "":
@@ -582,7 +582,6 @@ class Brain:
 
         Returns dict with keys: relevant (bool), content (str).
         """
-        now_iso, timezone = self._get_time_info()
 
         context = self._build_context(
             datetime_block=self._get_time_info(),

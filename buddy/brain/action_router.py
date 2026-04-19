@@ -665,7 +665,7 @@ class ActionRouter:
                 tool_exec_result = await tool.execute(
                     call_obj,
                     on_progress=on_token,
-                    goal=responder_instruction,
+                    goal=planner_instructions,
                     brain=self.brain,
                 )
 
