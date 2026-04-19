@@ -146,9 +146,6 @@ class BootScreen(Screen):
     async def _consume_messages(self) -> None:
         log = self.query_one(BootLog)
         while True:
-            if self._boot_queue is None:
-                await asyncio.sleep(0.1)
-                continue
             item = await self._boot_queue.get()
             msg, payload = item
             if msg == "__DONE__":
@@ -337,6 +334,7 @@ class MainScreen(Screen):
             return
 
         if _should_exit(text):
+            self.app.exit()
             return
 
         if text.lower() in {"!sleep", "/sleep"}:
@@ -625,19 +623,27 @@ class MainScreen(Screen):
             self._notify_activity()
 
     def _on_consolidation_done(self, report: Any) -> None:
+        # Called from a background thread — must not touch widgets directly.
         with self._state_lock:
             self._sys_state.consolidating = False
+
+        def _apply() -> None:
+            try:
+                sv = self.query_one(SleepView)
+                if report:
+                    flash = getattr(report, "flash_processed", 0) or 0
+                    short = getattr(report, "short_processed", 0) or 0
+                    long_ = (
+                        getattr(report, "long_processed", 0)
+                        or getattr(report, "summarized", 0)
+                        or 0
+                    )
+                    sv.update_consolidation_stats(flash=flash, short=short, long=long_)
+            except Exception:
+                pass
+
         try:
-            sv = self.query_one(SleepView)
-            if report:
-                flash = getattr(report, "flash_processed", 0) or 0
-                short = getattr(report, "short_processed", 0) or 0
-                long_ = (
-                    getattr(report, "long_processed", 0)
-                    or getattr(report, "summarized", 0)
-                    or 0
-                )
-                sv.update_consolidation_stats(flash=flash, short=short, long=long_)
+            self.app.call_from_thread(_apply)
         except Exception:
             pass
 
@@ -657,10 +663,12 @@ class MainScreen(Screen):
             self.query_one(MicIndicator).set_state("muted" if muted else "idle")
         except Exception:
             pass
-        icon = "🔇" if (muted and _USE_UNICODE) else ("M" if muted else "")
-        self.query_one(StatusBar).set_hint(
-            f"[{_DIM}]{icon} muted[/]" if muted else f"[{_GREEN}]🔊 unmuted[/]"
-        )
+        if muted:
+            icon = "🔇 " if _USE_UNICODE else "M "
+            self.query_one(StatusBar).set_hint(f"[{_DIM}]{icon}muted[/]")
+        else:
+            label = f"[{_GREEN}]🔊 unmuted[/]" if _USE_UNICODE else f"[{_GREEN}]unmuted[/]"
+            self.query_one(StatusBar).set_hint(label)
         self._refresh_info_bar()
 
     def _toggle_voice_mute(self) -> None:
@@ -743,7 +751,6 @@ class BuddyApp(App):
         background: {_BG};
     }}
     """
-    BINDINGS = []
 
     def __init__(self, pre_wizard_result: Optional[Any] = None, **kwargs: Any) -> None:
         super().__init__(**kwargs)

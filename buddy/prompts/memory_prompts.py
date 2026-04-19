@@ -1,12 +1,14 @@
 MEMORY_SUMMARY_PROMPT = """
-<ROLE>
+<role>
 You are now Summarizing Your Own Memories.
 You must preserve all the important details while keeping it minimal.
 Your task is permanent semantic compression.
 
 Governing question:
 "What would change future behaviour if this were forgotten?"
-<INSTRUCTIONS>
+</role>
+
+<minimality>
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 §1. MINIMALITY AXIOM
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -20,7 +22,7 @@ Governing question:
 1.2) DISCARD — everything that carries no forward value:
       ∙	Explanations of why something was said or done
       ∙	Justifications, reasoning chains, procedural steps
-      ∙	Narrative framing (“the user mentioned that…”, “at some point…”)
+      ∙	Narrative framing ("the user mentioned that...", "at some point...")
       ∙	Filler, pleasantries, redundant restatements
       ∙	Emotional tone descriptions unless the emotion itself is the fact
 1.2) DEDUPLICATION — when the same fact appears multiple times:
@@ -31,10 +33,12 @@ Governing question:
       ∙	The more recent statement wins
       ∙	Discard the outdated version entirely — do not hedge or mention both
       ∙	Exception: if the older fact is structurally different (e.g. a past event vs a current state), keep both with clear temporal markers
-    
+
 When in doubt, keep it.
 Memory is semantic residue only.
+</minimality>
 
+<encoding_perspective>
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 §2 SELF-ENCODING PERSPECTIVE (MOST IMPORTANT)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -47,13 +51,15 @@ Do not narrate about the user — encode what *I must remember*.
 Rules:
 - Use present tense.
 - No storytelling.
-- No reference to “the user said”.
+- No reference to "the user said".
 - No meta explanation.
 - No archive tone.
 
 Write as internal memory, not documentation.
 Write what is true about the subject — not what was said or exchanged in this turn.
+</encoding_perspective>
 
+<dominance_rules>
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 §3. DOMINANCE & INTERFERENCE RULES
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -74,7 +80,7 @@ Write what is true about the subject — not what was said or exchanged in this 
 
 3.4 REQUEST CANONICALIZATION
 For requests or questions:
-- Remove “asked”, “requested”, “action plan”.
+- Remove "asked", "requested", "action plan".
 - Extract operative intent pattern only.
 - Merge variations into parametric capability.
 - Store as behavioural pattern, not dialogue history.
@@ -86,8 +92,9 @@ Intermediate states never survive.
 3.6 UNRESOLVABLE CONFLICT
 If two high-weight traces directly contradict and cannot be resolved:
 write both verbatim to memory_summary.
+</dominance_rules>
 
-
+<episodic_transform>
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 §4. EPISODIC → SEMANTIC TRANSFORMATION
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -100,38 +107,40 @@ Strip:
 
 Rewrite as:
 Timeless, present-tense declarative statements.
+</episodic_transform>
+
+<salience>
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 §5. SALIENCE — HOW TO SCORE IT
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-Salience ∈ [0,1] represents how strongly a memory should influence future responses.
+Salience in [0,1] represents how strongly a memory should influence future responses.
 
 Determine salience by evaluating:
 
-• Persistence — how long the information should remain relevant  
-• Impact — how much future behavior or responses depend on it  
-• Reuse likelihood — how often it may be needed again
+- Persistence — how long the information should remain relevant
+- Impact — how much future behavior or responses depend on it
+- Reuse likelihood — how often it may be needed again
 
-Higher persistence, impact, or reuse → higher salience.
+Higher persistence, impact, or reuse -> higher salience.
 
 Tier mapping:
 
-- 0.70–1.00 → LONG memory  
+- 0.70-1.00 -> LONG memory
   Stable information that should persist and guide behavior.
 
-- 0.30–0.69 → SHORT memory  
+- 0.30-0.69 -> SHORT memory
   Relevant context that should persist temporarily.
 
-- 0.00–0.29 → FLASH memory  
+- 0.00-0.29 -> FLASH memory
   Ephemeral context useful only for immediate conversation.
 
 Rules:
 
 Store memory with salience reflecting its expected future influence.
-Higher salience → longer retention and stronger authority.
-Lower salience → shorter retention and weaker influence.
-</INSTRUCTIONS>
-</ROLE>
+Higher salience -> longer retention and stronger authority.
+Lower salience -> shorter retention and weaker influence.
+</salience>
 """
 MEMORY_SUMMARY_PROMPT_SCHEMA = """
 {{

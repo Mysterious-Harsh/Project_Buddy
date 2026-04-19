@@ -208,7 +208,14 @@ class InputQueue:
         if time.monotonic() < self._source_lock_until:
             logger.debug("InputQueue: voice suppressed (source lock active)")
             return
-        loop.call_soon_threadsafe(self._q.put_nowait, text)
+
+        def _safe_put() -> None:
+            try:
+                self._q.put_nowait(text)
+            except asyncio.QueueFull:
+                logger.debug("InputQueue: voice dropped (queue full)")
+
+        loop.call_soon_threadsafe(_safe_put)
 
     async def get(self) -> str:
         return await self._q.get()
@@ -237,9 +244,9 @@ class SplashView(Static):
     }}
     """
 
-    _frame: int = 0
-
     def on_mount(self) -> None:
+        self._frame = 0
+        self._cached_logo = _logo_markup()  # build once — never changes
         self._face_timer = self.set_interval(0.12, self._tick)
         self._redraw()
 
@@ -248,12 +255,11 @@ class SplashView(Static):
         self._redraw()
 
     def _redraw(self) -> None:
-        logo = _logo_markup()
         tagline = f"[dim {_VIOLET}]Cognitive AI  ·  Offline-first  ·  Memory-driven[/]"
         face = _SPLASH_FACE_FRAMES[self._frame]
         face_line = f"[{_CYAN}]{face}[/]"
         hint = f"[dim {_DIM}]starting up…[/]"
-        self.update("\n".join([logo, "", tagline, "", face_line, "", hint]))
+        self.update("\n".join([self._cached_logo, "", tagline, "", face_line, "", hint]))
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -331,7 +337,7 @@ class BootLogLine(Static):
             spin = self._SPIN[self._frame]
             self.update(f"[{_CYAN}]{spin}[/]  [{_DIM}]{self._msg}[/]")
         except Exception:
-            logger.exception("BootLogLine._render_boot_log_line failed")
+            pass
 
     def set_result(self, msg: str, status: str) -> None:
         """Replace spinner with final icon. Safe to call from event loop."""
@@ -407,7 +413,7 @@ class BootFaceBar(Static):
 
     def watch__frame_idx(self, _: int) -> None:
         face = _BOOT_FACE_FRAMES[self._frame_idx]
-        self.update(f"[{_CYAN}]{face}[/]  [dim {_DIM}]booting…[/]")
+        self.update(f"[{_CYAN}]{face}[/]  [{_DIM}]booting…[/]")
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -662,7 +668,11 @@ class InfoPane(Static):
             last_mem = last_mem[:47] + "…"
         last_mem_s = f"[{_DIM}]{last_mem or '—'}[/]"
 
-        D = f"[{_DIM}]{'─' * 44}[/]"
+        try:
+            _sep_w = max(20, self.size.width - 4)
+        except Exception:
+            _sep_w = 44
+        D = f"[{_DIM}]{'─' * _sep_w}[/]"
 
         lines = [
             (
@@ -745,7 +755,7 @@ class StatusBar(Static):
     }}
     """
 
-    _SHORTCUTS = f"[dim {_DIM}]ESC:interrupt  F2:mute  F3:sleep  Ctrl+C×2:quit[/]"
+    _SHORTCUTS = f"[dim {_DIM}]ESC:stop  F2:mute  F3:sleep  Ctrl+C×2:quit[/]"
 
     _info: reactive[str] = reactive("")
     _hint: reactive[str] = reactive("")
@@ -795,6 +805,8 @@ class SpinnerBar(Static):
         self.set_interval(0.09, self._tick)
 
     def _tick(self) -> None:
+        if not self.has_class("visible"):
+            return
         self._frame = (self._frame + 1) % max(
             len(_THINKING_FRAMES), len(_WAITING_FRAMES), len(_WORKING_FRAMES)
         )
@@ -863,13 +875,16 @@ class ChatBubble(Static):
 
         display = text + ("▋" if cursor else "")
 
+        _longest = max((len(line) for line in text.splitlines()), default=0)
+        _w = min(72, max(32, _longest + 8))
+
         if self._kind == "user":
             panel = Panel(
                 Text(display, style=_WHITE),
                 title=f"[{_CYAN}]▌ You[/]",
                 title_align="left",
                 border_style=_CYAN,
-                width=min(72, max(32, len(text) + 8)),
+                width=_w,
                 padding=(0, 1),
             )
             self.update(panel)
@@ -879,7 +894,7 @@ class ChatBubble(Static):
                 title=f"[{_VIOLET}]◈ Buddy[/]",
                 title_align="left",
                 border_style=_VIOLET,
-                width=min(72, max(32, len(text) + 8)),
+                width=_w,
                 padding=(0, 1),
             )
             self.update(Align(panel, align="right"))
@@ -964,10 +979,14 @@ class SleepView(Widget):
         ]
 
     def _tick_face(self) -> None:
+        if not self.display:
+            return
         self._face_idx = (self._face_idx + 1) % len(_SLEEP_FACE_FRAMES)
         self.refresh()
 
     def _tick_stars(self) -> None:
+        if not self.display:
+            return
         for s in self._stars:
             s["x"] = (s["x"] + s["dx"]) % 1.0
             s["y"] = (s["y"] + s["dy"]) % 1.0
@@ -1022,7 +1041,7 @@ class SleepView(Widget):
             f"  short  {self._make_bar(self.stats_short, total, bar_w)}  {self.stats_short}",
             f"  long   {self._make_bar(self.stats_long,  total, bar_w)}  {self.stats_long}",
             f"  sleeping {em:02d}:{es:02d}",
-            f"  [ Press Esc to wake ]",
+            f"  [ F3 to wake  ·  or say 'wake up' ]",
         ]
 
         star_block = "\n".join(star_lines)

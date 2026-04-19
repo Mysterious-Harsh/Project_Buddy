@@ -10,6 +10,7 @@ from __future__ import annotations
 # Multi-URL: fetches all URLs in one step, returns per-URL results.
 # ==========================================================
 
+import asyncio
 import re
 from typing import Any, Callable, Dict, List, Optional
 
@@ -81,11 +82,9 @@ class WebFetch:
             "name": TOOL_NAME,
             "version": "1.0.0",
             "description": (
-                "Fetch full readable text from one or more URLs (up to 5). Use AFTER"
-                " web_search — pass the URLs from search results as input. Returns full"
-                " article/page content extracted as plain text. Do NOT use on weather"
-                " sites, maps, or social media — they use JavaScript and return empty"
-                " content; use web_search snippets for those instead."
+                "Fetch full readable text from one or more URLs (up to 5). MUST"
+                " followed BY web_search — pass the URLs from search results as input."
+                " Returns full article/page content extracted as plain text. "
             ),
             "prompt": WEB_FETCH_TOOL_PROMPT,
             "error_prompt": WEB_FETCH_ERROR_RECOVERY_PROMPT,
@@ -112,12 +111,13 @@ class WebFetch:
         for url in call.urls:
             if on_progress:
                 on_progress(f"Fetching: {url}", False)
-            result = self._fetch_one(url, call.max_chars)
+            result = await asyncio.to_thread(self._fetch_one, url, call.max_chars)
 
             # Run large content through TextReader if brain + goal are available
+            # Both the HTTP fetch and the LLM reading loop are blocking — run in thread.
             if result["error"] is None and result.get("content") and goal and brain:
-                result["content"] = maybe_read(
-                    result["content"], goal, brain, on_progress
+                result["content"] = await asyncio.to_thread(
+                    maybe_read, result["content"], goal, brain, on_progress
                 )
                 result["size_chars"] = len(result["content"])
 

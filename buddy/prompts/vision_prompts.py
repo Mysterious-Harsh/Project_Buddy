@@ -41,11 +41,14 @@ VISION_SCHEMA = """{
 # Tool prompt shown to the executor when it selects this tool.
 # ---------------------------------------------------------------------------
 VISION_TOOL_PROMPT = """
+<tool_description>
 VISION TOOL
 
 Analyzes image(s) full end-to-end and give best possible results to the user query.
 Supports PNG, JPG, JPEG, WEBP, GIF, BMP. Single image or multiple images.
+</tool_description>
 
+<when_to_use>
 ═══════════════════════════════════════════════
 §1. WHEN TO USE
 ═══════════════════════════════════════════════
@@ -59,13 +62,17 @@ Use this tool when:
 DO NOT use if:
   - No image file path was provided — ask the user for one
   - The file is not an image (use filesystem tool for documents, code, etc.)
+</when_to_use>
 
+<call_schema>
 ═══════════════════════════════════════════════
 §2. CALL SCHEMA
 ═══════════════════════════════════════════════
   paths  : required — list of absolute paths
   query  : required — what to compare, find, or answer across images
+</call_schema>
 
+<result_fields>
 ═══════════════════════════════════════════════
 §3. RESULT FIELDS (returned as text to responder)
 ═══════════════════════════════════════════════
@@ -74,7 +81,7 @@ DO NOT use if:
   TEXT_FOUND   — verbatim text visible in image (empty string if none)
   KEY_FINDING  — direct answer to the query — the primary output
   PATHS        — the image path(s) that were analyzed
-
+</result_fields>
 """.strip()
 
 VISION_TOOL_CALL_FORMAT = (

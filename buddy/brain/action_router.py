@@ -11,14 +11,64 @@ from buddy.logger.logger import get_logger
 
 logger = get_logger("action_router")
 
+# ==========================================================
+# Success output projection — lean responder-friendly output
+# ==========================================================
+
+_ALWAYS_STRIP = {"OK", "TOOL"}
+
+
+def _project_success(tool_name: str, result: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Called only on OK=True. Strips fields the responder doesn't need.
+    OK and TOOL move to the step wrapper — removed from all tool outputs.
+    On failure the full result is kept so the executor can retry with full context.
+    """
+    if tool_name == "terminal":
+        projected: Dict[str, Any] = {
+            "CWD": result.get("CWD"),
+            "COMMAND": result.get("COMMAND"),
+            "EXIT_CODE": result.get("EXIT_CODE"),
+            "STDOUT": result.get("STDOUT"),
+            "STDERR": result.get("STDERR"),
+            "TIMEOUT": result.get("TIMEOUT"),
+        }
+        if result.get("IS_DAEMON"):  # only when True
+            projected["IS_DAEMON"] = True
+        if result.get("PID") is not None:  # only when set
+            projected["PID"] = result["PID"]
+        return projected
+
+    if tool_name == "web_search":
+        return {
+            "QUERY": result.get("QUERY"),
+            "RESULTS": result.get("RESULTS"),
+        }
+
+    if tool_name == "read_file":
+        return {
+            "PATH": result.get("PATH"),
+            "CONTENT": result.get("CONTENT"),
+        }
+
+    if tool_name == "search_file":
+        return {
+            "PATH": result.get("PATH"),
+            "RESULTS": result.get("RESULTS"),
+        }
+
+    # edit_file, manage_file, vision, unknown — strip OK/TOOL only
+    return {k: v for k, v in result.items() if k not in _ALWAYS_STRIP}
+
+
 # Maps tool name → action verb shown in the spinner during executor + tool execution.
 # Tools may override this with a more specific label via their own on_progress call.
 _TOOL_VERB: Dict[str, str] = {
     "filesystem": "Reading",
-    "terminal":   "Executing",
+    "terminal": "Executing",
     "web_search": "Searching",
-    "web_fetch":  "Fetching",
-    "vision":     "Analysing",
+    "web_fetch": "Fetching",
+    "vision": "Analysing",
 }
 
 
@@ -441,13 +491,6 @@ class ActionRouter:
             tool_prompt = str(tool_info.get("prompt") or "")
             tool_call_format = str(tool_info.get("tool_call_format") or "")
 
-            # Narrow tool_call_format to the specific action the planner intends.
-            # The executor only sees one focused example → no field mix-ups across actions.
-            if hasattr(tool, "detect_action") and hasattr(tool, "get_call_example"):
-                _detected = tool.detect_action(goal + " " + hints)
-                if _detected:
-                    tool_call_format = tool.get_call_example(_detected)
-
             # reset per-step error context
             self.errors.clear()
 
@@ -622,7 +665,7 @@ class ActionRouter:
                 tool_exec_result = await tool.execute(
                     call_obj,
                     on_progress=on_token,
-                    goal=user_message,
+                    goal=responder_instruction,
                     brain=self.brain,
                 )
 
@@ -670,13 +713,13 @@ class ActionRouter:
                 )
 
                 if ok:
-                    # ✅ Step success
+                    # ✅ Step success — project to lean responder output
                     step_execution_map[str(step_id)] = {
                         "step_id": step_id,
                         "tool": tool_name,
                         "output_name": output_name,
                         "ok": True,
-                        "output_data": tool_exec_result,
+                        "output_data": _project_success(tool_name, tool_exec_result),
                     }
                     logger.info("step %d success tool=%s", step_id, tool_name)
                     break

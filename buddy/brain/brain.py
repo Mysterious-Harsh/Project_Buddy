@@ -1,8 +1,7 @@
 # buddy/brain/brain.py
 from __future__ import annotations
 
-import time
-from typing import Any, Callable, Dict, List, Optional, Protocol, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Protocol, Union
 
 from buddy.logger.logger import get_logger
 from buddy.brain.output_parser import OutputParser
@@ -39,6 +38,7 @@ from buddy.prompts.vision_prompts import (
 
 import json
 import threading
+from datetime import datetime as _datetime
 
 logger = get_logger("brain")
 
@@ -136,6 +136,11 @@ class Brain:
     - Vision calls go through chat() with image_url content parts
     """
 
+    # Location cache — shared across all Brain instances, refreshed every hour
+    _location: str = ""
+    _location_ts: float = 0.0
+    _LOCATION_TTL: float = 3600.0
+
     def __init__(
         self,
         *,
@@ -162,8 +167,7 @@ class Brain:
     def _build_context(
         self,
         *,
-        now_iso: str,
-        timezone: str,
+        datetime_block: str,
         recent_turns: Optional[str] = None,
         memories: Optional[str] = None,
         available_tools: Optional[str] = None,
@@ -180,8 +184,7 @@ class Brain:
         """
         context_parts = [
             "<CONTEXT>",
-            f"<NOW_ISO>\n{now_iso}\n</NOW_ISO>",
-            f"<TIMEZONE>\n{timezone}\n</TIMEZONE>",
+            f"<DATETIME>\n{datetime_block}\n</DATETIME>",
         ]
         if memories is not None:
             context_parts.append(f"<MEMORIES>\n{memories}\n</MEMORIES>")
@@ -241,10 +244,8 @@ class Brain:
 
         Strict validation via OutputParser.parse_retrieval_gate().
         """
-        now_iso, timezone = self._get_time_info()
         context = self._build_context(
-            now_iso=now_iso,
-            timezone=timezone,
+            datetime_block=self._get_time_info(),
             recent_turns=recent_turns,
         )
 
@@ -295,10 +296,8 @@ class Brain:
         Runs the Decision+Ingestion prompt (JSON expected).
         Strict validation via OutputParser.parse_brain().
         """
-        now_iso, timezone = self._get_time_info()
         context = self._build_context(
-            now_iso=now_iso,
-            timezone=timezone,
+            datetime_block=self._get_time_info(),
             recent_turns=recent_turns,
             memories=memories,
         )
@@ -353,10 +352,8 @@ class Brain:
         Runs the Planner prompt (JSON expected).
         Strict validation via OutputParser.parse_planner().
         """
-        now_iso, timezone = self._get_time_info()
         context = self._build_context(
-            now_iso=now_iso,
-            timezone=timezone,
+            datetime_block=self._get_time_info(),
             memories=memories,
             available_tools=available_tools,
         )
@@ -473,10 +470,8 @@ class Brain:
         Runs the Memory Summary prompt (JSON expected).
         Strict validation via OutputParser.parse_memory_summary().
         """
-        now_iso, timezone = self._get_time_info()
         context = self._build_context(
-            now_iso=now_iso,
-            timezone=timezone,
+            datetime_block=self._get_time_info(),
             memories=memories,
         )
 
@@ -532,10 +527,8 @@ class Brain:
         Runs the Respond prompt (JSON expected).
         Strict validation via OutputParser.parse_respond().
         """
-        now_iso, timezone = self._get_time_info()
         context = self._build_context(
-            now_iso=now_iso,
-            timezone=timezone,
+            datetime_block=self._get_time_info(),
             memories=memories,
             execution_results=execution_results,
         )
@@ -820,10 +813,43 @@ class Brain:
     # -------------------------
     # Helpers
     # -------------------------
-    @staticmethod
-    def _get_time_info() -> Tuple[str, str]:
+    @classmethod
+    def _get_location(cls) -> str:
+        import time as _t
+        now_mono = _t.monotonic()
+        if cls._location and (now_mono - cls._location_ts) < cls._LOCATION_TTL:
+            return cls._location
+        try:
+            import urllib.request
+            import json as _json
+            with urllib.request.urlopen("http://ip-api.com/json", timeout=3) as r:
+                data = _json.loads(r.read())
+            if data.get("status") == "success":
+                parts = [data.get(k, "") for k in ("city", "regionName", "country")]
+                cls._location = ", ".join(p for p in parts if p) or "Unknown"
+            else:
+                cls._location = cls._location or "Unknown"
+        except Exception:
+            cls._location = cls._location or "Unknown"
+        cls._location_ts = now_mono
+        return cls._location
 
-        lt = time.localtime()
-        tz_name = time.tzname[1] if lt.tm_isdst > 0 else time.tzname[0]
-        now = time.strftime("%Y-%m-%dT%H:%M:%S%z", lt)
-        return now, tz_name
+    @classmethod
+    def _get_time_info(cls) -> str:
+        now = _datetime.now().astimezone()
+
+        tz_name = now.tzname() or "UTC"
+        offset = now.utcoffset()
+        total_sec = int(offset.total_seconds())
+        sign = "+" if total_sec >= 0 else "-"
+        abs_sec = abs(total_sec)
+        utc_offset = f"UTC{sign}{abs_sec // 3600:02d}:{(abs_sec % 3600) // 60:02d}"
+
+        return (
+            f"Day:      {now.strftime('%A')}\n"
+            f"Date:     {now.strftime('%B %d, %Y')}\n"
+            f"Time:     {now.strftime('%I:%M %p')}\n"
+            f"Timezone: {tz_name} ({utc_offset})\n"
+            f"ISO:      {now.strftime('%Y-%m-%dT%H:%M:%S%z')}\n"
+            f"Location: {cls._get_location()}"
+        )

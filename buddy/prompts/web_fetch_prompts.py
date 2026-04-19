@@ -12,8 +12,25 @@ Use this AFTER web_search when snippets are not enough.
 
 HOW TO USE WITH web_search:
   - Step 1: web_search  → get RESULTS list (titles, urls, snippets)
-  - Step 2: web_fetch   → pass the best URLs from step 1 as input
+  - Step 2: web_fetch   → pick the best URLs from step 1 based on title + snippet relevance
   Always use URLs from prior search results. Never invent URLs.
+
+HOW MANY URLS TO FETCH:
+  General queries (quick facts, how-to, single topic)               → fetch 1–2 best URLs
+  Moderate queries (comparisons, tutorials, some depth needed)       → fetch 2–3 URLs
+  Deep research (comprehensive, multiple perspectives, user asked for more) → fetch 3–5 URLs
+
+  Default to 1–2 for general queries. Only fetch more when the user
+  explicitly asks for deeper information or the topic genuinely requires it.
+
+HOW TO PICK THE BEST URLs:
+  Read the title and snippet of each search result before choosing.
+  Prefer URLs whose title and snippet directly address the user's question.
+  Avoid: social media, weather widgets, maps, login-gated pages, forums
+         with low-quality answers, and aggregator spam sites.
+  If two results look equally relevant, prefer the one from a more
+  authoritative domain (official docs, reputable publications).
+  Never pick URLs at random — always justify by title/snippet match.
 
 WHEN TO USE:
   Full article body, documentation pages, blog posts, source code pages,

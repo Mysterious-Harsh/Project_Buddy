@@ -32,6 +32,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional
 
 from pydantic import BaseModel, Field, model_validator
+from buddy.brain.text_reader import CHAR_THRESHOLD, maybe_read
 from buddy.prompts.terminal_prompts import (
     tool_call_format,
     TERMINAL_ERROR_RECOVERY_PROMPT,
@@ -356,8 +357,8 @@ class Terminal:
                 " mvn, gradle\n  • Package managers — pip, npm, yarn, brew, apt,"
                 " cargo\n  • Git and version control\n  • System utilities, network"
                 " commands (curl, ping, ssh)\n  • Process management and installs\nDO"
-                " NOT USE FOR: read/write/search files — use filesystem tool"
-                " instead.\nPREFER structured tools over terminal when available;"
+                " NOT USE FOR: read/write/search/manage files — use read_file,"
+                " edit_file, search_file, or manage_file instead.\nPREFER structured tools over terminal when available;"
                 " terminal returns raw text.\nDAEMON AWARE: servers/watchers (uvicorn,"
                 " npm start, tail -f, etc.) are auto-detected, launched in background,"
                 " and tracked in Terminal.daemons."
@@ -413,7 +414,7 @@ class Terminal:
 
         if _is_daemon_command(cmd):
             return self._execute_daemon(cmd, cwd=cwd, timeout=timeout)
-        return self._execute_normal(cmd, cwd=cwd, timeout=timeout)
+        return self._execute_normal(cmd, cwd=cwd, timeout=timeout, brain=brain, goal=goal, on_progress=on_progress)
 
     # --------------------------
     # Normal execution
@@ -425,6 +426,9 @@ class Terminal:
         *,
         cwd: Optional[str],
         timeout: int,
+        brain: Optional[Any] = None,
+        goal: str = "",
+        on_progress: Optional[Callable[[str, bool], None]] = None,
     ) -> Dict[str, Any]:
         """
         Run a command expected to exit on its own.
@@ -465,13 +469,21 @@ class Terminal:
                     TIMEOUT=timeout,
                 ).model_dump()
 
+            # Large STDOUT: use TextReader to extract relevant content.
+            # STDERR is kept verbatim — error messages must never be filtered.
+            stdout = stdout or ""
+            if brain and goal and len(stdout) > CHAR_THRESHOLD:
+                stdout = maybe_read(stdout, goal, brain, on_progress)
+            else:
+                stdout = _truncate(stdout)
+
             ok = proc.returncode == 0
             return TerminalResult(
                 OK=ok,
                 CWD=cwd or "",
                 COMMAND=cmd,
                 EXIT_CODE=int(proc.returncode),
-                STDOUT=_truncate(stdout or ""),
+                STDOUT=stdout,
                 STDERR=_truncate(stderr or ""),
                 TIMEOUT=timeout,
             ).model_dump()

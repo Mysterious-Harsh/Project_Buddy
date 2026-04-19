@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import re
 from typing import Any, Callable, List, Optional
-
 from buddy.logger.logger import get_logger
 
 logger = get_logger("text_reader")
@@ -26,11 +25,11 @@ logger = get_logger("text_reader")
 # Constants
 # ═══════════════════════════════════════════════════════════
 
-CHAR_THRESHOLD   = 3_000   # below this → skip reader, return as-is
-_MIN_PARA_CHARS  = 80      # merge shorter fragments with next paragraph
-_MAX_PARA_CHARS  = 1_500   # split oversized paragraphs at sentence boundary
-_ROLLING_CAP     = 300     # max chars kept in rolling context
-_NO_RESULT_MSG   = "No relevant content found for this query."
+CHAR_THRESHOLD = 8000  # below this → skip reader, return as-is
+_MIN_PARA_CHARS = 80  # merge shorter fragments with next paragraph
+_MAX_PARA_CHARS = 2000  # split oversized paragraphs at sentence boundary
+_ROLLING_CAP = 400  # max chars kept in rolling context
+_NO_RESULT_MSG = "No relevant content found for this query."
 
 
 # ═══════════════════════════════════════════════════════════
@@ -70,7 +69,13 @@ def split_paragraphs(text: str) -> List[str]:
         stripped = chunk.strip()
         if not stripped:
             continue
-        if merged and list_marker.match(stripped) and list_marker.match(merged[-1].strip().splitlines()[0] if merged[-1].strip() else ""):
+        if (
+            merged
+            and list_marker.match(stripped)
+            and list_marker.match(
+                merged[-1].strip().splitlines()[0] if merged[-1].strip() else ""
+            )
+        ):
             merged[-1] = merged[-1].rstrip() + "\n" + chunk
         else:
             merged.append(chunk)
@@ -97,9 +102,11 @@ def split_paragraphs(text: str) -> List[str]:
     # ── Step 6: restore code blocks ───────────────────────
     restored: List[str] = []
     for chunk in final:
+
         def _restore(m: re.Match) -> str:
             idx = int(m.group(1))
             return code_blocks[idx] if idx < len(code_blocks) else m.group(0)
+
         restored.append(re.sub(r"\x00CODE(\d+)\x00", _restore, chunk))
 
     return [p for p in restored if p.strip()]
@@ -154,7 +161,7 @@ class TextReader:
             Compact string of relevant content, or _NO_RESULT_MSG if nothing found.
         """
         paragraphs = split_paragraphs(text)
-        total      = len(paragraphs)
+        total = len(paragraphs)
 
         if on_progress:
             on_progress(f"Reading {total} paragraphs...", False)
@@ -234,7 +241,7 @@ class TextReader:
             # Trim to the first " | " boundary to avoid partial entries
             boundary = combined.find(" | ")
             if boundary != -1:
-                combined = combined[boundary + 3:]
+                combined = combined[boundary + 3 :]
 
         return combined
 
@@ -263,5 +270,3 @@ def maybe_read(
     if not text or len(text) <= CHAR_THRESHOLD:
         return text
     return TextReader().read(text, query, brain, on_progress)
-
-
