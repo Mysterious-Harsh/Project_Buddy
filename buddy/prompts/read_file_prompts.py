@@ -54,8 +54,9 @@ RESULT FIELDS:
   LINE_COUNT, START_LINE, END_LINE — line range reads
   SIZE_BYTES, MODIFIED, CREATED   — file metadata
   ROWS_TOTAL, ROWS_AFTER_FILTER, COLUMNS, SHEET — tabular reads
-  RESULTS        — list entries for directory reads: {name, path, type, size_bytes, modified}
-  TREE_TEXT      — directory tree string
+  RESULTS        — directory entries: {name, path, type, permissions, modified, created,
+                   size_bytes, size, extension (files), item_count (dirs)}
+  TREE_TEXT      — directory tree with inline size + date per entry
   EXISTS, IS_FILE, IS_DIR — info reads
   NEEDS_CONFIRMATION, PREVIEW — binary files: call again with confirmed=true to open
   NOTE           — actionable hint (truncation, 0 matches, how to filter)

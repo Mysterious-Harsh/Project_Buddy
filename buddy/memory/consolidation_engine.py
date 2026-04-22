@@ -1162,7 +1162,7 @@ def _apply_summary_cluster(
 
     v4: provisional window extended to budget.provisional_window_days (14d) [P12].
     """
-    items: List[Tuple[float, str]] = []
+    items: List[Tuple[float, str, str, float]] = []
     all_creation_times: List[float] = []
     max_access_count: int = 0
     for mid in cluster.ids:
@@ -1178,7 +1178,9 @@ def _apply_summary_cluster(
             if access_count > max_access_count:
                 max_access_count = access_count
         if text:
-            items.append((created_at, text))
+            tier = getattr(m, "memory_type", "flash") or "flash"
+            importance = float(getattr(m, "importance", 0.5) or 0.5)
+            items.append((created_at, text, tier, importance))
 
     # BUG FIX (v4.1p2): Use centroid (mean) of cluster member timestamps instead
     # of the newest member's timestamp.  Using the newest member caused a summary
@@ -1207,8 +1209,11 @@ def _apply_summary_cluster(
     _DEEP_CONFIDENCE_MIN = 0.70
 
     items.sort(key=lambda x: x[0])
-    memories = [f"{_iso(ts)} | {text}" for (ts, text) in items]
-    parsed = brain.run_memory_summary(memories="\n".join(memories)).get("parsed")
+    memories = [
+        f"{_iso(ts)} | {tier} | imp={imp:.2f} | {text}"
+        for (ts, text, tier, imp) in items
+    ]
+    parsed = brain.run_memory_summary(memories="\n".join(memories), now=now).get("parsed")
     summary_text = str(parsed.get("memory_summary", "") or "").strip()
     salience = float(parsed.get("salience", 0.0) or 0.0)
     confidence = float(parsed.get("confidence", 0.0) or 0.0)

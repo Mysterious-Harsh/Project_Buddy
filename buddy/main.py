@@ -2133,7 +2133,7 @@ logger = get_logger("main")
 #                         ui.spinner_update(
 #                             preview or current_label, SpinnerState.THINKING
 #                         )
-#                         if "</THINK>" in preview:
+#                         if "</think>" in preview:
 #                             _thinking_done = True
 #                             stream_buf.clear()
 #                             ui.spinner_update("Thinking", SpinnerState.THINKING)

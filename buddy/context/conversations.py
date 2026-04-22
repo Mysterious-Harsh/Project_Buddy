@@ -167,37 +167,34 @@ class Conversations:
 
     def get_recent_conversations(self, include_pending: bool = False) -> str:
         """
-        Returns the conversation as a pure message timeline:
+        Returns the conversation as ChatML-formatted turns:
 
-        [time] User: ...
-        [time] Buddy: ...
+        <|im_start|>user
+        [time]: ...
+        <|im_end|>
+        <|im_start|>assistant
+        [time]: ...
+        <|im_end|>
 
-        If include_pending=True and a pending message exists, it is shown at the end under:
-        --- PENDING ---
+        If include_pending=True and a pending message exists, the last Buddy
+        message is tagged with [PENDING] before the timestamp.
         """
         if not self._messages:
             return ""
 
         pending_i = self._pending_index() if include_pending else None
 
-        lines: List[str] = []
+        blocks: List[str] = []
 
-        if pending_i is None:
-            # no pending section, print everything
-            for m in self._messages:
-                lines.append(f"[{m.time}] {m.role}: {m.text}")
-            return "\n".join(lines).rstrip()
+        for i, m in enumerate(self._messages):
+            chatml_role = "assistant" if m.role == "Buddy" else "user"
+            is_pending = include_pending and i == pending_i
+            tag = "[PENDING] " if is_pending else ""
+            blocks.append(
+                f"<|im_start|>{chatml_role}\n{tag}[{m.time}]: {m.text}\n<|im_end|>"
+            )
 
-        # Print everything BEFORE pending
-        for m in self._messages[:pending_i]:
-            lines.append(f"[{m.time}] {m.role}: {m.text}")
-
-        # Pending section
-        lines.append("--- PENDING ---")
-        pm = self._messages[pending_i]
-        lines.append(f"[{pm.time}] {pm.role}: {pm.text}")
-
-        return "\n".join(lines).rstrip()
+        return "\n".join(blocks)
 
     # ==========================================================
     # Snapshot (STRICT v1)

@@ -502,7 +502,7 @@ class MainScreen(Screen):
                         self._update_spinner, preview or current_label, "thinking"
                     )
 
-                    if "</THINK>" in joined:
+                    if "</think>" in joined:
                         _thinking_done = True
                         stream_buf.clear()
                         loop.call_soon_threadsafe(
@@ -527,9 +527,6 @@ class MainScreen(Screen):
 
                 if result in (INTERRUPT_SENTINEL, "!", "/stop", "stop", "cancel"):
                     raise asyncio.CancelledError("interrupted by user")
-
-                if result and not _should_exit(result):
-                    await self.query_one(ChatLog).add_message(result, "user")
 
                 self._start_spinner(current_label, "waiting")
                 return result

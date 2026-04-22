@@ -37,6 +37,7 @@ from buddy.tools.os._fs_helpers import (
     needs_confirmation,
     ok,
     resolve_path,
+    tree_entry_label,
 )
 
 # ==========================================================
@@ -221,9 +222,7 @@ class ReadFile:
                     return
                 is_last = i == len(visible) - 1
                 connector = "└── " if is_last else "├── "
-                lines.append(
-                    f"{prefix}{connector}{child.name}{'/' if child.is_dir() else ''}"
-                )
+                lines.append(f"{prefix}{connector}{tree_entry_label(child)}")
                 count[0] += 1
                 if child.is_dir():
                     _walk(

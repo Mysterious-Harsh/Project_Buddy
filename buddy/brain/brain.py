@@ -5,7 +5,7 @@ from typing import Any, Callable, Dict, List, Optional, Protocol, Union
 
 from buddy.logger.logger import get_logger
 from buddy.brain.output_parser import OutputParser
-from buddy.brain.prompt_builder import build_prompt
+from buddy.brain.prompt_builder import build_prompt, build_retrieval_prompt, build_brain_prompt, build_planner_prompt, build_executor_prompt, build_responder_prompt, build_reader_prompt, build_memory_summary_prompt
 from buddy.prompts.base_system_prompts import (
     BUDDY_IDENTITY,
     BUDDY_BEHAVIOR,
@@ -183,38 +183,38 @@ class Brain:
         This is the only place where we define the formatting of the context.
         """
         context_parts = [
-            "<CONTEXT>",
-            f"<DATETIME>\n{datetime_block}\n</DATETIME>",
+            "<context>",
+            f"<datetime>\n{datetime_block}\n</datetime>",
         ]
         if memories is not None:
-            context_parts.append(f"<MEMORIES>\n{memories}\n</MEMORIES>")
+            context_parts.append(f"<memories>\n{memories}\n</memories>")
         if recent_turns is not None:
             context_parts.append(
-                f"<CONVERSATION_HISTORY>\n{recent_turns}\n</CONVERSATION_HISTORY>"
+                f"<conversation_history>\n{recent_turns}\n</conversation_history>"
             )
         if available_tools is not None:
             context_parts.append(
-                f"<AVAILABLE_TOOLS>\n{available_tools}\n</AVAILABLE_TOOLS>"
+                f"<available_tools>\n{available_tools}\n</available_tools>"
             )
         if prior_outputs is not None:
-            context_parts.append(f"<PRIOR_OUTPUTS>\n{prior_outputs}\n</PRIOR_OUTPUTS>")
+            context_parts.append(f"<prior_outputs>\n{prior_outputs}\n</prior_outputs>")
         if step_followups is not None:
             context_parts.append(
-                f"<STEP_FOLLOWUPS>\n{step_followups}\n</STEP_FOLLOWUPS>"
+                f"<step_followups>\n{step_followups}\n</step_followups>"
             )
         if step_errors is not None:
-            context_parts.append(f"<STEP_ERRORS>\n{step_errors}\n</STEP_ERRORS>")
+            context_parts.append(f"<step_errors>\n{step_errors}\n</step_errors>")
         if tool_info is not None:
             context_parts.append(
-                f"<TOOL_INSTRUCTIONS>\n{tool_info}\n</TOOL_INSTRUCTIONS>"
+                f"<tool_instructions>\n{tool_info}\n</tool_instructions>"
             )
         if execution_results is not None:
             context_parts.append(
-                f"<EXECUTION_RESULTS>\n{execution_results}\n</EXECUTION_RESULTS>"
+                f"<execution_results>\n{execution_results}\n</execution_results>"
             )
         if responder_note:
-            context_parts.append(f"<PLANNER_NOTE>\n{responder_note}\n</PLANNER_NOTE>")
-        context_parts.append("</CONTEXT>")
+            context_parts.append(f"<planner_note>\n{responder_note}\n</planner_note>")
+        context_parts.append("</context>")
         return "\n".join(context_parts)
 
     # ------------------------------------------------------
@@ -244,20 +244,15 @@ class Brain:
 
         Strict validation via OutputParser.parse_retrieval_gate().
         """
-        context = self._build_context(
-            datetime_block=self._get_time_info(),
-            recent_turns=recent_turns,
-        )
-
         system_prompt = self._build_system_prompt([
             RETRIEVAL_GATE_PROMPT,
             BUDDY_OUTPUT.format(schema=RETRIEVAL_GATE_PROMPT_SCHEMA),
         ])
-        prompt = build_prompt(
-            username=self.username,
+        prompt = build_retrieval_prompt(
             system=system_prompt,
-            context=context,
-            task_input=active_task,
+            chat_history=recent_turns,
+            datetime_block=self._get_time_info(),
+            current_message=active_task,
         )
 
         raw = self._call_llm_generate(
@@ -296,23 +291,18 @@ class Brain:
         Runs the Decision+Ingestion prompt (JSON expected).
         Strict validation via OutputParser.parse_brain().
         """
-        context = self._build_context(
-            datetime_block=self._get_time_info(),
-            recent_turns=recent_turns,
-            memories=memories,
-        )
-
         system_prompt = self._build_system_prompt([
             BUDDY_MEMORY,
             BUDDY_BEHAVIOR,
             BRAIN_PROMPT,
             BUDDY_OUTPUT.format(schema=BRAIN_PROMPT_SCHEMA),
         ])
-        prompt = build_prompt(
-            username=self.username,
+        prompt = build_brain_prompt(
             system=system_prompt,
-            context=context,
-            task_input=active_task,
+            chat_history=recent_turns,
+            datetime_block=self._get_time_info(),
+            current_message=active_task,
+            memories=memories,
         )
 
         raw = self._call_llm_generate(
@@ -352,22 +342,18 @@ class Brain:
         Runs the Planner prompt (JSON expected).
         Strict validation via OutputParser.parse_planner().
         """
-        context = self._build_context(
-            datetime_block=self._get_time_info(),
-            memories=memories,
-            available_tools=available_tools,
-        )
-
         system_prompt = self._build_system_prompt([
             BUDDY_MEMORY,
             PLANNER_PROMPT,
             BUDDY_OUTPUT.format(schema=PLANNER_PROMPT_SCHEMA),
         ])
-        prompt = build_prompt(
-            username=self.username,
+        prompt = build_planner_prompt(
             system=system_prompt,
-            context=context,
-            task_input=(planner_instructions + "\n\n" + active_task),
+            datetime_block=self._get_time_info(),
+            available_tools=available_tools,
+            planner_instructions=planner_instructions,
+            memories=memories,
+            followups=active_task,
         )
 
         raw = self._call_llm_generate(
@@ -410,29 +396,20 @@ class Brain:
         Strict validation via OutputParser.parse_executor().
         """
 
-        if step_followups == "":
-            step_followups = None
-        if step_errors == "":
-            step_errors = None
-        context = self._build_context(
-            datetime_block=self._get_time_info(),
-            prior_outputs=prior_outputs,
-            step_followups=step_followups,
-            step_errors=step_errors,
-            tool_info=tool_info,
-        )
-
         system_prompt = self._build_system_prompt([
             EXECUTOR_PROMPT,
             BUDDY_OUTPUT.format(
                 schema=EXECUTOR_PROMPT_SCHEMA.format(tool_call_format=tool_call_format)
             ),
         ])
-        prompt = build_prompt(
-            username=self.username,
+        prompt = build_executor_prompt(
             system=system_prompt,
-            context=context,
-            task_input=instruction,
+            datetime_block=self._get_time_info(),
+            tool_info=tool_info,
+            instruction=instruction,
+            prior_outputs=prior_outputs or "",
+            step_errors=step_errors or "",
+            followups=step_followups or "",
         )
 
         raw = self._call_llm_generate(
@@ -458,6 +435,7 @@ class Brain:
         self,
         *,
         memories: str,
+        now: Optional[float] = None,
         temperature: float = 0.4,
         top_p: float = 0.98,
         repeat_penalty: float = 1.12,
@@ -469,25 +447,18 @@ class Brain:
         Runs the Memory Summary prompt (JSON expected).
         Strict validation via OutputParser.parse_memory_summary().
         """
-        context = self._build_context(
-            datetime_block=self._get_time_info(),
-            memories=memories,
-        )
-
         system_prompt = self._build_system_prompt([
             BUDDY_MEMORY,
             MEMORY_SUMMARY_PROMPT,
             BUDDY_OUTPUT.format(schema=MEMORY_SUMMARY_PROMPT_SCHEMA),
         ])
-        prompt = build_prompt(
-            username=self.username,
+        import datetime as _dt
+        _ts = now if now is not None else _dt.datetime.now().timestamp()
+        today_str = _dt.datetime.fromtimestamp(_ts).strftime("%Y-%m-%d %H:%M")
+        prompt = build_memory_summary_prompt(
             system=system_prompt,
-            context=context,
-            task_input=(
-                "Summarize your current memories into a concise summary that captures"
-                " key information and insights. Focus on what would change future"
-                " behavior if forgotten."
-            ),
+            memories=memories,
+            today=today_str,
         )
 
         raw = self._call_llm_generate(
@@ -526,22 +497,17 @@ class Brain:
         Runs the Respond prompt (JSON expected).
         Strict validation via OutputParser.parse_respond().
         """
-        context = self._build_context(
-            datetime_block=self._get_time_info(),
-            memories=memories,
-            execution_results=execution_results,
-        )
-
         system_prompt = self._build_system_prompt([
             BUDDY_BEHAVIOR,
             RESPOND_PROMPT,
             BUDDY_OUTPUT.format(schema=RESPOND_PROMPT_SCHEMA),
         ])
-        prompt = build_prompt(
-            username=self.username,
+        prompt = build_responder_prompt(
             system=system_prompt,
-            context=context,
-            task_input=active_task,
+            datetime_block=self._get_time_info(),
+            memories=memories,
+            execution_results=execution_results,
+            responder_instruction=active_task,
         )
 
         raw = self._call_llm_generate(
@@ -583,21 +549,16 @@ class Brain:
         Returns dict with keys: relevant (bool), content (str).
         """
 
-        context = self._build_context(
-            datetime_block=self._get_time_info(),
-            prior_outputs=rolling_context if rolling_context else READER_CONTEXT_EMPTY,
-        )
-
         system_prompt = self._build_system_prompt([
             READER_PROMPT,
             BUDDY_OUTPUT.format(schema=READER_SCHEMA),
         ])
 
-        prompt = build_prompt(
-            username=self.username,
+        prompt = build_reader_prompt(
             system=system_prompt,
-            context=context,
-            task_input=READER_TASK_TEMPLATE.format(
+            datetime_block=self._get_time_info(),
+            rolling_context=rolling_context if rolling_context else READER_CONTEXT_EMPTY,
+            task=READER_TASK_TEMPLATE.format(
                 query=query,
                 paragraph=paragraph,
             ),
@@ -659,9 +620,15 @@ class Brain:
             return {"error": "No image paths provided"}
 
         # Encode all images to data URIs — fail fast on first error
+        # Pre-encoded data URIs (from in-memory capture) are passed through directly.
         data_uris: List[str] = []
         for path in image_paths:
-            if not path or not is_image_path(path):
+            if not path:
+                return {"error": "Empty image path or data URI"}
+            if str(path).startswith("data:"):
+                data_uris.append(path)
+                continue
+            if not is_image_path(path):
                 return {"error": f"Not a recognized image file: {path}"}
             try:
                 data_uris.append(encode_image_to_data_uri(path))
@@ -698,7 +665,7 @@ class Brain:
                 json_extract=True,
                 json_validate=True,
                 json_root="object",
-                stop=["</JSON>"],
+                stop=["</json>"],
             )
         except Exception as exc:
             logger.warning(
@@ -774,15 +741,34 @@ class Brain:
             json_validate=bool(json_mode),
             json_root="object",
             json_max_chars=120_000,
-            stop=["</JSON>"],
+            stop=["</json>"],
             interrupt_event=self._interrupt_event,
         )
 
         text = "" if out is None else str(out)
-        if text.endswith(
-            ("</THINK>", "</THINK>\n", "</THINK>\n\n", "\n</THINK>", "\n\n</THINK>")
-        ):
-            prompt = prompt + f"\n {text}" + "\n<JSON>"
+
+        # ── Detect missing JSON and re-prompt ────────────────────────────
+        # Failure mode A: model output only the <think> block and stopped.
+        #   Qwen3 emits lowercase </think>; handle both cases for safety.
+        # Failure mode B (json_mode only): model emitted think + prose but
+        #   forgot <json>. Common when execution_results are very long and
+        #   the think block exhausts the model's attention budget.
+        # Fix: trim to the think portion and inject <json> so the follow-up
+        #   call skips re-thinking and goes straight to JSON emission.
+        _text_lower = text.lower()
+        _think_only = _text_lower.rstrip().endswith("</think>")
+
+        _prose_instead_of_json = False
+        if json_mode and not _think_only and "</think>" in _text_lower:
+            try:
+                json.loads(text)
+            except Exception:
+                _prose_instead_of_json = True
+
+        if _think_only or _prose_instead_of_json:
+            _idx = _text_lower.rfind("</think>")
+            _think_part = text[: _idx + len("</think>")] if _idx >= 0 else text
+            prompt = prompt + f"\n{_think_part}\n<json>"
             text = self.llm.generate(
                 prompt=prompt,
                 system=system,
@@ -798,7 +784,7 @@ class Brain:
                 json_validate=bool(json_mode),
                 json_root="object",
                 json_max_chars=120_000,
-                stop=["</JSON>"],
+                stop=["</json>"],
                 interrupt_event=self._interrupt_event,
             )
 

@@ -44,47 +44,52 @@ VISION_TOOL_PROMPT = """
 <tool_description>
 VISION TOOL
 
-Analyzes image(s) full end-to-end and give best possible results to the user query.
-Supports PNG, JPG, JPEG, WEBP, GIF, BMP. Single image or multiple images.
+Two actions:
+  screenshot — capture the current screen and reason over it (no path needed)
+  analyze    — analyze one or more image files provided by the user
+
+Supports PNG, JPG, JPEG, WEBP, GIF, BMP. Single or multiple images.
 </tool_description>
 
 <when_to_use>
-═══════════════════════════════════════════════
 §1. WHEN TO USE
-═══════════════════════════════════════════════
-Use this tool when:
-  - The user provides an image path and asks what is in it
-  - The user wants a screenshot, photo, diagram, or chart analyzed
-  - The user wants text extracted from an image (OCR / read text)
-  - The user wants to compare two or more images
-  - The user asks about specific objects, colors, layouts, or content in an image
+action="screenshot":
+  - User asks "what's on my screen?", "look at my screen", "take a screenshot"
+  - User wants Buddy to observe the current state of the display
+
+action="analyze" (default):
+  - User provides an image path and asks what is in it
+  - User wants a photo, diagram, or chart analyzed
+  - User wants text extracted from an image (OCR)
+  - User wants to compare two or more images
 
 DO NOT use if:
-  - No image file path was provided — ask the user for one
+  - No image path provided and user did NOT ask for a screenshot
   - The file is not an image (use filesystem tool for documents, code, etc.)
 </when_to_use>
 
 <call_schema>
-═══════════════════════════════════════════════
 §2. CALL SCHEMA
-═══════════════════════════════════════════════
-  paths  : required — list of absolute paths
-  query  : required — what to compare, find, or answer across images
+  action    : "screenshot" | "analyze" (default: "analyze")
+  paths     : list of absolute paths — required for action="analyze", omit for screenshot
+  query     : required — what to find, answer, or reason about
+  save_path : optional — absolute path to save the screenshot PNG (screenshot only)
 </call_schema>
 
 <result_fields>
-═══════════════════════════════════════════════
 §3. RESULT FIELDS (returned as text to responder)
-═══════════════════════════════════════════════
   DESCRIPTION  — full image description paragraph
   OBJECTS      — list of key visible items/elements
   TEXT_FOUND   — verbatim text visible in image (empty string if none)
   KEY_FINDING  — direct answer to the query — the primary output
-  PATHS        — the image path(s) that were analyzed
+  PATHS        — image path(s) analyzed (empty for screenshot)
 </result_fields>
 """.strip()
 
 VISION_TOOL_CALL_FORMAT = (
-    '{"paths": ["/absolute/path/a.png", "/absolute/path/b.jpg"], "query": "String'
-    ' describing what to find, compare, or answer about the image(s)"}'
+    'screenshot:       {"action": "screenshot", "query": "what is on the'
+    ' screen?"}\nscreenshot+save:  {"action": "screenshot", "save_path":'
+    ' "/absolute/path/out.png", "query": "what is on the screen?"}\nanalyze:         '
+    ' {"action": "analyze", "paths": ["/absolute/path/a.png"], "query": "what is in'
+    ' this image?"}'
 )

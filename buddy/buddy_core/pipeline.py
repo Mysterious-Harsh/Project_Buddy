@@ -9,6 +9,7 @@ from typing import Awaitable, Callable, Optional, Any, Dict, List, Tuple
 import threading
 from buddy.logger.logger import get_logger
 from buddy.brain.action_router import ActionRouter
+from buddy.brain.intent_interceptor import interceptor as _interceptor, normalize as _normalize
 from buddy.buddy_core.smart_truncator import (
     truncate_history,
     truncate_memory,
@@ -291,6 +292,31 @@ async def handle_turn(
         logger.warning("handle_turn | empty user_message | src=%s", src)
         return None
 
+    # ── Normalize filler words (applied to all turns) ─────────
+    normalized_message = _normalize(user_message)
+
+    # ── Fast-path interceptor (zero LLM calls) ─────────────────
+    quick = _interceptor.match(normalized_message)
+    if quick is not None:
+        reply, success = _interceptor.execute(quick)
+        if success:
+            logger.info(
+                "interceptor_fast_path | src=%s action=%s reply=%r",
+                src, quick.name, reply,
+            )
+            await ui_output(reply)
+            _convs = getattr(getattr(state, "artifacts", None), "conversations", None)
+            if _convs is not None:
+                _convs.add_user(text=user_message)
+                _convs.add_buddy(text=reply)
+            return reply
+        logger.info(
+            "interceptor_fast_path_failed | src=%s action=%s err=%r — falling through to pipeline",
+            src, quick.name, reply,
+        )
+        # fall through: full pipeline handles it
+    # ─────────────────────────────────────────────────────────
+
     artifacts = getattr(state, "artifacts", None)
     if artifacts is None or getattr(artifacts, "brain", None) is None:
         logger.warning("handle_turn | missing brain in state.artifacts")
@@ -485,6 +511,11 @@ async def handle_turn(
         recent_conversations or "", _max_history_chars
     )
     mem_text = truncate_memory(mem_text or "", _max_memory_chars)
+    if not mem_text or mem_text.strip().lower() in ("none", "null", ""):
+        mem_text = (
+            "No memories yet — I'm starting fresh. "
+            "I'll pay close attention to who this person is and what matters to them."
+        )
     # ─────────────────────────────────────────────────────────
 
     progress_cb("Thinking", False)

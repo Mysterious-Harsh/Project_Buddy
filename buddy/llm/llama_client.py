@@ -1325,7 +1325,7 @@ class LlamaClient:
         have_valid_json = False
         valid_json_text = ""
 
-        gate_marker = "<JSON>"
+        gate_marker = "<json>"
         gate_open = cap is None
         gate_tail = ""
         ROOT_TAIL_KEEP = 256
@@ -1702,6 +1702,7 @@ class LlamaClient:
 if __name__ == "__main__":
     import sys
     from buddy.tests.test_brain_prompt import test_brain_prompt
+    from buddy.tests.test_executor_prompt import test_executor_prompt
 
     client = LlamaClient(
         model="local-model",
@@ -1724,7 +1725,7 @@ if __name__ == "__main__":
     try:
         print("\n[stream completion w/ json_extract+validate]")
         out = client.generate(
-            prompt=test_brain_prompt,
+            prompt=test_executor_prompt,
             stream=True,
             temperature=0.4,
             top_p=0.98,

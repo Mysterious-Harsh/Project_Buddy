@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import os
 import re
+import stat as _stat
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -118,18 +119,48 @@ def needs_confirmation(tool: str, path: str, preview: str) -> Dict[str, Any]:
 
 
 # ==========================================================
-# Directory entry dict
+# Directory entry dict + tree label
 # ==========================================================
 
 def entry_dict(p: Path) -> Dict[str, Any]:
     try:
-        stat = p.stat()
-        return {
+        s = p.stat()
+        is_dir = p.is_dir()
+        result: Dict[str, Any] = {
             "name": p.name,
             "path": str(p),
-            "type": "dir" if p.is_dir() else "file",
-            "size_bytes": stat.st_size if p.is_file() else None,
-            "modified": iso_time(stat.st_mtime),
+            "type": "dir" if is_dir else "file",
+            "permissions": _stat.filemode(s.st_mode),
+            "modified": iso_time(s.st_mtime),
+            "created": iso_time(s.st_ctime),
         }
+        if is_dir:
+            try:
+                result["item_count"] = sum(1 for _ in p.iterdir())
+            except PermissionError:
+                result["item_count"] = None
+        else:
+            result["size_bytes"] = s.st_size
+            result["size"] = human_size(s.st_size)
+            if p.suffix:
+                result["extension"] = p.suffix.lower()
+        return result
     except OSError:
-        return {"name": p.name, "path": str(p), "type": "unknown", "size_bytes": None, "modified": None}
+        return {"name": p.name, "path": str(p), "type": "unknown"}
+
+
+def tree_entry_label(p: Path) -> str:
+    """Return a short inline label for tree view: 'name (size, date)' or 'name/ (N items, date)'."""
+    try:
+        s = p.stat()
+        date = datetime.fromtimestamp(s.st_mtime, tz=timezone.utc).strftime("%Y-%m-%d")
+        if p.is_dir():
+            try:
+                count = sum(1 for _ in p.iterdir())
+                return f"{p.name}/ ({count} items, {date})"
+            except PermissionError:
+                return f"{p.name}/ ({date})"
+        else:
+            return f"{p.name} ({human_size(s.st_size)}, {date})"
+    except OSError:
+        return p.name + ("/" if p.is_dir() else "")
