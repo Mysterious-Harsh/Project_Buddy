@@ -1,24 +1,13 @@
 from __future__ import annotations
 
 # ==========================================================
-# terminal.py  —  v1.2.0
+# terminal.py  —  v1.3.0
 #
-# v1.0.0 → v1.1.0
+# v1.2.0 → v1.3.0
 # ────────────────
-# 1. Platform-independent execution (Linux / macOS / Windows)
-# 2. Daemon command auto-detection + DaemonRegistry
-# 3. Bug fix — TimeoutExpired now kills orphaned child process
-# 4. TerminalResult: IS_DAEMON, PID fields added (backward-compat)
-#
-# v1.1.0 → v1.2.0
-# ────────────────
-# 5. Output truncation — stdout/stderr capped at _MAX_OUTPUT_CHARS
-#    (8 000 chars / ~2 k tokens) with a "...[truncated]" notice
-# 6. Daemon reader thread memory fix — lines read but not accumulated
-#    after the startup deadline, preventing unbounded list growth
-# 7. Removed unused _argv_to_display() helper
-#
-# All existing public names, signatures, and result fields are UNCHANGED.
+# - Merged TERMINAL_ERROR_RECOVERY_PROMPT into TERMINAL_TOOL_PROMPT
+#   (single prompt, <error_recovery> section activated by <errors> context)
+# - Removed error_prompt from get_info() — action_router falls back to prompt
 # ==========================================================
 
 import os
@@ -33,11 +22,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 from pydantic import BaseModel, Field, model_validator
 from buddy.brain.text_reader import CHAR_THRESHOLD, maybe_read
-from buddy.prompts.terminal_prompts import (
-    tool_call_format,
-    TERMINAL_ERROR_RECOVERY_PROMPT,
-    TERMINAL_TOOL_PROMPT,
-)
+from buddy.prompts.terminal_prompts import TERMINAL_TOOL_PROMPT
 
 # ──────────────────────────────────────────────────────────
 # Platform detection
@@ -58,27 +43,6 @@ def _truncate(text: str) -> str:
         return text
     omitted = len(text) - _MAX_OUTPUT_CHARS
     return text[:_MAX_OUTPUT_CHARS] + f"\n...[truncated: {omitted} chars omitted]"
-
-
-# ==========================================================
-# Runtime context (minimal)  — UNCHANGED
-# ==========================================================
-
-
-@dataclass
-class RuntimeContext:
-    now_iso: str
-    timezone: str
-
-
-class TerminalCall(BaseModel):
-    """
-    Executor-facing tool call.
-    """
-
-    cwd: str
-    command: str
-    timeout: int = 30
 
 
 # ==========================================================
@@ -336,7 +300,7 @@ class Terminal:
     """
 
     tool_name = "terminal"
-    version = "1.2.0"
+    version = "1.3.0"
 
     # Shared registry of all background processes
     daemons = DaemonRegistry()
@@ -351,29 +315,25 @@ class Terminal:
             "name": self.tool_name,
             "version": self.version,
             "description": (
-                "Runs shell commands.\nUSE FOR:\n  • Run code/scripts — python, node,"
-                " go run, cargo run, java -jar, ruby, bash\n  • Tests — pytest, jest,"
-                " go test, cargo test, rspec\n  • Compilers/builders — gcc, make, tsc,"
-                " mvn, gradle\n  • Package managers — pip, npm, yarn, brew, apt,"
-                " cargo\n  • Git and version control\n  • System utilities, network"
-                " commands (curl, ping, ssh)\n  • Process management and installs\nDO"
-                " NOT USE FOR: read/write/search/manage files — use read_file,"
-                " edit_file, search_file, or manage_file instead.\nPREFER structured tools over terminal when available;"
-                " terminal returns raw text.\nDAEMON AWARE: servers/watchers (uvicorn,"
-                " npm start, tail -f, etc.) are auto-detected, launched in background,"
-                " and tracked in Terminal.daemons."
+                "Runs shell commands. SCRIPTING AND EXECUTION ONLY.\n"
+                "USE FOR:\n"
+                "  • Run code/scripts — python, node, go run, cargo run, java -jar, ruby, bash\n"
+                "  • Tests — pytest, jest, go test, cargo test, rspec\n"
+                "  • Compilers/builders — gcc, make, tsc, mvn, gradle\n"
+                "  • Package managers — pip, npm, yarn, brew, apt, cargo\n"
+                "  • Git and version control\n"
+                "  • System utilities, network commands (curl, ping, ssh)\n"
+                "  • Process management and installs\n"
+                "NEVER USE FOR:\n"
+                "  • Summarizing, compiling, or processing outputs from prior steps —"
+                " the Responder stage does this automatically after all steps finish.\n"
+                "  • Read/write/search/manage files — use the filesystem tool instead.\n"
+                "PREFER structured tools over terminal when available; terminal returns raw text.\n"
+                "DAEMON AWARE: servers/watchers (uvicorn, npm start, tail -f, etc.) are"
+                " auto-detected, launched in background, and tracked in Terminal.daemons."
             ),
             "prompt": TERMINAL_TOOL_PROMPT,
-            "error_prompt": TERMINAL_ERROR_RECOVERY_PROMPT,
-            "tool_call_format": tool_call_format,
         }
-
-    # --------------------------
-    # Validation
-    # --------------------------
-
-    def parse_call(self, payload: Dict[str, Any]) -> TerminalCall:
-        return TerminalCall.model_validate(payload)
 
     # --------------------------
     # Execution
@@ -381,19 +341,20 @@ class Terminal:
 
     async def execute(
         self,
-        call: TerminalCall,
+        function: str,
+        arguments: Dict[str, Any],
         on_progress: Optional[Callable[[str, bool], None]] = None,
         goal: str = "",
         brain: Optional[Any] = None,
         **_kwargs: Any,
     ) -> Dict[str, Any]:
 
-        cwd = call.cwd
+        cwd = arguments["cwd"]
         if cwd in ["", "None", "null"]:
             cwd = None
 
         # for idx, cmd in enumerate(call.command, start=1):
-        cmd = str(call.command or "").strip()
+        cmd = str(arguments["command"] or "").strip()
         if on_progress:
             cmd_preview = cmd.replace("\r", " ").replace("\n", " ").strip()[:80]
             on_progress(f"Executing {cmd_preview}", False)
@@ -410,11 +371,18 @@ class Terminal:
             )
             return result.model_dump()
 
-        timeout = int(call.timeout)
+        timeout = int(arguments["timeout"])
 
         if _is_daemon_command(cmd):
             return self._execute_daemon(cmd, cwd=cwd, timeout=timeout)
-        return self._execute_normal(cmd, cwd=cwd, timeout=timeout, brain=brain, goal=goal, on_progress=on_progress)
+        return self._execute_normal(
+            cmd,
+            cwd=cwd,
+            timeout=timeout,
+            brain=brain,
+            goal=goal,
+            on_progress=on_progress,
+        )
 
     # --------------------------
     # Normal execution

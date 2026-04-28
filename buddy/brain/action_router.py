@@ -45,49 +45,60 @@ def _project_success(tool_name: str, result: Dict[str, Any]) -> Dict[str, Any]:
             "RESULTS": result.get("RESULTS"),
         }
 
-    if tool_name == "read_file":
-        projected: Dict[str, Any] = {"PATH": result.get("PATH")}
-        # file read
-        if result.get("CONTENT") is not None:
-            projected["CONTENT"] = result["CONTENT"]
-            if result.get("FORMAT"):
-                projected["FORMAT"] = result["FORMAT"]
-            if result.get("TRUNCATED"):
-                projected["TRUNCATED"] = result["TRUNCATED"]
-                projected["NOTE"] = result.get("NOTE")
-        # directory listing
-        if result.get("RESULTS") is not None:
-            projected["RESULTS"] = result["RESULTS"]
-            projected["TOTAL_FOUND"] = result.get("TOTAL_FOUND")
-        # directory tree
-        if result.get("TREE_TEXT") is not None:
-            projected["TREE_TEXT"] = result["TREE_TEXT"]
-            projected["TOTAL_FOUND"] = result.get("TOTAL_FOUND")
+    if tool_name == "filesystem":
+        projected: Dict[str, Any] = {}
+        for field in (
+            # common
+            "PATH", "ACTION", "FORMAT",
+            # ls
+            "ENTRIES", "TREE_TEXT", "TOTAL",
+            # read
+            "CONTENT", "SIZE_BYTES", "MODIFIED", "CREATED",
+            "LINE_COUNT", "START_LINE", "END_LINE",
+            "ROWS_TOTAL", "ROWS_AFTER_FILTER", "COLUMNS", "SHEET",
+            "EXISTS", "IS_FILE", "IS_DIR",
+            "MIME", "OPENED",
+            # find
+            "RESULTS", "TOTAL_FOUND",
+            # manage
+            "DESTINATION", "DIFF",
+            # shared
+            "TRUNCATED", "NOTE",
+            "NEEDS_CONFIRMATION", "PREVIEW",
+        ):
+            if result.get(field) is not None:
+                projected[field] = result[field]
         return projected
 
-    if tool_name == "search_file":
-        projected: Dict[str, Any] = {
-            "PATH": result.get("PATH"),
-            "ACTION": result.get("ACTION"),
-            "RESULTS": result.get("RESULTS"),
-            "TOTAL_FOUND": result.get("TOTAL_FOUND"),
+    if tool_name == "browser":
+        return {
+            k: v for k, v in result.items()
+            if k not in _ALWAYS_STRIP and k in (
+                "ACTION", "TASK", "URL", "STEPS", "SUMMARY",
+                "FILLED", "FAILED", "DESCRIPTION", "KEY_FINDING",
+                "TEXT_FOUND", "TITLE", "FORM_FIELDS", "BUTTONS",
+                "HAS_CAPTCHA", "SESSIONS", "EXISTS", "DOMAIN", "ERROR",
+            )
         }
-        if result.get("NOTE"):
-            projected["NOTE"] = result["NOTE"]
-        return projected
 
-    # edit_file, manage_file, vision, unknown — strip OK/TOOL only
+    if tool_name == "clipboard":
+        return {k: v for k, v in result.items() if k not in _ALWAYS_STRIP}
+
+    # vision, unknown — strip OK/TOOL only
     return {k: v for k, v in result.items() if k not in _ALWAYS_STRIP}
 
 
 # Maps tool name → action verb shown in the spinner during executor + tool execution.
 # Tools may override this with a more specific label via their own on_progress call.
 _TOOL_VERB: Dict[str, str] = {
-    "filesystem": "Reading",
+    "filesystem": "Working on files",
     "terminal": "Executing",
     "web_search": "Searching",
     "web_fetch": "Fetching",
     "vision": "Analysing",
+    "system_control": "Controlling",
+    "browser": "Browsing",
+    "clipboard": "Clipboard",
 }
 
 
@@ -272,8 +283,10 @@ class ActionRouter:
         ui_output: UiPrintFn,
         ui_input: UiInputFn,
         max_step_attempts: int = 3,
+        memory_manager: Any = None,
     ) -> None:
         self.brain = brain
+        self.memory_manager = memory_manager
         self._ui_output = ui_output
         self._ui_input = ui_input
         self.stack = FollowupStack(ui_output=self._ui_output, ui_input=self._ui_input)
@@ -403,6 +416,18 @@ class ActionRouter:
             else []
         )
         if not steps:
+            if _status == "refusal":
+                refusal_msg = str(planner_parsed.get("message") or "").strip()
+                responder_instruction = (
+                    f"Could not do this — capability not available: {refusal_msg}. "
+                    "Tell the user plainly what can't be done and suggest the nearest alternative."
+                )
+            elif _status not in ("followup",):
+                # parse failure or success with empty steps — something broke internally
+                responder_instruction = (
+                    "Buddy failed to plan this action due to an internal error. "
+                    "Tell the user something went wrong and offer to retry."
+                )
             return {
                 "now_iso": now_iso,
                 "timezone": timezone,
@@ -500,7 +525,6 @@ class ActionRouter:
 
             tool_info = tool.get_info()
             tool_prompt = str(tool_info.get("prompt") or "")
-            tool_call_format = str(tool_info.get("tool_call_format") or "")
 
             # reset per-step error and followup context
             self.errors.clear()
@@ -523,7 +547,6 @@ class ActionRouter:
                 if attempt > 0:
                     if on_token:
                         on_token("Oo.. Got some error let me solve it 🫣", False)
-                    tool_prompt = tool_info.get("error_prompt", tool_prompt)
 
                 logger.info(
                     "step %d attempt %d/%d executor_call tool=%s",
@@ -541,8 +564,7 @@ class ActionRouter:
                     prior_outputs=prior_outputs_json,
                     step_followups=self.stack.appendix,
                     step_errors=self.errors.appendix,
-                    tool_info=tool_prompt,
-                    tool_call_format=tool_call_format,
+                    tool_prompt=tool_prompt,
                     stream=True,
                     llm_options=llm_options,
                 )
@@ -563,12 +585,12 @@ class ActionRouter:
                 # FOLLOWUP path (NO attempt++)
                 # ---------------------------
                 if status == "followup":
-                    fq = str(exec_result.get("followup_question") or "").strip()
+                    fq = str(exec_result.get("message") or "").strip()
                     logger.warning("step %d followup asked: %r", step_id, fq[:140])
 
                     rerun = await self.stack.handle(
                         followup=True,
-                        followup_question=str(exec_result.get("followup_question")),
+                        followup_question=str(fq),
                         stage="executor",
                         step_id=step_id,
                         tool_name=tool_name,
@@ -600,26 +622,24 @@ class ActionRouter:
                     break
 
                 # ---------------------------
-                # ABORT path (hard stop)
+                # REFUSAL path (hard stop)
                 # ---------------------------
-                if status == "abort":
-                    reason = str(
-                        exec_result.get("abort_reason") or "Executor aborted"
-                    ).strip()
+                if status == "refusal":
+                    reason = str(exec_result.get("message") or "Executor refused step").strip()
                     step_execution_map[str(step_id)] = {
                         "tool": tool_name,
                         "goal": goal,
                         "status": "failed",
                         "error": {
-                            "type": "executor_abort",
+                            "type": "executor_refusal",
                             "message": reason,
                         },
                     }
-                    logger.error("step %d executor_abort: %r", step_id, reason[:200])
+                    logger.error("step %d executor_refusal: %r", step_id, reason[:200])
                     break
 
                 # ---------------------------
-                # Invalid status (hard stop)
+                # Unknown status (hard stop)
                 # ---------------------------
                 if status != "success":
                     step_execution_map[str(step_id)] = {
@@ -628,7 +648,7 @@ class ActionRouter:
                         "status": "failed",
                         "error": {
                             "type": "invalid_executor_output",
-                            "message": f"Executor returned invalid status='{status}'",
+                            "message": f"Executor returned unrecognised status='{status}'",
                         },
                     }
                     logger.error(
@@ -636,43 +656,26 @@ class ActionRouter:
                     )
                     break
 
-                # 2) Parse tool call (invalid => ErrorStack, attempt++)
-                tool_call_payload = exec_result.get("tool_call", {})
+                function = exec_result.get("function", "")
+                arguments = exec_result.get("arguments", {})
                 logger.info(
                     "┌─ EXECUTOR CALL  step=%d attempt=%d tool=%s ──────────────\n"
-                    "│  %s\n"
+                    "│  fn=%s  args=%s\n"
                     "└─────────────────────────────────────────────────────────",
-                    step_id,
-                    attempt,
-                    tool_name,
-                    json.dumps(tool_call_payload, ensure_ascii=False)[:300],
+                    step_id, attempt, tool_name,
+                    function,
+                    json.dumps(arguments, ensure_ascii=False)[:300],
                 )
-                try:
-                    call_obj = tool.parse_call(tool_call_payload)
-                except Exception as e:
-                    msg = f"{type(e).__name__}: {e}"
-                    self.errors.add(
-                        tool_result={
-                            "error_type": "invalid_tool_call",
-                            "message": "Tool call schema validation failed",
-                            "evidence": msg,
-                        },
-                        attempt=attempt,
-                    )
-                    logger.warning(
-                        "step %d attempt %d invalid_tool_call -> retry: %s",
-                        step_id,
-                        attempt,
-                        msg[:200],
-                    )
-                    attempt += 1
-                    continue
 
                 tool_exec_result = await tool.execute(
-                    call_obj,
+                    function=function,
+                    arguments=arguments,
                     on_progress=on_token,
                     goal=planner_instructions,
                     brain=self.brain,
+                    memory_manager=self.memory_manager,
+                    ui_output=self._ui_output,
+                    ui_input=self._ui_input,
                 )
 
                 # 4) Evaluate tool result
@@ -743,11 +746,26 @@ class ActionRouter:
 
                 attempt += 1
 
+            # if the while loop exited because attempts were exhausted (no break from
+            # success/refusal/followup paths), record the step as failed now
+            if str(step_id) not in step_execution_map:
+                last_error = str(tool_exec_result.get("ERROR") or tool_exec_result.get("STDERR") or "")[:200]
+                step_execution_map[str(step_id)] = {
+                    "tool": tool_name,
+                    "goal": goal,
+                    "status": "failed",
+                    "error": {
+                        "type": "max_attempts_exceeded",
+                        "message": f"Step failed after {self._max_step_attempts} attempt(s)."
+                        + (f" Last error: {last_error}" if last_error else ""),
+                    },
+                }
+                logger.error(
+                    "step %d max_attempts_exceeded tool=%s", step_id, tool_name
+                )
+
             # if step failed, stop whole plan (v1)
-            if (
-                str(step_id) in step_execution_map
-                and step_execution_map[str(step_id)].get("status") == "failed"
-            ):
+            if step_execution_map[str(step_id)].get("status") == "failed":
                 logger.error("plan halted at step %d", step_id)
                 break
 

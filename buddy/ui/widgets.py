@@ -18,6 +18,7 @@ import time
 from typing import Any, Callable, List, Optional
 
 from rich.align import Align
+from rich.markup import escape as markup_escape
 from rich.panel import Panel
 from rich.text import Text
 from textual.containers import Horizontal, Vertical, ScrollableContainer
@@ -335,7 +336,7 @@ class BootLogLine(Static):
             return
         try:
             spin = self._SPIN[self._frame]
-            self.update(f"[{_CYAN}]{spin}[/]  [{_DIM}]{self._msg}[/]")
+            self.update(f"[{_CYAN}]{spin}[/]  [{_DIM}]{markup_escape(self._msg)}[/]")
         except Exception:
             pass
 
@@ -348,7 +349,7 @@ class BootLogLine(Static):
         icon = self._ICONS.get(status, "·")
         color = self._COLORS.get(status, _DIM)
         text_color = _WHITE if status in ("ok", "warn", "fail") else _DIM
-        self.update(f"[{color}]{icon}[/]  [{text_color}]{msg}[/]")
+        self.update(f"[{color}]{icon}[/]  [{text_color}]{markup_escape(msg)}[/]")
 
 
 class BootLog(ScrollableContainer):
@@ -376,6 +377,12 @@ class BootLog(ScrollableContainer):
 
     async def add_message(self, msg: str, status: str = "running") -> None:
         if status == "running":
+            # A second "running" while one is already in flight (boot.py emits
+            # pairs like "LLM model: …" then "Downloading …").  Resolve the
+            # orphaned line as ok so it doesn't spin forever.
+            if self._pending is not None:
+                self._pending.set_result(self._pending._msg, "ok")
+                self._pending = None
             line = BootLogLine(msg)
             await self.mount(line)
             self._pending = line
@@ -616,7 +623,11 @@ class InfoPane(Static):
 
     def _redraw(self) -> None:
         try:
-            self.update(self._build())
+            markup = self._build()
+            try:
+                self.update(Text.from_markup(markup))
+            except Exception as _me:
+                logger.error("InfoPane._redraw: bad markup — %s", _me)
         except Exception:
             logger.exception("InfoPane._redraw failed")
 
@@ -666,7 +677,7 @@ class InfoPane(Static):
         last_mem = (self._last_memory or "").strip()
         if len(last_mem) > 50:
             last_mem = last_mem[:47] + "…"
-        last_mem_s = f"[{_DIM}]{last_mem or '—'}[/]"
+        last_mem_s = f"[{_DIM}]{markup_escape(last_mem) if last_mem else '—'}[/]"
 
         try:
             _sep_w = max(20, self.size.width - 4)
@@ -676,28 +687,28 @@ class InfoPane(Static):
 
         lines = [
             (
-                f"[{_CYAN}]◈[/] [{_WHITE}]{self._user_name}[/]"
+                f"[{_CYAN}]◈[/] [{_WHITE}]{markup_escape(self._user_name)}[/]"
                 f"    [{_DIM}]{date_s}  {time_s}[/]"
             ),
             D,
             (
-                f"[{_DIM}]LLM  [/][{_BLUE}]{self._llm_label}[/]"
+                f"[{_DIM}]LLM  [/][{_BLUE}]{markup_escape(self._llm_label)}[/]"
                 f"[{_DIM}] · {self._n_ctx}t[/]"
                 f"    [{_DIM}]State [/]{state_s}"
             ),
             (
                 f"[{_DIM}]     GPU {self._n_gpu_layers}L"
-                f"  ·  KV {self._kv_cache}"
-                f"  ·  FA {self._flash_attn}[/]"
+                f"  ·  KV {markup_escape(self._kv_cache)}"
+                f"  ·  FA {markup_escape(self._flash_attn)}[/]"
             ),
             (
-                f"[{_DIM}]HW   {self._hw_line}[/]"
+                f"[{_DIM}]HW   {markup_escape(self._hw_line)}[/]"
                 f"    [{_DIM}]Turn  [/][{_WHITE}]{self._turn}[/]"
                 f"  [{_DIM}]Up [/][{_WHITE}]{uptime}[/]"
             ),
             (
                 f"[{_DIM}]Mem  [/]{mem_s}"
-                f"[{_DIM}] (f·s·l)   Web [/][{_BLUE}]{self._web}[/]"
+                f"[{_DIM}] (f·s·l)   Web [/][{_BLUE}]{markup_escape(self._web)}[/]"
                 f"  [{_DIM}]Voice [/]{voice_s}"
             ),
             f"[{_DIM}]Last turn [/]{lat_s}",
@@ -760,11 +771,15 @@ class StatusBar(Static):
     _info: reactive[str] = reactive("")
     _hint: reactive[str] = reactive("")
 
-    def render(self) -> str:
-        if self._hint:
-            return self._hint
-        left = self._info or f"[dim {_DIM}]Voice: —  ·  Turn: 0[/]"
-        return f"{left}    {self._SHORTCUTS}"
+    def render(self) -> Text:
+        src = self._hint if self._hint else (
+            f"{self._info or f'[dim {_DIM}]Voice: —  ·  Turn: 0[/]'}    {self._SHORTCUTS}"
+        )
+        try:
+            return Text.from_markup(src)
+        except Exception:
+            logger.error("StatusBar.render: bad markup, falling back to plain | raw=%r", src)
+            return Text(src)
 
     def set_info(self, *, voice: str = "", turn: int = 0) -> None:
         parts = [
@@ -774,7 +789,12 @@ class StatusBar(Static):
         self._info = f"  [{_DIM}]·[/]  ".join(parts)
 
     def set_hint(self, msg: str, clear_after: float = 5.0) -> None:
-        self._hint = msg
+        try:
+            Text.from_markup(msg)
+            self._hint = msg
+        except Exception as _e:
+            logger.exception("StatusBar.set_hint: invalid markup | raw=%r", msg)
+            self._hint = markup_escape(msg)
         if clear_after > 0:
             self.set_timer(clear_after, self._clear_hint)
 
@@ -811,7 +831,7 @@ class SpinnerBar(Static):
             len(_THINKING_FRAMES), len(_WAITING_FRAMES), len(_WORKING_FRAMES)
         )
 
-    def render(self) -> str:
+    def render(self) -> Text:
         st = self._state
         frames = (
             _WAITING_FRAMES
@@ -819,7 +839,11 @@ class SpinnerBar(Static):
             else _WORKING_FRAMES if st == "working" else _THINKING_FRAMES
         )
         face = frames[self._frame % len(frames)]
-        return f" [{_CYAN}]{face:<12}[/]  [{_WHITE}]{self._label}…[/]"
+        t = Text(no_wrap=True, overflow="fold")
+        t.append(f" {face:<12}", style=_CYAN)
+        t.append("  ")
+        t.append(f"{self._label[:120]}…", style=_WHITE)
+        return t
 
     def show(self, label: str = "Thinking", state: str = "thinking") -> None:
         self._label = label
@@ -870,7 +894,7 @@ class ChatBubble(Static):
 
     def _render_bubble_content(self, text: str, cursor: bool = False) -> None:
         if self._kind == "meta":
-            self.update(f"[dim {_DIM}]  ◦ {text}[/]")
+            self.update(f"[dim {_DIM}]  ◦ {markup_escape(text)}[/]")
             return
 
         display = text + ("▋" if cursor else "")
@@ -1046,7 +1070,7 @@ class SleepView(Widget):
 
         star_block = "\n".join(star_lines)
         stats_block = "\n".join(stats)
-        return f"[{_CYAN}]{star_block}[/]\n[dim {_DIM}]{stats_block}[/]"
+        return f"[{_CYAN}]{markup_escape(star_block)}[/]\n[dim {_DIM}]{markup_escape(stats_block)}[/]"
 
     def reset_stats(self) -> None:
         self.stats_flash = 0

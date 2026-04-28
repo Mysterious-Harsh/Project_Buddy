@@ -42,10 +42,12 @@ from buddy.logger.logger import get_logger
 
 logger = get_logger("llama_installer")
 
-_GITHUB_API  = "https://api.github.com/repos/ggml-org/llama.cpp/releases/latest"
-_TIMEOUT_CON = 8.0   # connection timeout
-_TIMEOUT_READ = 30.0  # read timeout for API calls
+_GITHUB_API   = "https://api.github.com/repos/ggml-org/llama.cpp/releases/latest"
+_TIMEOUT_CON  = 8.0    # connection timeout
+_TIMEOUT_READ = 30.0   # read timeout for API calls
 _CHUNK        = 65536  # download chunk size
+_VERSION_FILE    = "llama_version.txt"    # tracks installed release tag in bin_dir
+_LAST_CHECK_FILE = "llama_last_check.txt" # epoch timestamp of last update check
 
 
 # ═══════════════════════════════════════════════════════════
@@ -255,6 +257,146 @@ def _install_all(extract_dir: Path, bin_dir: Path, is_windows: bool) -> Optional
 
 
 # ═══════════════════════════════════════════════════════════
+# Version tracking
+# ═══════════════════════════════════════════════════════════
+
+
+def get_installed_tag(bin_dir: Path) -> Optional[str]:
+    """Return the release tag that was installed into bin_dir, or None."""
+    try:
+        return (bin_dir / _VERSION_FILE).read_text(encoding="utf-8").strip() or None
+    except Exception:
+        return None
+
+
+def _save_installed_tag(bin_dir: Path, tag: str) -> None:
+    try:
+        (bin_dir / _VERSION_FILE).write_text(tag, encoding="utf-8")
+    except Exception:
+        logger.warning("Could not write llama version file")
+
+
+def _get_last_check_time(bin_dir: Path) -> Optional[float]:
+    """Return the epoch timestamp of the last update check, or None."""
+    try:
+        raw = (bin_dir / _LAST_CHECK_FILE).read_text(encoding="utf-8").strip()
+        return float(raw) if raw else None
+    except Exception:
+        return None
+
+
+def _save_last_check_time(bin_dir: Path) -> None:
+    import time
+    try:
+        (bin_dir / _LAST_CHECK_FILE).write_text(str(time.time()), encoding="utf-8")
+    except Exception:
+        logger.warning("Could not write llama last-check file")
+
+
+# ═══════════════════════════════════════════════════════════
+# Shared install helpers
+# ═══════════════════════════════════════════════════════════
+
+
+def _fetch_release(on_progress: Optional[Callable]) -> Optional[dict]:
+    """Fetch the latest llama.cpp GitHub release. Returns None on failure."""
+    if on_progress:
+        on_progress("Fetching latest llama.cpp release info...", False)
+    try:
+        resp = requests.get(
+            _GITHUB_API,
+            timeout=(_TIMEOUT_CON, _TIMEOUT_READ),
+            headers={"Accept": "application/vnd.github+json",
+                     "User-Agent": "buddy-llama-installer/1.0"},
+        )
+        resp.raise_for_status()
+        return resp.json()
+    except Exception as ex:
+        logger.warning("llama.cpp release fetch failed: %r", ex)
+        return None
+
+
+def _install_from_release(
+    bin_dir: Path,
+    release: dict,
+    on_progress: Optional[Callable],
+) -> Optional[Path]:
+    """
+    Download, extract, and install the best asset from a release dict.
+    Saves the version tag on success. Returns the llama-server path or None.
+    """
+    is_windows = sys.platform == "win32"
+    plat = _detect_platform()
+    tag = release.get("tag_name", "unknown")
+    assets = release.get("assets", [])
+    logger.info("Installing release: %s  (%d assets)", tag, len(assets))
+
+    asset = _pick_asset(assets, plat)
+    if not asset:
+        logger.error(
+            "No matching asset for platform %s/%s/%s",
+            plat["system"], plat["arch"], plat["gpu"],
+        )
+        if on_progress:
+            on_progress(
+                f"No prebuilt binary for {plat['system']}/{plat['arch']}/{plat['gpu']}."
+                " Install llama-server manually.",
+                True,
+            )
+        return None
+
+    asset_name = asset["name"]
+    asset_url  = asset["browser_download_url"]
+    size_mb    = round(asset.get("size", 0) / (1024 * 1024), 1)
+
+    if on_progress:
+        on_progress(f"Downloading {asset_name}  ({size_mb} MB)  [{tag}]", False)
+
+    bin_dir.mkdir(parents=True, exist_ok=True)
+
+    with tempfile.TemporaryDirectory(prefix="buddy_llama_") as tmp:
+        tmp_path     = Path(tmp)
+        archive_path = tmp_path / asset_name
+        extract_dir  = tmp_path / "extracted"
+
+        last_pct = [-1]
+
+        def _dl_progress(downloaded: int, total: int) -> None:
+            if not on_progress or total == 0:
+                return
+            pct = int(downloaded * 100 / total)
+            if pct != last_pct[0] and pct % 10 == 0:
+                last_pct[0] = pct
+                on_progress(f"  downloading... {pct}%", False)
+
+        try:
+            _download(asset_url, archive_path, _dl_progress)
+        except Exception as ex:
+            logger.error("Download failed: %r", ex)
+            if on_progress:
+                on_progress(f"Download failed: {ex}", True)
+            return None
+
+        if on_progress:
+            on_progress("Extracting archive...", False)
+        if not _extract_archive(archive_path, extract_dir):
+            if on_progress:
+                on_progress(f"Failed to extract archive: {asset_name}", True)
+            return None
+
+        if on_progress:
+            on_progress(f"Installing to {bin_dir} ...", False)
+        dest = _install_all(extract_dir, bin_dir, is_windows)
+        if dest is None:
+            if on_progress:
+                on_progress("llama-server binary not found inside archive.", True)
+            return None
+
+    _save_installed_tag(bin_dir, tag)
+    return dest
+
+
+# ═══════════════════════════════════════════════════════════
 # Public API
 # ═══════════════════════════════════════════════════════════
 
@@ -279,18 +421,8 @@ def ensure_llama_binary(
 ) -> Optional[Path]:
     """
     Ensure llama-server binary is available.
-
-    1. If already in ~/.buddy/bin/ or PATH → return immediately.
-    2. Fetch latest GitHub release, pick the right asset for this platform.
-    3. Download → extract → install to ~/.buddy/bin/llama-server.
-    4. Return Path to binary, or None on failure.
-
-    on_progress(message, is_done) — optional UI callback.
+    If already present, returns immediately. Otherwise downloads the latest release.
     """
-    is_windows = sys.platform == "win32"
-    exe        = "llama-server.exe" if is_windows else "llama-server"
-
-    # ── 1. Already present? ────────────────────────────────
     existing = find_existing_binary(bin_dir)
     if existing:
         logger.info("llama-server already present: %s", existing)
@@ -298,118 +430,96 @@ def ensure_llama_binary(
             on_progress(f"llama-server found: {existing}", True)
         return existing
 
-    # ── 2. Detect platform ─────────────────────────────────
     plat = _detect_platform()
-    logger.info(
-        "Platform: system=%s arch=%s gpu=%s",
-        plat["system"], plat["arch"], plat["gpu"],
-    )
+    logger.info("Platform: system=%s arch=%s gpu=%s", plat["system"], plat["arch"], plat["gpu"])
     if on_progress:
         on_progress(
-            f"Detected: {plat['system']} {plat['arch']} "
-            f"({plat['gpu'].upper()})",
+            f"Detected: {plat['system']} {plat['arch']} ({plat['gpu'].upper()})",
             False,
         )
 
-    # ── 3. Fetch latest release ────────────────────────────
-    if on_progress:
-        on_progress("Fetching latest llama.cpp release info...", False)
-    try:
-        resp = requests.get(
-            _GITHUB_API,
-            timeout=(_TIMEOUT_CON, _TIMEOUT_READ),
-            headers={"Accept": "application/vnd.github+json",
-                     "User-Agent": "buddy-llama-installer/1.0"},
-        )
-        resp.raise_for_status()
-        release = resp.json()
-    except Exception as ex:
-        logger.error("Failed to fetch release info: %r", ex)
+    release = _fetch_release(on_progress)
+    if not release:
         if on_progress:
-            on_progress(f"Failed to fetch release info: {ex}", True)
+            on_progress("Failed to fetch release info", True)
         return None
 
-    tag    = release.get("tag_name", "unknown")
-    assets = release.get("assets", [])
-    logger.info("Latest release: %s  (%d assets)", tag, len(assets))
+    tag = release.get("tag_name", "unknown")
+    logger.info("Latest release: %s  (%d assets)", tag, len(release.get("assets", [])))
 
-    # ── 4. Pick matching asset ─────────────────────────────
-    asset = _pick_asset(assets, plat)
-    if not asset:
-        logger.error(
-            "No matching asset for platform %s/%s/%s",
-            plat["system"], plat["arch"], plat["gpu"],
-        )
+    dest = _install_from_release(bin_dir, release, on_progress)
+    if dest:
+        logger.info("llama.cpp installed → %s", bin_dir)
         if on_progress:
-            on_progress(
-                f"No prebuilt binary found for {plat['system']}/{plat['arch']}"
-                f"/{plat['gpu']}. Install llama-server manually.",
-                True,
-            )
-        return None
-
-    asset_name = asset["name"]
-    asset_url  = asset["browser_download_url"]
-    asset_size = asset.get("size", 0)
-    size_mb    = round(asset_size / (1024 * 1024), 1)
-
-    logger.info("Selected asset: %s  (%.1f MB)", asset_name, size_mb)
-    if on_progress:
-        on_progress(
-            f"Downloading {asset_name}  ({size_mb} MB)  [{tag}]",
-            False,
-        )
-
-    # ── 5. Download + extract ──────────────────────────────
-    bin_dir.mkdir(parents=True, exist_ok=True)
-
-    with tempfile.TemporaryDirectory(prefix="buddy_llama_") as tmp:
-        tmp_path     = Path(tmp)
-        archive_path = tmp_path / asset_name
-        extract_dir  = tmp_path / "extracted"
-
-        # Download with progress
-        last_pct = [-1]
-
-        def _dl_progress(downloaded: int, total: int) -> None:
-            if not on_progress or total == 0:
-                return
-            pct = int(downloaded * 100 / total)
-            if pct != last_pct[0] and pct % 10 == 0:
-                last_pct[0] = pct
-                on_progress(f"  downloading... {pct}%", False)
-
-        try:
-            _download(asset_url, archive_path, _dl_progress)
-        except Exception as ex:
-            logger.error("Download failed: %r", ex)
-            if on_progress:
-                on_progress(f"Download failed: {ex}", True)
-            return None
-
-        # Extract full archive
-        if on_progress:
-            on_progress("Extracting archive...", False)
-        if not _extract_archive(archive_path, extract_dir):
-            logger.error("Failed to extract archive: %s", asset_name)
-            if on_progress:
-                on_progress(f"Failed to extract archive: {asset_name}", True)
-            return None
-
-        # Install all files to bin_dir
-        if on_progress:
-            on_progress(f"Installing to {bin_dir} ...", False)
-        dest = _install_all(extract_dir, bin_dir, is_windows)
-        if dest is None:
-            logger.error("llama-server not found in archive: %s", asset_name)
-            if on_progress:
-                on_progress("llama-server binary not found inside archive.", True)
-            return None
-
-    logger.info("llama.cpp installed → %s", bin_dir)
-    if on_progress:
-        on_progress(f"llama.cpp installed → {bin_dir}", True)
-
+            on_progress(f"llama.cpp installed → {bin_dir}", True)
     return dest
+
+
+def check_and_update_llama(
+    bin_dir: Path,
+    on_progress: Optional[Callable[[str, bool], None]] = None,
+    interval_days: float = 7.0,
+) -> bool:
+    """
+    Check GitHub for a newer llama.cpp release and update if found.
+    Skips the network check if it ran within interval_days.
+    Always returns True — update is best-effort (silently skips if offline).
+    """
+    import time
+
+    if not find_existing_binary(bin_dir):
+        return True  # not installed yet — ensure_llama_binary() handles first install
+
+    # Cooldown guard — skip if checked recently
+    last_check = _get_last_check_time(bin_dir)
+    if last_check is not None:
+        elapsed_days = (time.time() - last_check) / 86400
+        if elapsed_days < interval_days:
+            logger.info(
+                "llama.cpp update check skipped — last check %.1f day(s) ago (interval: %s day(s))",
+                elapsed_days, interval_days,
+            )
+            if on_progress:
+                on_progress(
+                    f"llama.cpp update check skipped (checked {elapsed_days:.1f}d ago)", True
+                )
+            return True
+
+    installed_tag = get_installed_tag(bin_dir)
+
+    release = _fetch_release(on_progress)
+    if not release:
+        if on_progress:
+            on_progress("llama.cpp update check skipped (offline?)", True)
+        return True
+
+    _save_last_check_time(bin_dir)  # record check time regardless of outcome
+
+    latest_tag = release.get("tag_name", "")
+    if not latest_tag:
+        return True
+
+    if installed_tag == latest_tag:
+        logger.info("llama.cpp up-to-date: %s", latest_tag)
+        if on_progress:
+            on_progress(f"llama.cpp up-to-date ({latest_tag})", True)
+        return True
+
+    if on_progress:
+        on_progress(
+            f"llama.cpp update available: {installed_tag or 'unknown'} → {latest_tag}",
+            False,
+        )
+
+    dest = _install_from_release(bin_dir, release, on_progress)
+    if dest:
+        logger.info("llama.cpp updated to %s", latest_tag)
+        if on_progress:
+            on_progress(f"llama.cpp updated to {latest_tag}", True)
+    else:
+        logger.warning("llama.cpp update failed — keeping existing binary")
+        if on_progress:
+            on_progress("llama.cpp update failed — keeping current version", True)
+    return True
 
 

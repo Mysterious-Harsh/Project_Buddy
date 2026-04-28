@@ -6,11 +6,13 @@
 from __future__ import annotations
 
 import re
+import shutil
 import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
 from typing import List, Optional
+from urllib.parse import quote_plus
 
 from buddy.logger.logger import get_logger
 
@@ -237,6 +239,65 @@ def _win_sendkey(vk: int) -> None:
     _run(f'powershell -NoProfile -Command "(New-Object -ComObject WScript.Shell).SendKeys([char]{vk})"')
 
 
+# macOS: try app-specific AppleScript first, fall back to global key code.
+# cmd keys: play | pause | toggle | next | prev
+_MAC_MEDIA_CMDS: dict[str, dict[str, str]] = {
+    "Spotify": {
+        "play":   "play",
+        "pause":  "pause",
+        "toggle": "playpause",
+        "next":   "next track",
+        "prev":   "previous track",
+    },
+    "Music": {
+        "play":   "play",
+        "pause":  "pause",
+        "toggle": "playpause",
+        "next":   "next track",
+        "prev":   "previous track",
+    },
+    "TV": {
+        "play":   "play",
+        "pause":  "pause",
+        "toggle": "play",
+        "next":   "next chapter",
+        "prev":   "previous chapter",
+    },
+    "Plex Media Player": {
+        "play":   "play",
+        "pause":  "pause",
+        "toggle": "play",
+        "next":   "next chapter",
+        "prev":   "previous chapter",
+    },
+}
+
+
+def _mac_running_app() -> str | None:
+    """Return the first known media app that is currently running, or None."""
+    for app_name in _MAC_MEDIA_CMDS:
+        code, out = _run(f'osascript -e \'application "{app_name}" is running\'')
+        if code == 0 and "true" in out:
+            return app_name
+    return None
+
+
+def _mac_media(cmd: str, fallback_key_code: int) -> None:
+    """Send cmd ('play'|'pause'|'toggle'|'next'|'prev') to a running app, or key code."""
+    app = _mac_running_app()
+    if app:
+        app_cmd = _MAC_MEDIA_CMDS[app].get(cmd, cmd)
+        _run(f'osascript -e \'tell application "{app}" to {app_cmd}\'')
+        return
+    _run(f'osascript -e \'tell application "System Events" to key code {fallback_key_code}\'')
+
+
+def _linux_playerctl(cmd: str) -> tuple[int, str]:
+    if not shutil.which("playerctl"):
+        return -1, "playerctl not installed — install it with your package manager (apt/pacman/dnf)"
+    return _run(f"playerctl {cmd}")
+
+
 def _exec_action(action: QuickAction) -> str:
     name = action.name
     p = action.params
@@ -245,46 +306,54 @@ def _exec_action(action: QuickAction) -> str:
 
     if name == "media_play":
         if _IS_MAC:
-            _run('osascript -e \'tell application "System Events" to key code 100\'')
+            _mac_media("play", 100)
         elif _IS_WIN:
             _win_sendkey(179)   # VK_MEDIA_PLAY_PAUSE
         else:
-            _run("playerctl play")
+            code, err = _linux_playerctl("play")
+            if code != 0:
+                raise RuntimeError(err)
         return "Playing."
 
     if name == "media_pause":
         if _IS_MAC:
-            _run('osascript -e \'tell application "System Events" to key code 100\'')
+            _mac_media("pause", 100)
         elif _IS_WIN:
             _win_sendkey(179)   # VK_MEDIA_PLAY_PAUSE (toggle)
         else:
-            _run("playerctl pause")
+            code, err = _linux_playerctl("pause")
+            if code != 0:
+                raise RuntimeError(err)
         return "Paused."
 
     if name == "media_toggle":
         if _IS_MAC:
-            _run('osascript -e \'tell application "System Events" to key code 100\'')
+            _mac_media("toggle", 100)
         elif _IS_WIN:
             _win_sendkey(179)
         else:
-            _run("playerctl play-pause")
+            code, err = _linux_playerctl("play-pause")
+            if code != 0:
+                raise RuntimeError(err)
         return "Toggled playback."
 
     if name == "media_next":
         if _IS_MAC:
-            _run('osascript -e \'tell application "System Events" to key code 101\'')
+            _mac_media("next", 101)
         elif _IS_WIN:
             _win_sendkey(176)   # VK_MEDIA_NEXT_TRACK
         else:
-            _run("playerctl next")
+            code, err = _linux_playerctl("next")
+            if code != 0:
+                raise RuntimeError(err)
         return "Skipped to next track."
 
     if name == "play_on_app":
         song = p.get("song", "")
         app  = p.get("app", "").lower()
-        song_encoded = song.replace(" ", "+")
+        song_encoded = quote_plus(song)
         deeplinks = {
-            "spotify":      f"spotify:search:{song}",
+            "spotify":      f"spotify:search:{song_encoded}",
             "music":        f"music://search?term={song_encoded}",
             "youtubemusic": f"https://music.youtube.com/search?q={song_encoded}",
             "youtube":      f"https://www.youtube.com/results?search_query={song_encoded}",
@@ -292,24 +361,37 @@ def _exec_action(action: QuickAction) -> str:
         link = deeplinks.get(app)
         if _IS_MAC:
             if link:
-                _run(f'open "{link}"')
+                code, err = _run(f'open "{link}"')
+                if code != 0:
+                    raise RuntimeError(f"Could not open {app.title()}: {err}")
             else:
-                _run(f'open -a "{app}"')
+                code, err = _run(f'open -a "{app}"')
+                if code != 0:
+                    raise RuntimeError(f"App not found: {app!r}")
                 time.sleep(1.5)
-                _run('osascript -e \'tell application "System Events" to key code 100\'')
+                _mac_media("play", 100)
         elif _IS_WIN:
-            _run(f'start "" "{link or app}"')
+            if link:
+                _run(f'start "" "{link}"')
+            else:
+                # launch by app name via the shell
+                _run(f'powershell -NoProfile -Command "Start-Process \'{app}\'"')
         else:
-            _run(f'xdg-open "{link or app}"')
+            target = link if link else app
+            code, err = _run(f'xdg-open "{target}"')
+            if code != 0:
+                raise RuntimeError(f"xdg-open failed: {err}")
         return f'Playing "{song}" on {app.title()}.'
 
     if name == "media_prev":
         if _IS_MAC:
-            _run('osascript -e \'tell application "System Events" to key code 98\'')
+            _mac_media("prev", 98)
         elif _IS_WIN:
             _win_sendkey(177)   # VK_MEDIA_PREV_TRACK
         else:
-            _run("playerctl previous")
+            code, err = _linux_playerctl("previous")
+            if code != 0:
+                raise RuntimeError(err)
         return "Back to previous track."
 
     # ── Volume ─────────────────────────────────────────────────────
@@ -370,12 +452,15 @@ def _exec_action(action: QuickAction) -> str:
         if _IS_MAC:
             code, out = _run(f'open -a "{app}"')
         elif _IS_WIN:
-            code, out = _run(f'start "" "{app}"')
+            code, out = _run(f'powershell -NoProfile -Command "Start-Process \'{app}\'"')
         else:
-            code, out = _run(f'xdg-open "{app}" 2>/dev/null || gtk-launch "{app}"')
+            # Try xdg-open first; fall back to gtk-launch for .desktop entries
+            code, out = _run(f'xdg-open "{app}"')
+            if code != 0:
+                code, out = _run(f'gtk-launch "{app}"')
         if code != 0:
             logger.warning("open_app failed app=%r out=%r", app, out)
-            raise RuntimeError(f"open_app failed: {app!r} (code={code})")
+            raise RuntimeError(f"App not found: {app!r}")
         return f"Opening {app.title()}."
 
     # ── System ─────────────────────────────────────────────────────

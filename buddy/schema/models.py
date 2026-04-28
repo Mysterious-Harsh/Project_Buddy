@@ -97,7 +97,6 @@ class Decision(BuddyBaseModel):
 class RetrievalGateResult(BuddyBaseModel):
 
     search_queries: List[str] = Field(default_factory=list)
-    lookup_message: str = Field(default="")
     deep_recall: bool = Field(default=False)
 
 
@@ -150,7 +149,7 @@ class PlannerStep(BuddyBaseModel):
     instruction: str = Field(min_length=1)
     hints: str = Field(default="")
     input_steps: List[int] = Field(default_factory=list)
-    output: str = Field(min_length=1)
+    output: Optional[str] = Field(default=None)
 
 
 class PlannerResult(BuddyBaseModel):
@@ -220,15 +219,61 @@ class PlannerResult(BuddyBaseModel):
 # EXECUTOR PROMPT (locked prompt outputs)
 # ==========================================================
 class ExecutorResult(BuddyBaseModel):
-    status: Literal["success", "followup", "abort"]
-
-    followup_question: str = Field(default="")
-    abort_reason: str = Field(default="")
-
-    tool_call: Dict[str, Any] = Field(default_factory=dict)
+    status: Literal["success", "followup", "refusal"]
+    message: str = Field(default="")
+    function: Optional[str] = Field(default=None)
+    arguments: Dict[str, Any] = Field(default_factory=dict)
 
 
 class FinalRespond(BuddyBaseModel):
     execution_result: Literal["error", "success", "partial"]
     response: str
     memory_candidates: List[MemoryIngestionResult] = Field(default_factory=list)
+
+
+# ==========================================================
+# BROWSER TOOL (micro-planner action)
+# ==========================================================
+
+
+class BrowserAction(BuddyBaseModel):
+    """
+    Single action output from the browser micro-planner.
+    Produced by brain.run_browser_action() each loop iteration.
+
+    function meanings:
+      fill(selector, value)       — type text into a field
+      click(selector)             — click an element
+      scroll(px)                  — scroll page (positive=down, negative=up)
+      wait(selector, timeout_ms)  — wait for element (selector optional)
+      fetch_memory(query)         — retrieve stored personal data value
+      ask_user(question)          — need human input (CAPTCHA / 2FA)
+      done(summary)               — task completed successfully
+      error(reason)               — cannot proceed
+    """
+
+    function: Literal[
+        "navigate",
+        "fill",
+        "click",
+        "scroll",
+        "wait",
+        "fetch_memory",
+        "ask_user",
+        "done",
+        "error",
+    ]
+    arguments: Dict[str, Any] = Field(default_factory=dict)
+    summary: str
+
+
+class ReaderResult(BuddyBaseModel):
+    relevant: bool = Field(default=False)
+    content: str = Field(default="")
+
+
+class VisionResult(BuddyBaseModel):
+    description: str = Field(default="")
+    objects: List[str] = Field(default_factory=list)
+    text_found: str = Field(default="")
+    key_finding: str = Field(default="")

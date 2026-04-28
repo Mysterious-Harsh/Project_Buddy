@@ -10,10 +10,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, Optional  # noqa: F401
 
 from buddy.logger.logger import get_logger
-from buddy.prompts.system_control_prompts import (
-    SYSTEM_CONTROL_TOOL_PROMPT,
-    SYSTEM_CONTROL_TOOL_CALL_FORMAT,
-)
+from buddy.prompts.system_control_prompts import SYSTEM_CONTROL_TOOL_PROMPT
 
 logger = get_logger("system_control_tool")
 
@@ -45,14 +42,9 @@ class SystemControlTool:
     def get_info(self) -> Dict[str, Any]:
         return {
             "name": TOOL_NAME,
-            "description": (
-                "Control system actions: media playback (play, pause, next, prev), "
-                "volume (up, down, set exact level, mute), open an app by name, "
-                "lock screen, or sleep the computer."
-            ),
-            "version": "1.0.0",
+            "version": "1.1.0",
+            "description": "Control media playback, volume, app launching, and system state (lock/sleep).",
             "prompt": SYSTEM_CONTROL_TOOL_PROMPT,
-            "tool_call_format": SYSTEM_CONTROL_TOOL_CALL_FORMAT,
         }
 
     # ── Parse ──────────────────────────────────────────────
@@ -69,11 +61,16 @@ class SystemControlTool:
 
     async def execute(
         self,
-        call: SystemControlCall,
-        *,
+        function: str = "",
+        arguments: Dict[str, Any] = {},
         on_progress: Optional[Callable[[str, bool], None]] = None,
         **_kwargs: Any,
     ) -> Dict[str, Any]:
+        try:
+            call = self.parse_call(arguments)
+        except Exception as e:
+            return {"OK": False, "ACTION": "", "ERROR": str(e)}
+
         from buddy.brain.intent_interceptor import interceptor, normalize
 
         if on_progress:

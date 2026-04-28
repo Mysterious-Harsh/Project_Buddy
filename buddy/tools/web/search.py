@@ -17,11 +17,7 @@ from typing import Any, Callable, Dict, List, Optional
 from pydantic import BaseModel, Field, model_validator
 
 from buddy.logger.logger import get_logger
-from buddy.prompts.web_search_prompts import (
-    WEB_SEARCH_ERROR_RECOVERY_PROMPT,
-    WEB_SEARCH_TOOL_PROMPT,
-    tool_call_format,
-)
+from buddy.prompts.web_search_prompts import WEB_SEARCH_TOOL_PROMPT
 
 logger = get_logger("web_search")
 
@@ -106,18 +102,10 @@ class WebSearch:
         cfg = _load_config()
         return {
             "name": TOOL_NAME,
-            "version": "3.0.0",
-            "description": (
-                "Search the web. Returns title, URL, and a short snippet (≤400 chars)"
-                " per result. Snippets are ONLY sufficient for understanding the"
-                " context. you MUST add a web_fetch step AFTER this step and pass these"
-                " URLs as input. Do NOT skip web_fetch when the user needs actual"
-                " content."
-            ),
+            "version": "3.1.0",
+            "description": "Search the web. Returns title, URL, and snippet (≤400 chars) per result.",
             "engine": cfg.get("engine", "duckduckgo"),
             "prompt": WEB_SEARCH_TOOL_PROMPT,
-            "error_prompt": WEB_SEARCH_ERROR_RECOVERY_PROMPT,
-            "tool_call_format": tool_call_format,
         }
 
     def parse_call(self, payload: Dict[str, Any]) -> WebSearchCall:
@@ -125,11 +113,16 @@ class WebSearch:
 
     async def execute(
         self,
-        call: WebSearchCall,
-        *,
+        function: str = "",
+        arguments: Dict[str, Any] = {},
         on_progress: Optional[Callable[[str, bool], None]] = None,
         **_kwargs: Any,
     ) -> Dict[str, Any]:
+        try:
+            call = self.parse_call(arguments)
+        except Exception as e:
+            return {"OK": False, "ENGINE": "unknown", "QUERY": "", "RESULTS": [], "TOTAL_FOUND": 0, "ERROR": str(e)}
+
         if on_progress:
             on_progress(f"Searching: {call.query}", False)
 

@@ -543,9 +543,26 @@ def _install_searxng(
         timeout=60.0, label="pip upgrade",
     )
 
+    # Install SearXNG's declared dependencies first.
+    # searx/__init__.py imports msgspec at module level, which causes pip's
+    # isolated build phase to fail before any deps are installed. Pre-installing
+    # from requirements.txt means all deps (including msgspec) are present when
+    # the editable build hook runs.
+    req_file = repo_dir / "requirements.txt"
+    if req_file.exists():
+        if on_progress:
+            on_progress("Installing SearXNG requirements...", False)
+        _run(
+            [str(py), "-m", "pip", "install", "-r", str(req_file), "--quiet"],
+            cwd=repo_dir,
+            timeout=300.0,
+            on_progress=on_progress,
+            label="pip install requirements",
+        )
+
     # Install SearXNG in editable mode
     ok = _run(
-        [str(py), "-m", "pip", "install", "-e", ".", "--quiet"],
+        [str(py), "-m", "pip", "install", "--no-build-isolation", "-e", ".", "--quiet"],
         cwd=repo_dir,
         timeout=300.0,
         on_progress=on_progress,
@@ -554,6 +571,87 @@ def _install_searxng(
     if not ok:
         logger.error("pip install searxng failed")
     return ok
+
+
+# ═══════════════════════════════════════════════════════════
+# Public: update
+# ═══════════════════════════════════════════════════════════
+
+
+def _git_head(repo_dir: Path) -> str:
+    """Return the current git HEAD hash, or empty string on failure."""
+    try:
+        r = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=str(repo_dir),
+            capture_output=True, text=True, timeout=5.0,
+        )
+        return r.stdout.strip() if r.returncode == 0 else ""
+    except Exception:
+        return ""
+
+
+def update_searxng(
+    searxng_dir: Path,
+    on_progress: Optional[Callable[[str, bool], None]] = None,
+) -> bool:
+    """
+    Pull the latest SearXNG commits and reinstall deps if anything changed.
+    Safe to call every boot — no-op if already up-to-date or offline.
+    Always returns True (update is best-effort).
+    """
+    if not is_installed(searxng_dir):
+        return True
+
+    p        = _paths(searxng_dir)
+    repo_dir = p["repo"]
+
+    if on_progress:
+        on_progress("Checking SearXNG for updates...", False)
+
+    old_head = _git_head(repo_dir)
+
+    # fetch --depth=1 works reliably with shallow clones
+    ok = _run(
+        ["git", "fetch", "--depth=1", "origin"],
+        cwd=repo_dir,
+        timeout=30.0,
+        label="git fetch",
+    )
+    if not ok:
+        logger.warning("SearXNG git fetch failed — skipping update")
+        if on_progress:
+            on_progress("SearXNG update check skipped (offline?)", True)
+        return True
+
+    _run(
+        ["git", "reset", "--hard", "FETCH_HEAD"],
+        cwd=repo_dir,
+        timeout=10.0,
+        label="git reset",
+    )
+
+    new_head = _git_head(repo_dir)
+
+    if old_head and old_head == new_head:
+        logger.info("SearXNG already up-to-date (%s)", new_head[:8])
+        if on_progress:
+            on_progress(f"SearXNG up-to-date ({new_head[:8]})", True)
+        return True
+
+    logger.info(
+        "SearXNG updated: %s → %s",
+        old_head[:8] if old_head else "?",
+        new_head[:8] if new_head else "?",
+    )
+    if on_progress:
+        on_progress("SearXNG updated — reinstalling deps...", False)
+
+    _install_searxng(repo_dir, p["venv"], on_progress)
+
+    if on_progress:
+        on_progress(f"SearXNG updated ({new_head[:8] if new_head else 'unknown'})", True)
+    return True
 
 
 # ═══════════════════════════════════════════════════════════

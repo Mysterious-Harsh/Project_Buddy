@@ -1,10 +1,74 @@
-# buddy/prompts/vision_prompts.py
-#
-# Vision tool prompts — image analysis schema for the LLM.
-# Follows local-model-first rule: schema first, minimal prose, flat JSON.
+VISION_TOOL_PROMPT = """
+TOOL_NAME: vision
+TOOL_DESCRIPTION: Analyze image files or capture the current screen. Returns description, objects, visible text, and a direct answer.
+
+<functions>
+  <function>
+    <name>vision</name>
+    <description>Analyze one or more images, or capture and analyze the screen.</description>
+    <parameters>
+      - action    (string,  OPTIONAL, default: "analyze") — "analyze" | "screenshot"
+      - paths     (array,   OPTIONAL) — absolute paths to image files; required when action="analyze"
+      - query     (string,  REQUIRED) — what to find, answer, or reason about
+      - save_path (string,  OPTIONAL) — absolute path to save the screenshot PNG; action="screenshot" only
+    </parameters>
+    <returns>OK, ACTION, PATHS, DESCRIPTION, OBJECTS, TEXT_FOUND, KEY_FINDING, [SAVED_PATH], ERROR</returns>
+    <destructive>YES — if save_path is provided, writes a PNG file to disk</destructive>
+    <confirmation_required>YES — if save_path is provided and the file already exists</confirmation_required>
+  </function>
+</functions>
+
+<tool_rules>
+
+1. ACTION SELECTION
+   1.1 action="screenshot" — user asks to look at the screen, "what's on my screen", "take a screenshot".
+       No paths needed. save_path is optional.
+   1.2 action="analyze" (default) — user provides image path(s) and wants analysis, description, OCR, or comparison.
+       paths is required.
+   1.3 Do NOT use if:
+       - No image path provided and user did NOT ask for a screenshot.
+       - File is not an image (use filesystem tool for documents, code, etc.).
+
+2. PATHS
+   2.1 All paths must be absolute. Resolve ~ before passing.
+   2.2 Supported formats: PNG, JPG, JPEG, WEBP, GIF, BMP, TIFF, TIF.
+   2.3 Multiple images → pass all paths in the array. Compare or combine as the query demands.
+
+3. QUERY
+   3.1 Write a specific, direct question or instruction — not a vague "describe this".
+   3.2 For text extraction: "extract all visible text verbatim".
+   3.3 For comparison: "compare Image 1 and Image 2 — list differences".
+
+</tool_rules>
+
+<error_recovery>
+Read only when <errors> is present in context.
+
+1. ERROR CATEGORIES
+   A. PATH NOT FOUND — image file does not exist at the given path.
+      Verify the path from <prior_step_outputs>. If still missing → status="followup". Report exact path.
+
+   B. UNSUPPORTED FORMAT — file extension not in supported set.
+      status="followup". State the file type and ask the user to convert it.
+
+   C. SCREENSHOT FAILED — screen capture dependency missing or permission denied.
+      status="followup". Report the exact error. Do not retry silently.
+
+   D. VISION MODEL NOT AVAILABLE — brain returned an error about model capability.
+      status="followup". Report exactly: vision requires a Qwen VL model.
+
+   E. UNCLASSIFIED — Return status="followup" with the exact ERROR value and one specific question.
+
+2. RETRY RULES
+   2.1 Never retry a path that does not exist — it will not appear on retry.
+   2.2 After 2 failures → status="followup".
+
+</error_recovery>
+"""
 
 # ---------------------------------------------------------------------------
 # System prompt injected when brain.run_vision() is called.
+# Not shown to the executor — used for the actual vision LLM call.
 # ---------------------------------------------------------------------------
 VISION_PROMPT = """
 VISION ANALYSIS
@@ -28,7 +92,7 @@ If multiple images are provided:
 """.strip()
 
 # ---------------------------------------------------------------------------
-# JSON schema shown as the expected output shape.
+# JSON schema shown as the expected output shape for run_vision().
 # ---------------------------------------------------------------------------
 VISION_SCHEMA = """{
   "description": "Dense paragraph: subject, setting, colors, layout, key relationships. For multiple images: 'Image 1: ... Image 2: ... Overall: ...'",
@@ -36,60 +100,3 @@ VISION_SCHEMA = """{
   "text_found": "All readable text copied verbatim with format, tags, and markup preserved. Empty string if no text is visible.",
   "key_finding": "Specific, direct answer to the user's query. This is the primary output."
 }"""
-
-# ---------------------------------------------------------------------------
-# Tool prompt shown to the executor when it selects this tool.
-# ---------------------------------------------------------------------------
-VISION_TOOL_PROMPT = """
-<tool_description>
-VISION TOOL
-
-Two actions:
-  screenshot — capture the current screen and reason over it (no path needed)
-  analyze    — analyze one or more image files provided by the user
-
-Supports PNG, JPG, JPEG, WEBP, GIF, BMP. Single or multiple images.
-</tool_description>
-
-<when_to_use>
-§1. WHEN TO USE
-action="screenshot":
-  - User asks "what's on my screen?", "look at my screen", "take a screenshot"
-  - User wants Buddy to observe the current state of the display
-
-action="analyze" (default):
-  - User provides an image path and asks what is in it
-  - User wants a photo, diagram, or chart analyzed
-  - User wants text extracted from an image (OCR)
-  - User wants to compare two or more images
-
-DO NOT use if:
-  - No image path provided and user did NOT ask for a screenshot
-  - The file is not an image (use filesystem tool for documents, code, etc.)
-</when_to_use>
-
-<call_schema>
-§2. CALL SCHEMA
-  action    : "screenshot" | "analyze" (default: "analyze")
-  paths     : list of absolute paths — required for action="analyze", omit for screenshot
-  query     : required — what to find, answer, or reason about
-  save_path : optional — absolute path to save the screenshot PNG (screenshot only)
-</call_schema>
-
-<result_fields>
-§3. RESULT FIELDS (returned as text to responder)
-  DESCRIPTION  — full image description paragraph
-  OBJECTS      — list of key visible items/elements
-  TEXT_FOUND   — verbatim text visible in image (empty string if none)
-  KEY_FINDING  — direct answer to the query — the primary output
-  PATHS        — image path(s) analyzed (empty for screenshot)
-</result_fields>
-""".strip()
-
-VISION_TOOL_CALL_FORMAT = (
-    'screenshot:       {"action": "screenshot", "query": "what is on the'
-    ' screen?"}\nscreenshot+save:  {"action": "screenshot", "save_path":'
-    ' "/absolute/path/out.png", "query": "what is on the screen?"}\nanalyze:         '
-    ' {"action": "analyze", "paths": ["/absolute/path/a.png"], "query": "what is in'
-    ' this image?"}'
-)

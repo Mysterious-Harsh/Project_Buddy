@@ -9,7 +9,10 @@ from typing import Awaitable, Callable, Optional, Any, Dict, List, Tuple
 import threading
 from buddy.logger.logger import get_logger
 from buddy.brain.action_router import ActionRouter
-from buddy.brain.intent_interceptor import interceptor as _interceptor, normalize as _normalize
+from buddy.brain.intent_interceptor import (
+    interceptor as _interceptor,
+    normalize as _normalize,
+)
 from buddy.buddy_core.smart_truncator import (
     truncate_history,
     truncate_memory,
@@ -302,7 +305,9 @@ async def handle_turn(
         if success:
             logger.info(
                 "interceptor_fast_path | src=%s action=%s reply=%r",
-                src, quick.name, reply,
+                src,
+                quick.name,
+                reply,
             )
             await ui_output(reply)
             _convs = getattr(getattr(state, "artifacts", None), "conversations", None)
@@ -311,8 +316,11 @@ async def handle_turn(
                 _convs.add_buddy(text=reply)
             return reply
         logger.info(
-            "interceptor_fast_path_failed | src=%s action=%s err=%r — falling through to pipeline",
-            src, quick.name, reply,
+            "interceptor_fast_path_failed | src=%s action=%s err=%r — falling through"
+            " to pipeline",
+            src,
+            quick.name,
+            reply,
         )
         # fall through: full pipeline handles it
     # ─────────────────────────────────────────────────────────
@@ -415,7 +423,6 @@ async def handle_turn(
             brain.run_memory_gate,
             active_task=user_message,
             recent_turns=recent_conversations,
-            temperature=0.4,
             stream=True,
         )
     except Exception as ex:
@@ -434,7 +441,6 @@ async def handle_turn(
     if isinstance(search_queries, str):
         search_queries = [search_queries]
     search_queries = [str(q).strip() for q in search_queries if str(q).strip()]
-    lookup_message = str(rg.get("lookup_message") or "").strip()
     deep_recall = bool(rg.get("deep_recall"))
 
     logger.info(
@@ -459,8 +465,6 @@ async def handle_turn(
     # ------------------------------------------------------
     t0 = time.perf_counter()
     if search_queries:
-        progress_cb(lookup_message, False)
-
         try:
             retrieved, mem_text = await asyncio.to_thread(
                 _get_memory_context_multi,
@@ -526,7 +530,6 @@ async def handle_turn(
         active_task=user_message,
         recent_turns=recent_conversations,
         memories=mem_text,
-        temperature=0.4,
         stream=True,
     )
     dt_llm = time.perf_counter() - t0
@@ -665,7 +668,10 @@ async def handle_turn(
             await ui_output(afterthought)
     elif mode == "ACTION":
         action_router = ActionRouter(
-            brain=brain, ui_output=ui_output, ui_input=ui_input
+            brain=brain,
+            ui_output=ui_output,
+            ui_input=ui_input,
+            memory_manager=mm,
         )
         action_result = await action_router.action(
             turn_id=turn_id,
@@ -697,7 +703,6 @@ async def handle_turn(
             execution_results=json.dumps(
                 execution_results, ensure_ascii=False, indent=2
             ),
-            temperature=0.4,
             stream=True,
         )
         parsed_respond = payload.get("parsed")

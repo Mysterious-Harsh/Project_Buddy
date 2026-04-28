@@ -727,21 +727,23 @@ IRON RULES — NO EXCEPTIONS
 
 <output_rules>
  
-STRUCTURE (NO EXCEPTIONS):
-  1. Reason inside <think>. Concise. No repetition. Close with </think>.
-  2. Output EXACTLY one valid JSON object inside <json>...</json>. Nothing outside the tags.
- 
+<output_rules>
+
 JSON:
   — Double quotes on all keys and values
   — No trailing commas. No missing braces. No incomplete output.
   — No markdown, prose, or code fences anywhere
- 
+
 ESCAPE EVERY STRING VALUE:
   \\  →  \\\\     "  →  \\"     newline  →  \\n     tab  →  \\t
- 
+
 CODE INSIDE JSON:
   Same rules. Raw line breaks forbidden. Use \\n between lines.
   \\n in code → \\\\n     \\t in code → \\\\t     "x" in code → \\"x\\"
+
+STRUCTURE (NO EXCEPTIONS):
+  1. Think inside the <think> ... </think> block. 
+  2. Close the thinking with </think> and immediately output valid JSON object exactly as defined below, Nothing else outside the json object.
 
 ======================================================
 SCHEMA — MUST OUTPUT THIS EXACT STRUCTURE
@@ -803,28 +805,6 @@ Can you check the weather for today and tell me if I need an umbrella?
 <|im_end|>
 <|im_start|>assistant
 <think>
- The user is asking about my language capabilities. This is a general knowledge question that doesn't require any tools or file access. It's a conversational query where the user wants to understand what I can communicate in.
 
-Since this is purely informational and requires no external actions, mode = CHAT.
-
-I should be honest about my actual capabilities - I'm an AI model trained on multilingual data with strong proficiency across many major world languages (English, Spanish, French, German, Chinese, Japanese, Korean, Arabic, Portuguese, Russian, Hindi, Bengali, etc.). However, I don't have perfect fluency in all of them, especially for nuanced cultural expressions or very low-resource languages.
-
-This conversation touches on Buddy's identity as kishan's friend, so I'll keep it friendly and conversational while being accurate about what I can do.
-</think>
-<json>
 
 """
-text = """The user is asking about my language capabilities. This is a general knowledge question that doesn't require any tools or file access. It's a conversational query where the user wants to understand what I can communicate in.
-
-Since this is purely informational and requires no external actions, mode = CHAT.
-
-I should be honest about my actual capabilities - I'm an AI model trained on multilingual data with strong proficiency across many major world languages (English, Spanish, French, German, Chinese, Japanese, Korean, Arabic, Portuguese, Russian, Hindi, Bengali, etc.). However, I don't have perfect fluency in all of them, especially for nuanced cultural expressions or very low-resource languages.
-
-This conversation touches on Buddy's identity as kishan's friend, so I'll keep it friendly and conversational while being accurate about what I can do.
-</think>"""
-
-print(
-    text.endswith(
-        ("</think>", "</think>\n", "</think>\n\n", "\n</think>", "\n\n</think>")
-    )
-)

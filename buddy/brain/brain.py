@@ -5,7 +5,15 @@ from typing import Any, Callable, Dict, List, Optional, Protocol, Union
 
 from buddy.logger.logger import get_logger
 from buddy.brain.output_parser import OutputParser
-from buddy.brain.prompt_builder import build_prompt, build_retrieval_prompt, build_brain_prompt, build_planner_prompt, build_executor_prompt, build_responder_prompt, build_reader_prompt, build_memory_summary_prompt
+from buddy.brain.prompt_builder import (
+    build_retrieval_prompt,
+    build_brain_prompt,
+    build_planner_prompt,
+    build_executor_prompt,
+    build_responder_prompt,
+    build_reader_prompt,
+    build_memory_summary_prompt,
+)
 from buddy.prompts.base_system_prompts import (
     BUDDY_IDENTITY,
     BUDDY_BEHAVIOR,
@@ -34,6 +42,10 @@ from buddy.prompts.reader_prompts import (
 from buddy.prompts.vision_prompts import (
     VISION_PROMPT,
     VISION_SCHEMA,
+)
+from buddy.prompts.browser_prompts import (
+    BROWSER_ACTION_PROMPT,
+    BROWSER_ACTION_SCHEMA,
 )
 
 import json
@@ -70,6 +82,8 @@ class LLM(Protocol):
         json_root: str = "object",
         json_max_chars: int = 120_000,
         interrupt_event: Optional[threading.Event] = None,
+        think: bool = True,
+        gate_marker: Optional[str] = None,
     ) -> str: ...
     def chat(
         self,
@@ -91,11 +105,15 @@ class LLM(Protocol):
         # Injected into the last user message as OAI content array (image_url entries).
         # Supports multiple images — one entry per image.
         images: Optional[List[str]] = None,
-        # JSON extraction (mirrors generate())
+        # JSON extraction (streaming-optimized, mirrors generate())
         json_extract: bool = False,
         json_validate: bool = False,
         json_root: str = "object",
         json_max_chars: int = 120_000,
+        # Think + gate: wait for </think> before JSON capture; look for gate_marker
+        # before scanning for JSON (None = scan directly after think/start).
+        think: bool = True,
+        gate_marker: Optional[str] = None,
     ) -> str: ...
 
 
@@ -231,10 +249,10 @@ class Brain:
         *,
         active_task: str,
         recent_turns: str,
-        temperature: float = 0.2,
-        top_p: float = 0.98,
-        repeat_penalty: float = 1.12,
-        repeat_last_n: int = 128,
+        temperature: float = 0.6,
+        top_p: float = 0.96,
+        repeat_penalty: float = 1.0,
+        repeat_last_n: int = 256,
         stream: bool = True,
         llm_options: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
@@ -280,10 +298,10 @@ class Brain:
         active_task: str,
         recent_turns: str,
         memories: str,
-        temperature: float = 0.2,
-        top_p: float = 0.98,
-        repeat_penalty: float = 1.12,
-        repeat_last_n: int = 128,
+        temperature: float = 0.6,
+        top_p: float = 0.96,
+        repeat_penalty: float = 1.0,
+        repeat_last_n: int = 256,
         stream: bool = True,
         llm_options: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
@@ -331,10 +349,10 @@ class Brain:
         planner_instructions: str,
         memories: str,
         available_tools: str,
-        temperature: float = 0.4,
-        top_p: float = 1.0,
-        repeat_penalty: float = 1.08,
-        repeat_last_n: int = 128,
+        temperature: float = 0.6,
+        top_p: float = 0.96,
+        repeat_penalty: float = 1.0,
+        repeat_last_n: int = 256,
         stream: bool = True,
         llm_options: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
@@ -382,12 +400,11 @@ class Brain:
         prior_outputs: str,
         step_followups: Optional[str] = "",
         step_errors: Optional[str] = "",
-        tool_info: str,
-        tool_call_format: str,
-        temperature: float = 0.2,
-        top_p: float = 1.0,
-        repeat_penalty: float = 1.12,
-        repeat_last_n: int = 64,
+        tool_prompt: str,
+        temperature: float = 0.6,
+        top_p: float = 0.96,
+        repeat_penalty: float = 1.0,
+        repeat_last_n: int = 256,
         stream: bool = True,
         llm_options: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
@@ -397,15 +414,12 @@ class Brain:
         """
 
         system_prompt = self._build_system_prompt([
-            EXECUTOR_PROMPT,
-            BUDDY_OUTPUT.format(
-                schema=EXECUTOR_PROMPT_SCHEMA.format(tool_call_format=tool_call_format)
-            ),
+            EXECUTOR_PROMPT.format(tool_instructions=tool_prompt),
+            BUDDY_OUTPUT.format(schema=EXECUTOR_PROMPT_SCHEMA),
         ])
         prompt = build_executor_prompt(
             system=system_prompt,
             datetime_block=self._get_time_info(),
-            tool_info=tool_info,
             instruction=instruction,
             prior_outputs=prior_outputs or "",
             step_errors=step_errors or "",
@@ -436,10 +450,10 @@ class Brain:
         *,
         memories: str,
         now: Optional[float] = None,
-        temperature: float = 0.4,
-        top_p: float = 0.98,
-        repeat_penalty: float = 1.12,
-        repeat_last_n: int = 128,
+        temperature: float = 0.6,
+        top_p: float = 0.96,
+        repeat_penalty: float = 1.0,
+        repeat_last_n: int = 256,
         stream: bool = True,
         llm_options: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
@@ -453,6 +467,7 @@ class Brain:
             BUDDY_OUTPUT.format(schema=MEMORY_SUMMARY_PROMPT_SCHEMA),
         ])
         import datetime as _dt
+
         _ts = now if now is not None else _dt.datetime.now().timestamp()
         today_str = _dt.datetime.fromtimestamp(_ts).strftime("%Y-%m-%d %H:%M")
         prompt = build_memory_summary_prompt(
@@ -486,10 +501,10 @@ class Brain:
         active_task: str,
         memories: str,
         execution_results: str,
-        temperature: float = 0.2,
-        top_p: float = 0.98,
-        repeat_penalty: float = 1.12,
-        repeat_last_n: int = 128,
+        temperature: float = 0.6,
+        top_p: float = 0.96,
+        repeat_penalty: float = 1.0,
+        repeat_last_n: int = 256,
         stream: bool = True,
         llm_options: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
@@ -535,10 +550,10 @@ class Brain:
         paragraph: str,
         query: str,
         rolling_context: str = "",
-        temperature: float = 0.2,
-        top_p: float = 0.98,
-        repeat_penalty: float = 1.12,
-        repeat_last_n: int = 128,
+        temperature: float = 0.6,
+        top_p: float = 0.96,
+        repeat_penalty: float = 1.0,
+        repeat_last_n: int = 256,
         stream: bool = True,
         llm_options: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
@@ -557,7 +572,9 @@ class Brain:
         prompt = build_reader_prompt(
             system=system_prompt,
             datetime_block=self._get_time_info(),
-            rolling_context=rolling_context if rolling_context else READER_CONTEXT_EMPTY,
+            rolling_context=(
+                rolling_context if rolling_context else READER_CONTEXT_EMPTY
+            ),
             task=READER_TASK_TEMPLATE.format(
                 query=query,
                 paragraph=paragraph,
@@ -575,27 +592,17 @@ class Brain:
             json_mode=True,
         )
 
-        try:
-            result = json.loads(raw) if isinstance(raw, str) else raw
-            if isinstance(result, dict):
-                return {
-                    "relevant": bool(result.get("relevant", False)),
-                    "content": str(result.get("content", "")),
-                }
-        except Exception:
-            pass
-
-        return {"relevant": False, "content": ""}
+        return self.parser.parse_reader(raw)
 
     def run_vision(
         self,
         *,
         image_paths: "Union[str, List[str]]",
         query: str,
-        temperature: float = 0.2,
-        top_p: float = 0.98,
-        repeat_penalty: float = 1.12,
-        repeat_last_n: int = 128,
+        temperature: float = 0.6,
+        top_p: float = 0.96,
+        repeat_penalty: float = 1.0,
+        repeat_last_n: int = 256,
         stream: bool = True,
         llm_options: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
@@ -648,8 +655,6 @@ class Brain:
             ),
         }]
 
-        logger.debug("run_vision | paths=%r query=%r", image_paths, query[:80])
-
         try:
             raw = self.llm.chat(
                 messages=messages,
@@ -665,7 +670,8 @@ class Brain:
                 json_extract=True,
                 json_validate=True,
                 json_root="object",
-                stop=["</json>"],
+                think=True,
+                interrupt_event=self._interrupt_event,
             )
         except Exception as exc:
             logger.warning(
@@ -675,14 +681,10 @@ class Brain:
 
         # Parse result
         try:
-            result = json.loads(raw) if isinstance(raw, str) else raw
+            result = self.parser.parse_vision(raw)
+
             if isinstance(result, dict):
-                return {
-                    "description": str(result.get("description", "")).strip(),
-                    "objects": result.get("objects") or [],
-                    "text_found": str(result.get("text_found", "")).strip(),
-                    "key_finding": str(result.get("key_finding", "")).strip(),
-                }
+                return result
         except Exception:
             pass
 
@@ -694,6 +696,137 @@ class Brain:
             "key_finding": str(raw).strip(),
         }
 
+    def run_browser_action(
+        self,
+        *,
+        screenshot_uri: str,
+        task: str,
+        progress: str = "",
+        memory_context: str = "",
+        dom_hints: str = "",
+        ask_history: Optional[List[Dict[str, Any]]] = None,
+        last_error: str = "",
+        temperature: float = 0.6,
+        top_p: float = 0.96,
+        repeat_penalty: float = 1.0,
+        repeat_last_n: int = 256,
+        stream: bool = True,
+        llm_options: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """
+        Combined vision+action call for the browser micro-planner.
+
+        Sees the current page screenshot and decides the next BrowserAction.
+        Called once per iteration of the run_task loop in browser.py.
+
+        Returns a dict with keys: function, arguments, summary.
+        On failure returns {"function": "error", "arguments": {}, "summary": str}.
+
+        screenshot_uri — JPEG data URI (data:image/jpeg;base64,...)
+        task           — original user task description
+        progress       — cumulative summary written by the model at the previous step
+        memory_context — resolved memory values injected after fetch_memory, e.g. "email=harsh@x.com"
+        dom_hints      — newline-separated list of visible interactive elements extracted from the DOM
+        """
+
+        system_prompt = self._build_system_prompt([
+            BROWSER_ACTION_PROMPT,
+            BUDDY_OUTPUT.format(schema=BROWSER_ACTION_SCHEMA),
+        ])
+
+        # Turn 1 — user: end goal (the full task, never changes across iterations)
+        goal_msg = f"<goal>\n{task}\n</goal>"
+
+        # Turn 2 — assistant: acknowledgment merged with recalled memory + cumulative progress
+        # Merged into ONE assistant turn to prevent consecutive same-role messages which
+        # cause Qwen3 to emit EOS immediately and return a blank response.
+        mem_parts: List[str] = [
+            "Understood, I will stick to the goal and accomplish it fully."
+        ]
+        if memory_context:
+            mem_parts.append(f"<memory>\n{memory_context}\n</memory>")
+        if progress:
+            mem_parts.append(f"<progress>\n{progress}\n</progress>")
+        assistant_block = "\n".join(mem_parts)
+
+        # Turn 3 — user: current page context + screenshot
+        final_parts: List[str] = []
+        if last_error:
+            final_parts.append(f"<last_error>\n{last_error}\n</last_error>")
+        if dom_hints:
+            final_parts.append(f"<page_elements>\n{dom_hints}\n</page_elements>")
+        final_parts.append(
+            "Analyze the screenshot, page_elements, and last_error if present. Decide"
+            " the next best action and produce the full function call in valid JSON."
+        )
+
+        page_msg = "\n\n".join(final_parts)
+
+        # Build messages with strict user/assistant alternation.
+        # ask_history items: Buddy asked Q (assistant), user replied A (user).
+        # After the last ask_history pair (user: A), the next turn is user: page_msg,
+        # so we merge A + page_msg into one user turn to avoid consecutive user turns.
+        messages: List[Dict[str, Any]] = [
+            {"role": "user", "content": goal_msg},
+            {"role": "assistant", "content": assistant_block},
+        ]
+        history = ask_history or []
+        for i, qa in enumerate(history):
+            q = str(qa.get("q", ""))
+            a = str(qa.get("a", ""))
+            messages.append({"role": "assistant", "content": q})
+            if i < len(history) - 1:
+                messages.append({"role": "user", "content": a})
+            else:
+                # Last answer: merge with page context to avoid consecutive user turns
+                messages.append({"role": "user", "content": f"{a}\n\n{page_msg}"})
+        if not history:
+            messages.append({"role": "user", "content": page_msg})
+
+        logger.debug(
+            "run_browser_action | task=%r progress=%r memory=%r dom_hints_lines=%d"
+            " last_error=%r",
+            task[:60],
+            progress[:80],
+            memory_context[:80],
+            dom_hints.count("\n") + 1 if dom_hints else 0,
+            last_error[:60] if last_error else "",
+        )
+
+        try:
+            raw = self.llm.chat(
+                messages=messages,
+                system=system_prompt,
+                images=[screenshot_uri],
+                temperature=temperature,
+                top_p=top_p,
+                repeat_penalty=repeat_penalty,
+                repeat_last_n=repeat_last_n,
+                stream=stream,
+                on_delta=self._on_token,
+                options=llm_options,
+                json_extract=True,
+                json_validate=True,
+                json_root="object",
+                think=True,
+                interrupt_event=self._interrupt_event,
+            )
+        except Exception as exc:
+            logger.warning("run_browser_action LLM call failed: %r", exc)
+            return {"function": "error", "arguments": {}, "summary": str(exc)}
+
+        if self.debug:
+            logger.debug(f"LLM output: \n {raw}")
+
+        try:
+            result = self.parser.parse_browser_action(raw)
+            if isinstance(result, dict):
+                return result
+        except Exception:
+            pass
+
+        return {"function": "error", "arguments": {}, "summary": str(raw).strip()}
+
     # ======================================================
     # Internal: LLM call (generate only)
     # ======================================================
@@ -704,7 +837,7 @@ class Brain:
         temperature: float,
         stream: bool,
         json_mode: bool,
-        top_p: float = 0.98,
+        top_p: float = 0.96,
         repeat_penalty: float = 1.0,
         repeat_last_n: int = 64,
         n_predict: Optional[int] = None,
@@ -741,12 +874,12 @@ class Brain:
             json_validate=bool(json_mode),
             json_root="object",
             json_max_chars=120_000,
-            stop=["</json>"],
             interrupt_event=self._interrupt_event,
+            think=True,
+            stop=["<|im_end|>", "<|endoftext|>"],
         )
 
         text = "" if out is None else str(out)
-
         # ── Detect missing JSON and re-prompt ────────────────────────────
         # Failure mode A: model output only the <think> block and stopped.
         #   Qwen3 emits lowercase </think>; handle both cases for safety.
@@ -768,7 +901,7 @@ class Brain:
         if _think_only or _prose_instead_of_json:
             _idx = _text_lower.rfind("</think>")
             _think_part = text[: _idx + len("</think>")] if _idx >= 0 else text
-            prompt = prompt + f"\n{_think_part}\n<json>"
+            prompt = prompt + f"\n{_think_part}\n" + "{"
             text = self.llm.generate(
                 prompt=prompt,
                 system=system,
@@ -779,14 +912,14 @@ class Brain:
                 repeat_last_n=int(repeat_last_n),
                 n_predict=n_predict,
                 options=opts,
-                on_delta=(self._on_token if self._on_token and stream else None),
-                json_extract=bool(json_mode),
-                json_validate=bool(json_mode),
-                json_root="object",
-                json_max_chars=120_000,
-                stop=["</json>"],
+                on_delta=None,
+                json_extract=False,
+                json_validate=False,
+                stop=["<|im_end|>", "<|endoftext|>"],
                 interrupt_event=self._interrupt_event,
+                think=False,
             )
+            text = "{\n" + text
 
         if self.debug:
             logger.debug(f"LLM output: \n {text}")

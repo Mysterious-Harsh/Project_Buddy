@@ -1,79 +1,95 @@
-# 🔒 LOCKED — web_fetch_prompts.py
-# Contract: tool_call schema → { urls, max_chars }
-# Result fields: OK, RESULTS [{url, title, content, size_chars, error}], TOTAL_FETCHED, ERROR
-# Allowed: bug fixes, guidance text improvements.
-# Not allowed: adding/removing schema fields, changing result field names.
-
 WEB_FETCH_TOOL_PROMPT = """
-WEB FETCH TOOL  —  fetch full page content
+TOOL_NAME: web_fetch
+TOOL_DESCRIPTION: Fetch full readable text from URLs, or download binary files to disk. Use after web_search — pass URLs from search results as input.
 
-Downloads and extracts full readable text from one or more URLs.
-Use this AFTER web_search when snippets are not enough.
+<functions>
+  <function>
+    <name>fetch</name>
+    <description>Download and extract plain text from one or more URLs.</description>
+    <parameters>
+      - urls      (array,   REQUIRED) — 1 to 5 URL strings; must start with http:// or https://
+      - max_chars (integer, OPTIONAL, default: 8000, max: 20000) — per-URL content cap
+    </parameters>
+    <returns>OK, RESULTS [{url, title, content, size_chars, error}], TOTAL_FETCHED, ERROR</returns>
+    <destructive>NO</destructive>
+    <confirmation_required>NO</confirmation_required>
+  </function>
 
-HOW TO USE WITH web_search:
-  - Step 1: web_search  → get RESULTS list (titles, urls, snippets)
-  - Step 2: web_fetch   → pick the best URLs from step 1 based on title + snippet relevance
-  Always use URLs from prior search results. Never invent URLs.
+  <function>
+    <name>download</name>
+    <description>Download a file from a URL and save it to disk. Use for binary files (ZIPs, PDFs, images, executables) — not for reading page text.</description>
+    <parameters>
+      - url       (string,  REQUIRED) — must start with http:// or https://
+      - dest_path (string,  REQUIRED) — destination file or directory path; if a directory, filename is inferred from the URL
+      - overwrite (boolean, OPTIONAL, default: false) — allow overwriting an existing file
+    </parameters>
+    <returns>OK, URL, DEST_PATH, SIZE_BYTES, CONTENT_TYPE, ERROR</returns>
+    <destructive>YES — writes a file to disk</destructive>
+    <confirmation_required>YES — if dest_path already exists and overwrite=false</confirmation_required>
+  </function>
+</functions>
 
-HOW MANY URLS TO FETCH:
-  General queries (quick facts, how-to, single topic)               → fetch 1–2 best URLs
-  Moderate queries (comparisons, tutorials, some depth needed)       → fetch 2–3 URLs
-  Deep research (comprehensive, multiple perspectives, user asked for more) → fetch 3–5 URLs
+<tool_rules>
 
-  Default to 1–2 for general queries. Only fetch more when the user
-  explicitly asks for deeper information or the topic genuinely requires it.
+1. URL SOURCES
+   1.1 Only use URLs from prior web_search RESULTS. Never construct or invent URLs.
+   1.2 Read the title and snippet of each result before choosing — pick the best match for the user's question.
+   1.3 Prefer authoritative domains (official docs, reputable publications) when results look equally relevant.
+   1.4 Avoid: social media, maps, weather widgets, login-gated pages, aggregator spam sites.
 
-HOW TO PICK THE BEST URLs:
-  Read the title and snippet of each search result before choosing.
-  Prefer URLs whose title and snippet directly address the user's question.
-  Avoid: social media, weather widgets, maps, login-gated pages, forums
-         with low-quality answers, and aggregator spam sites.
-  If two results look equally relevant, prefer the one from a more
-  authoritative domain (official docs, reputable publications).
-  Never pick URLs at random — always justify by title/snippet match.
+2. HOW MANY URLs (fetch only)
+   Quick fact, single topic                                  → 1–2 URLs
+   Comparisons, tutorials, moderate depth                   → 2–3 URLs
+   Comprehensive research, multiple perspectives requested  → 3–5 URLs
+   Default to 1–2 unless the user explicitly asks for more.
 
-WHEN TO USE:
-  Full article body, documentation pages, blog posts, source code pages,
-  news articles where the snippet was incomplete.
+3. WHEN NOT TO FETCH
+   3.1 JavaScript-rendered pages (maps, weather, dashboards, social media) → return empty or broken content. Use search snippets instead.
+   3.2 If the answer is fully contained in search snippets → skip this step entirely.
 
-WHEN NOT TO USE:
-  Weather sites, maps, social media, dashboards — these use JavaScript
-  and will return empty or broken content. Use search snippets instead.
+4. PER-URL ERRORS (fetch only)
+   4.1 Each result in RESULTS has its own error field. A partial fetch (some URLs succeeded) is still OK=true.
+   4.2 Read each result's error field individually before deciding whether to retry.
 
-SCHEMA:
-  urls       : list of strings  (required) — 1 to 5 URLs from prior search results
-  max_chars  : int  (default 8000 per URL, max 20000)
+5. FETCH vs DOWNLOAD
+   5.1 Use fetch for: HTML pages, documentation, articles — content the LLM needs to read.
+   5.2 Use download for: binary files (ZIPs, PDFs, images, executables, datasets) to be saved to disk.
+   5.3 Never use download to read text content — use fetch instead.
 
-OUTPUT:
-  OK            : bool
-  RESULTS       : [
-                    {
-                      url       : string,
-                      title     : string,
-                      content   : string  — extracted plain text,
-                      size_chars: int,
-                      error     : string | null
-                    }
-                  ]
-  TOTAL_FETCHED : int   — number of URLs successfully fetched
-  ERROR         : string | null
-"""
+6. DOWNLOAD SAFETY
+   6.1 If dest_path already exists and overwrite=false → stop. Report the path and ask the user to confirm.
+   6.2 Always use the exact dest_path the user specified. Never invent a path.
 
-WEB_FETCH_ERROR_RECOVERY_PROMPT = """
-WEB FETCH ERROR RECOVERY
+</tool_rules>
 
-Check each result's error field individually. Fix before retrying.
+<error_recovery>
+Read only when <errors> is present in context.
 
-  empty content / tiny  → site uses JavaScript (maps, weather, social);
-                          do NOT retry — use search snippets instead
-  HTTP 403/blocked      → site blocks scraping; skip this URL, try another from search results
-  timeout               → retry once with fewer URLs; if fails again skip
-  3 failures            → status="followup"
-"""
+1. FETCH ERROR CATEGORIES
+   A. EMPTY CONTENT / SIZE < 50 CHARS — site uses JavaScript rendering.
+      Do NOT retry this URL. Use search snippets instead. Try a different URL from the search results.
 
-tool_call_format = """
-{
-  "urls": ["https://example.com/article"],
-  "max_chars": 8000
-}
+   B. HTTP 403 / BLOCKED — site blocks scraping.
+      Skip this URL. Pick the next best URL from search results.
+
+   C. TIMEOUT — request took too long.
+      Retry once with fewer URLs (drop the slowest). If it fails again → skip that URL.
+
+   D. ALL URLs FAILED — OK=false, TOTAL_FETCHED=0.
+      Return status="followup". Report which URLs were tried and why each failed.
+
+   E. UNCLASSIFIED — Do not guess. Return status="followup" with the exact error value and one specific question.
+
+2. DOWNLOAD ERROR CATEGORIES
+   A. FILE EXISTS — ERROR contains "already exists". Do not overwrite. Return status="followup" and report the path.
+   B. PERMISSION DENIED — cannot write to dest_path. Report the path and error. Do not retry.
+   C. TIMEOUT — file too large or connection slow. Retry once. If it fails again → status="followup".
+   D. HTTP ERROR — report status code and reason. Do not retry.
+
+3. RETRY RULES
+   3.1 Never retry a URL whose error indicates JavaScript rendering (category 1A) or HTTP 403 (category 1B).
+   3.2 Never retry a download where the file already exists (category 2A) or permission was denied (category 2B).
+   3.3 After 3 failures total → status="followup".
+
+</error_recovery>
 """

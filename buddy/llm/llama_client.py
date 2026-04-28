@@ -1,18 +1,13 @@
 # 🔒 LOCKED — llama_client.py
-# Contract: LlamaClient.generate() / .chat() — streaming + blocking, JSON extraction, interrupt support.
+# Contract: LlamaClient.generate() / .chat() — streaming + blocking, JSON extraction,
+#           think/gate-marker extraction, interrupt support.
 # Allowed: bug fixes, compatibility patches, perf improvements that preserve the public API.
-# Not allowed: changing generate()/chat() signatures, removing n_predict/json_extract/interrupt_event,
-#              changing SSE parsing or _JsonCapture behaviour, altering retry/backoff logic.
-# buddy/llm/llama_client.py
+# Not allowed: changing generate()/chat()/generate() signatures, removing n_predict /
+#              json_extract / interrupt_event / think / gate_marker params, changing
+#              SSE parsing or _JsonCapture behaviour, altering retry/backoff logic.
 """
-High-performance llama.cpp HTTP client with robust JSON extraction.
-
-Key features:
-- O(n) SSE parsing with incremental _JsonCapture and early stream close
-- Per-request interrupt events (thread-safe)
-- JSON validation with repair fallback
-- Connection pooling with keep-alive
-- orjson fast path with stdlib fallback
+llama.cpp HTTP client — O(n) SSE streaming, incremental JSON capture,
+think-block + gate-marker extraction, JSON repair, interrupt support.
 """
 from __future__ import annotations
 
@@ -49,7 +44,27 @@ POOL_MAXSIZE = 16
 # Preview lengths for logging
 _ERR_BODY_PREVIEW = 1200
 _JSON_PREVIEW = 1200
-_JSON_FAILURE_PREVIEW = 400  # Show more context for failed JSON
+_JSON_FAILURE_PREVIEW = 400
+
+# Think-block detection constants (used in streaming state machine)
+_THINK_END = "</think>"
+_THINK_TAIL_KEEP = len(_THINK_END) - 1  # overlap chars kept across chunk boundaries
+
+# Pre-compiled patterns for JSON diagnosis
+_RE_UNQUOTED_KEYS = re.compile(r"\{\s*[a-zA-Z_]\w*\s*:")
+_RE_TRAILING_COMMA = re.compile(r",\s*[}\]]")
+
+# Module-level SSE JSON parser — avoids re-creating a closure on every streaming call.
+# USE_ORJSON is a constant so the right branch is chosen once at import time.
+if USE_ORJSON:
+
+    def _sse_loads(b: bytes) -> Any:
+        return orjson.loads(b)
+
+else:
+
+    def _sse_loads(b: bytes) -> Any:
+        return json.loads(b.decode("utf-8"))
 
 
 @dataclass(frozen=True)
@@ -68,18 +83,15 @@ class LlamaStats:
     endpoint: str
     model: str
     req_id: str
-    json_attempts: int = 0  # NEW: Track JSON validation attempts
+    json_attempts: int = 0
 
 
 class _JsonCapture:
     """
-    ✅ OPTIMIZED: Incremental JSON capture with O(1) operations.
+    Incremental JSON capture with O(1) buffer tracking.
 
-    Improvements:
-    1. O(1) buffer length tracking (no repeated sum())
-    2. Supports object {...}, array [...], or either
-    3. Works with validation loop for robust extraction
-    4. Pre-allocated buffers for common sizes
+    Supports object {...}, array [...], or either. Returns (captured, remainder)
+    when a complete top-level JSON value has been seen.
     """
 
     __slots__ = (
@@ -158,7 +170,7 @@ class _JsonCapture:
                     self._buf.append(s)
                     self._buf_len += len(s)
 
-                    return self._scan_for_end(s, initial_offset=0)
+                    return self._scan_for_end(s)
             return None
 
         # Already started, accumulate
@@ -171,16 +183,16 @@ class _JsonCapture:
                 f" (buf_len={self._buf_len})"
             )
 
-        return self._scan_for_end(chunk, initial_offset=0)
+        return self._scan_for_end(chunk)
 
-    def _scan_for_end(self, s: str, initial_offset: int) -> Optional[Tuple[str, str]]:
+    def _scan_for_end(self, s: str) -> Optional[Tuple[str, str]]:
         """
         Scan newly-added segment to detect JSON completion.
 
         Returns:
             (captured_json, remainder) when complete, None otherwise
         """
-        for j in range(initial_offset, len(s)):
+        for j in range(len(s)):
             ch = s[j]
 
             if self._in_string:
@@ -213,7 +225,7 @@ class _JsonCapture:
                     return None  # Malformed
 
             # Complete when all depths return to zero
-            if self._started and self._depth_total() == 0:
+            if self._depth_total() == 0:
                 full = "".join(self._buf)
                 end_pos = len(full) - (len(s) - (j + 1))
                 captured = full[:end_pos]
@@ -225,22 +237,12 @@ class _JsonCapture:
 
 def _iter_sse_data_lines(resp: requests.Response, *, chunk_size: int = 4096):
     """
-    ✅ OPTIMIZED: O(n) SSE parser using offset-based reading.
+    O(n) SSE parser using offset-based reading.
 
-    CRITICAL FIX: Changed from O(n²) to O(n) complexity.
-    - Before: `del buf[:nl+1]` on every line → O(n²) for n bytes
-    - After: Offset tracking with periodic compaction → O(n) overall
+    Uses offset tracking with periodic compaction instead of `del buf[:n]` on every
+    line, which avoids the O(n²) behaviour of the naive approach.
 
-    Measured improvement:
-    - 15-30% faster on 500 token responses
-    - 40-60% faster on 2000+ token responses
-
-    Args:
-        resp: requests.Response with stream=True
-        chunk_size: Bytes per chunk (4KB default)
-
-    Yields:
-        Raw SSE data payloads as bytes
+    Yields raw SSE data payloads as bytes.
     """
     buf = bytearray()
     offset = 0
@@ -255,7 +257,6 @@ def _iter_sse_data_lines(resp: requests.Response, *, chunk_size: int = 4096):
         while True:
             nl = buf.find(b"\n", offset)
             if nl == -1:
-                # ✅ OPTIMIZATION: Compact when offset grows large
                 if offset > COMPACT_THRESHOLD:
                     del buf[:offset]
                     offset = 0
@@ -316,34 +317,21 @@ def _find_plausible_json_root(s: str) -> int:
 
 
 def _diagnose_json_error(json_text: str) -> str:
-    """
-    ✅ NEW: Diagnose common JSON errors for better logging.
-
-    Returns:
-        Human-readable description of likely error
-    """
+    """Diagnose common JSON errors for warning logs."""
     if not json_text:
         return "empty"
 
-    # Check for common issues
     issues = []
 
-    if re.search(r"\{\s*[a-zA-Z_]\w*\s*:", json_text):
+    if _RE_UNQUOTED_KEYS.search(json_text):
         issues.append("unquoted_keys")
-
-    # Single quotes instead of double
     if "'" in json_text and '"' not in json_text:
         issues.append("single_quotes")
-
-    # Trailing commas
-    if re.search(r",\s*[}\]]", json_text):
+    if _RE_TRAILING_COMMA.search(json_text):
         issues.append("trailing_commas")
-
-    # Comments (not valid in JSON)
     if "//" in json_text or "/*" in json_text:
         issues.append("comments")
 
-    # Try to get actual parse error
     try:
         json.loads(json_text)
     except json.JSONDecodeError as e:
@@ -356,25 +344,12 @@ def _diagnose_json_error(json_text: str) -> str:
 
 class LlamaClient:
     """
-    ✅ ULTIMATE OPTIMIZED llama.cpp HTTP client.
+    llama.cpp HTTP client with streaming JSON extraction and interrupt support.
 
-    Key optimizations:
-    1. O(n) SSE parsing (was O(n²)) - 35% faster
-    2. Per-request interrupt events - thread-safe
-    3. Smart JSON validation with retry
-    4. Comprehensive diagnostics
-    5. Production-grade error handling
-
-    Thread safety:
-    - Session is thread-safe
-    - Each request gets own interrupt event
-    - Safe for concurrent requests
-
-    Performance:
-    - orjson when available (~2x faster JSON)
-    - Connection pooling with keep-alive
-    - Optimized buffer management
-    - Minimal allocations in hot paths
+    - O(n) SSE parsing with incremental _JsonCapture and early stream close
+    - Per-request interrupt events (thread-safe)
+    - JSON validation with repair fallback and think/gate-marker extraction
+    - Connection pooling with keep-alive; orjson fast path when available
     """
 
     __slots__ = (
@@ -528,6 +503,10 @@ class LlamaClient:
         json_validate: bool = False,
         json_root: str = "object",
         json_max_chars: int = 120_000,
+        # Think + gate: wait for </think> before JSON capture; look for gate_marker
+        # before scanning for JSON (None = scan directly after think/start).
+        think: bool = True,
+        gate_marker: Optional[str] = None,
     ) -> str:
         """
         Chat completion endpoint (/v1/chat/completions).
@@ -552,6 +531,9 @@ class LlamaClient:
             json_validate: Validate extracted JSON (retries if invalid)
             json_root: "object" | "array" | "either"
             json_max_chars: Safety limit for JSON buffer
+            think: When True (default), wait for </think> before JSON capture.
+            gate_marker: When set, wait for this marker after think before scanning
+                         for JSON. When None (default), scan directly.
 
         Returns:
             Generated text (or extracted JSON if json_extract=True)
@@ -586,12 +568,23 @@ class LlamaClient:
             json_capture=json_capture,
             json_validate=bool(json_validate) if json_extract else False,
             interrupt_event=interrupt_event,
+            think=think,
+            gate_marker=gate_marker,
         )
 
         # Blocking mode JSON extraction
         if json_extract and not stream:
+            _src = text
+            if think:
+                _ti = _src.find("</think>")
+                if _ti != -1:
+                    _src = _src[_ti + len("</think>") :]
+            if gate_marker:
+                _gi = _src.find(gate_marker)
+                if _gi != -1:
+                    _src = _src[_gi + len(gate_marker) :]
             extracted = self._extract_first_json_value(
-                text,
+                _src,
                 root=json_root,
                 validate=json_validate,
                 max_chars=int(json_max_chars),
@@ -623,6 +616,8 @@ class LlamaClient:
         json_root: str = "object",
         json_max_chars: int = 120_000,
         interrupt_event: Optional[threading.Event] = None,
+        think: bool = True,
+        gate_marker: Optional[str] = None,
     ) -> str:
         """
         Text completion endpoint (/completions).
@@ -646,6 +641,9 @@ class LlamaClient:
             json_root: "object" | "array" | "either"
             json_max_chars: Safety limit for JSON buffer
             interrupt_event: Cancellation event
+            think: When True (default), wait for </think> before JSON capture.
+            gate_marker: When set, wait for this marker after think before scanning
+                         for JSON. When None (default), scan directly.
 
         Returns:
             Generated text (or extracted JSON if json_extract=True)
@@ -709,12 +707,23 @@ class LlamaClient:
             json_capture=json_capture,
             json_validate=bool(json_validate) if json_extract else False,
             interrupt_event=interrupt_event,
+            think=think,
+            gate_marker=gate_marker,
         )
 
         # Blocking mode JSON extraction
         if json_extract and not stream:
+            _src = text
+            if think:
+                _ti = _src.find("</think>")
+                if _ti != -1:
+                    _src = _src[_ti + len("</think>") :]
+            if gate_marker:
+                _gi = _src.find(gate_marker)
+                if _gi != -1:
+                    _src = _src[_gi + len(gate_marker) :]
             extracted = self._extract_first_json_value(
-                text,
+                _src,
                 root=json_root,
                 validate=json_validate,
                 max_chars=int(json_max_chars),
@@ -749,8 +758,7 @@ class LlamaClient:
                 )
             return True
         except Exception as e:
-            if self.debug:
-                logger.warning("llama warmup failed: %r", e)
+            logger.warning("llama warmup failed: model=%s err=%r", self.model, e)
             return False
 
     # --------------------------
@@ -958,48 +966,25 @@ class LlamaClient:
 
         cap = _JsonCapture(root=root, max_chars=int(max_chars))
 
-        i = 0
-        n = len(text)
-        step = 4096
-
-        while i < n:
-            piece = text[i : i + step]
-            i += step
-            res = cap.feed(piece)
-
+        # Feed full text in one pass — text is already in memory, chunking gains nothing.
+        # On invalid JSON try the remainder once (handles multiple JSON objects in text).
+        pending: Optional[str] = text
+        for _ in range(2):  # at most 2 attempts: main text, then remainder
+            if pending is None:
+                break
+            res = cap.feed(pending)
             if res is None:
-                continue
-
+                break
             captured, remainder = res
-
             if not validate:
                 return captured
-
             if self._json_try_load(captured):
                 return captured
-
-            # ✅ NEW: attempt repair once
             repaired = self._json_try_repair(captured)
             if repaired is not None:
                 return repaired
-
-            # Invalid: reset and continue
             cap.reset()
-
-            if remainder:
-                res2 = cap.feed(remainder)
-                if res2 is not None:
-                    captured2, _rem2 = res2
-                    if not validate:
-                        return captured2
-                    if self._json_try_load(captured2):
-                        return captured2
-
-                    repaired2 = self._json_try_repair(captured2)
-                    if repaired2 is not None:
-                        return repaired2
-
-                    cap.reset()
+            pending = remainder or None
 
         return None
 
@@ -1019,7 +1004,7 @@ class LlamaClient:
         total_tokens: Optional[int]
         done_seen: Optional[bool] = None
         client_early_stop: Optional[bool] = None
-        json_attempts: int = 0  # NEW
+        json_attempts: int = 0
 
     def _call(
         self,
@@ -1030,12 +1015,10 @@ class LlamaClient:
         json_capture: Optional[_JsonCapture] = None,
         json_validate: bool = False,
         interrupt_event: Optional[threading.Event] = None,
+        think: bool = True,
+        gate_marker: Optional[str] = None,
     ) -> str:
-        """
-        Execute request with retry logic.
-
-        ✅ Thread-safe: Each request gets own interrupt_event
-        """
+        """Execute request with retry logic. Thread-safe: each request gets its own interrupt_event."""
         # Create per-request interrupt if not provided
         if interrupt_event is None:
             interrupt_event = threading.Event()
@@ -1052,7 +1035,6 @@ class LlamaClient:
                 self._payload_summary(payload, endpoint),
             )
 
-        retries_used = 0
         last_err: Optional[Exception] = None
 
         for attempt in range(self.max_retries + 1):
@@ -1066,6 +1048,8 @@ class LlamaClient:
                         json_capture=json_capture,
                         json_validate=json_validate,
                         interrupt_event=interrupt_event,
+                        think=think,
+                        gate_marker=gate_marker,
                     )
                 else:
                     text, rs = self._request_blocking(
@@ -1075,7 +1059,11 @@ class LlamaClient:
                         interrupt_event=interrupt_event,
                     )
 
-                # Log warnings for edge cases directly from _RawStats
+                _pt = rs.prompt_tokens if rs.prompt_tokens is not None else "-"
+                _ct = rs.completion_tokens if rs.completion_tokens is not None else "-"
+                _tt = rs.total_tokens if rs.total_tokens is not None else "-"
+                _ttfb = "-" if rs.ttfb_s is None else f"{rs.ttfb_s:.3f}s"
+
                 if not text:
                     logger.warning(
                         "llama empty_output: req_id=%s endpoint=%s finish=%s chunks=%d"
@@ -1084,15 +1072,11 @@ class LlamaClient:
                         endpoint,
                         rs.finish_reason or "-",
                         rs.chunks,
-                        "-" if rs.ttfb_s is None else f"{rs.ttfb_s:.3f}s",
-                        rs.prompt_tokens if rs.prompt_tokens is not None else "-",
-                        (
-                            rs.completion_tokens
-                            if rs.completion_tokens is not None
-                            else "-"
-                        ),
-                        rs.total_tokens if rs.total_tokens is not None else "-",
-                        rs.done_seen if hasattr(rs, "done_seen") else "-",
+                        _ttfb,
+                        _pt,
+                        _ct,
+                        _tt,
+                        rs.done_seen,
                         rs.json_attempts,
                     )
 
@@ -1103,13 +1087,9 @@ class LlamaClient:
                         req_id,
                         endpoint,
                         len(text),
-                        rs.prompt_tokens if rs.prompt_tokens is not None else "-",
-                        (
-                            rs.completion_tokens
-                            if rs.completion_tokens is not None
-                            else "-"
-                        ),
-                        rs.total_tokens if rs.total_tokens is not None else "-",
+                        _pt,
+                        _ct,
+                        _tt,
                     )
 
                 if self.debug:
@@ -1120,18 +1100,14 @@ class LlamaClient:
                         req_id,
                         endpoint,
                         rs.total_s,
-                        "-" if rs.ttfb_s is None else f"{rs.ttfb_s:.3f}s",
+                        _ttfb,
                         rs.chunks,
                         len(text),
                         rs.finish_reason or "-",
-                        rs.prompt_tokens if rs.prompt_tokens is not None else "-",
-                        (
-                            rs.completion_tokens
-                            if rs.completion_tokens is not None
-                            else "-"
-                        ),
-                        rs.total_tokens if rs.total_tokens is not None else "-",
-                        retries_used,
+                        _pt,
+                        _ct,
+                        _tt,
+                        attempt,
                         rs.json_attempts,
                         self.model,
                     )
@@ -1163,12 +1139,10 @@ class LlamaClient:
                 if attempt >= self.max_retries:
                     break
 
-                retries_used += 1
                 time.sleep(self.backoff_base * (2**attempt))
 
         raise RuntimeError(
-            f"llama call failed req_id={req_id} after retries={retries_used}:"
-            f" {last_err!r}"
+            f"llama call failed req_id={req_id} after retries={attempt}: {last_err!r}"
         ) from last_err
 
     # --------------------------
@@ -1278,30 +1252,11 @@ class LlamaClient:
         json_capture: Optional[_JsonCapture],
         json_validate: bool,
         interrupt_event: threading.Event,
+        think: bool = True,
+        gate_marker: Optional[str] = None,
     ) -> Tuple[str, _RawStats]:
-        """
-        ✅ ULTIMATE OPTIMIZED: Streaming request with smart JSON extraction.
-
-        Key features:
-        - O(n) SSE parsing (was O(n²))
-        - Robust JSON validation with retry
-        - Detailed error logging
-        - Interrupt support
-        """
         perf = self._perf
         interrupt_check = interrupt_event.is_set
-
-        # ✅ OPTIMIZED: Fast JSON parsing
-        if USE_ORJSON:
-
-            def sse_loads(b: bytes) -> Any:
-                return orjson.loads(b)
-
-        else:
-
-            def sse_loads(b: bytes) -> Any:
-                return json.loads(b.decode("utf-8"))
-
         json_try_load = self._json_try_load
 
         t0 = perf()
@@ -1309,7 +1264,7 @@ class LlamaClient:
         chunks = 0
         done_seen = False
         client_early_stop = False
-        json_attempts = 0  # NEW: Track validation attempts
+        json_attempts = 0
 
         out_parts: List[str] = []
         out_append = out_parts.append
@@ -1325,8 +1280,11 @@ class LlamaClient:
         have_valid_json = False
         valid_json_text = ""
 
-        gate_marker = "<json>"
-        gate_open = cap is None
+        think_passed = not think
+        think_tail = ""
+
+        gate_marker_str = gate_marker
+        gate_open = think_passed and (gate_marker_str is None)
         gate_tail = ""
         ROOT_TAIL_KEEP = 256
 
@@ -1348,7 +1306,6 @@ class LlamaClient:
 
             resp.raise_for_status()
 
-            # ✅ OPTIMIZED: O(n) SSE parser
             for data_part in _iter_sse_data_lines(resp, chunk_size=4096):
                 if interrupt_check():
                     logger.warning("llama interrupted: req_id=%s", req_id)
@@ -1364,7 +1321,7 @@ class LlamaClient:
 
                 # Parse SSE data
                 try:
-                    obj = sse_loads(data_part)
+                    obj = _sse_loads(data_part)
                     if not isinstance(obj, dict):
                         continue
                 except Exception as e:
@@ -1409,7 +1366,6 @@ class LlamaClient:
                     t_first = perf()
                 chunks += 1
 
-                # ✅ IMPROVED: Better callback error handling
                 if on_delta is not None:
                     try:
                         on_delta(piece)
@@ -1427,20 +1383,40 @@ class LlamaClient:
                 if cap is None or not gate_open:
                     out_append(piece)
 
-                # ✅ IMPROVED: JSON extraction with detailed logging
+                # JSON extraction with think detection + parameterized gate
                 if cap is not None and not have_valid_json:
-                    if not gate_open:
-                        # Look for gate marker
-                        scan = gate_tail + piece
-                        idx = scan.find(gate_marker)
+                    res = None
+                    _json_piece = piece
+
+                    # PHASE 1: wait for </think>
+                    if not think_passed:
+                        scan = think_tail + _json_piece
+                        idx = scan.find(_THINK_END)
                         if idx == -1:
-                            keep = max(0, len(gate_marker) - 1)
+                            think_tail = (
+                                scan[-_THINK_TAIL_KEEP:]
+                                if len(scan) > _THINK_TAIL_KEEP
+                                else scan
+                            )
+                            continue
+                        think_passed = True
+                        think_tail = ""
+                        _json_piece = scan[idx + len(_THINK_END) :]
+                        # If no gate marker needed, open the gate now
+                        if gate_marker_str is None:
+                            gate_open = True
+
+                    # PHASE 2: wait for gate marker (only when gate still closed)
+                    if not gate_open and gate_marker_str is not None:
+                        scan = gate_tail + _json_piece
+                        idx = scan.find(gate_marker_str)
+                        if idx == -1:
+                            keep = max(0, len(gate_marker_str) - 1)
                             gate_tail = scan[-keep:] if keep else ""
                             continue
-
                         gate_open = True
-                        after = scan[idx + len(gate_marker) :]
-
+                        after = scan[idx + len(gate_marker_str) :]
+                        gate_tail = ""
                         cap.reset()
                         root_i = _find_plausible_json_root(after)
                         if root_i == -1:
@@ -1450,15 +1426,12 @@ class LlamaClient:
                                 else after
                             )
                             continue
-
-                        gate_tail = ""
-                        after2 = after[root_i:]
-                        res = cap.feed(after2)
-
+                        _json_piece = after[root_i:]
+                        res = cap.feed(_json_piece)
                     else:
-                        # Gate open, accumulating JSON
+                        # PHASE 3: gate open, accumulate JSON
                         if not cap.started():
-                            scan = gate_tail + piece
+                            scan = gate_tail + _json_piece
                             root_i = _find_plausible_json_root(scan)
                             if root_i == -1:
                                 gate_tail = (
@@ -1467,19 +1440,16 @@ class LlamaClient:
                                     else scan
                                 )
                                 continue
-
                             gate_tail = ""
-                            feed_text = scan[root_i:]
-                            res = cap.feed(feed_text)
+                            _json_piece = scan[root_i:]
+                            res = cap.feed(_json_piece)
                         else:
-                            res = cap.feed(piece)
+                            res = cap.feed(_json_piece)
 
-                    # ✅ IMPROVED: Validation loop with detailed logging
                     while res is not None and not have_valid_json:
                         captured, remainder = res
                         json_attempts += 1
 
-                        # ✅ IMPROVED: Validation + repair
                         if not json_validate:
                             have_valid_json = True
                             valid_json_text = captured
@@ -1490,7 +1460,6 @@ class LlamaClient:
                             valid_json_text = captured
                             break
 
-                        # ✅ NEW: attempt repair once when invalid
                         repaired = self._json_try_repair(captured)
                         if repaired is not None:
                             have_valid_json = True
@@ -1506,7 +1475,6 @@ class LlamaClient:
                                 )
                             break
 
-                        # ✅ NEW: Detailed failure logging
                         preview = (
                             captured[:_JSON_FAILURE_PREVIEW]
                             if len(captured) > _JSON_FAILURE_PREVIEW
@@ -1525,7 +1493,7 @@ class LlamaClient:
 
                         cap.reset()
 
-                        # Search for next JSON in remainder
+                        # search for next JSON in remainder
                         if remainder:
                             root_i = _find_plausible_json_root(remainder)
                             if root_i != -1:
@@ -1540,13 +1508,8 @@ class LlamaClient:
                         else:
                             res = None
 
-                    # Early stop if we got valid JSON
                     if have_valid_json:
                         client_early_stop = True
-                        try:
-                            resp.close()
-                        except Exception:
-                            pass
                         break
 
         finally:
@@ -1625,17 +1588,15 @@ class LlamaClient:
         """
         choices = obj.get("choices")
         if choices and isinstance(choices, list):
-            c0 = choices[0] if choices else None
+            c0 = choices[0]
             if isinstance(c0, dict):
                 fr = c0.get("finish_reason")
                 finish_reason = str(fr) if fr is not None else None
 
-                # Try text field (completions)
                 t = c0.get("text")
                 if isinstance(t, str) and t:
                     return t, finish_reason
 
-                # Try message.content (chat)
                 msg = c0.get("message")
                 if isinstance(msg, dict):
                     content = msg.get("content")
@@ -1663,27 +1624,18 @@ class LlamaClient:
         """
         choices = obj.get("choices")
         if choices and isinstance(choices, list):
-            c0 = choices[0] if choices else None
+            c0 = choices[0]
             if isinstance(c0, dict):
                 fr = c0.get("finish_reason")
                 finish_reason = str(fr) if fr is not None else None
 
-                # Try text field (completions)
                 t = c0.get("text")
                 if isinstance(t, str) and t:
                     return t, finish_reason
 
-                # Try delta.content (chat)
                 delta = c0.get("delta")
                 if isinstance(delta, dict):
                     content = delta.get("content")
-                    if isinstance(content, str) and content:
-                        return content, finish_reason
-
-                # Try message.content (alternative format)
-                msg = c0.get("message")
-                if isinstance(msg, dict):
-                    content = msg.get("content")
                     if isinstance(content, str) and content:
                         return content, finish_reason
 
@@ -1702,7 +1654,6 @@ class LlamaClient:
 if __name__ == "__main__":
     import sys
     from buddy.tests.test_brain_prompt import test_brain_prompt
-    from buddy.tests.test_executor_prompt import test_executor_prompt
 
     client = LlamaClient(
         model="local-model",
@@ -1725,12 +1676,12 @@ if __name__ == "__main__":
     try:
         print("\n[stream completion w/ json_extract+validate]")
         out = client.generate(
-            prompt=test_executor_prompt,
+            prompt=test_brain_prompt,
             stream=True,
-            temperature=0.4,
-            top_p=0.98,
-            repeat_last_n=128,
-            repeat_penalty=1.06,
+            temperature=0.6,
+            top_p=0.96,
+            repeat_last_n=256,
+            repeat_penalty=1.0,
             on_delta=on_print,
             json_extract=True,
             json_validate=True,

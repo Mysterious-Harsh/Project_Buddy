@@ -11,18 +11,15 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import io
-import os
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Literal, Optional
-import asyncio
 
 from buddy.logger.logger import get_logger
-from buddy.prompts.vision_prompts import (
-    VISION_TOOL_PROMPT,
-    VISION_TOOL_CALL_FORMAT,
-)
+from buddy.prompts.vision_prompts import VISION_TOOL_PROMPT
 from buddy.tools.vision.image_encoder import is_image_path
 
 logger = get_logger("vision_tool")
@@ -65,17 +62,9 @@ class VisionTool:
     def get_info(self) -> Dict[str, Any]:
         return {
             "name": TOOL_NAME,
-            "description": (
-                "Analyze, describe, take a screenshot, or query image files (PNG, JPG,"
-                " JPEG, WEBP, GIF). Use when the user provides one or more image file"
-                " paths and wants to understand, describe, read text from, compare, or"
-                " extract information from the image(s), also to analyse the user"
-                " screen, take a screenshot and save it. Returns description, objects,"
-                " visible text, and a direct answer to the query."
-            ),
-            "version": "1.1.0",
+            "version": "1.2.0",
+            "description": "Analyze image files or capture the current screen. Returns description, objects, visible text, and a direct answer.",
             "prompt": VISION_TOOL_PROMPT,
-            "tool_call_format": VISION_TOOL_CALL_FORMAT,
         }
 
     # ── Parse ──────────────────────────────────────────────
@@ -107,7 +96,7 @@ class VisionTool:
         if action == "screenshot":
             save_path = str(payload.get("save_path") or "").strip() or None
             if save_path:
-                save_path = os.path.expandvars(os.path.expanduser(save_path))
+                save_path = str(Path(save_path).expanduser().resolve())
             return VisionCall(
                 paths=[], query=query, action="screenshot", save_path=save_path
             )
@@ -129,18 +118,17 @@ class VisionTool:
         # Validate and resolve each path
         resolved: List[str] = []
         for p in raw_paths:
-            r = os.path.expandvars(os.path.expanduser(p))
-            if not os.path.exists(r):
+            r = Path(p).expanduser().resolve()
+            if not r.exists():
                 raise ValueError(f"Image file not found: {r}")
-            if not os.path.isfile(r):
+            if not r.is_file():
                 raise ValueError(f"Path is not a file: {r}")
-            if not is_image_path(r):
-                ext = os.path.splitext(r)[1].lower()
+            if not is_image_path(str(r)):
                 raise ValueError(
-                    f"Unsupported image format '{ext}'. "
+                    f"Unsupported image format '{r.suffix.lower()}'. "
                     f"Supported: {sorted(_SUPPORTED_EXTS)}"
                 )
-            resolved.append(r)
+            resolved.append(str(r))
 
         return VisionCall(paths=resolved, query=query, action="analyze")
 
@@ -148,19 +136,18 @@ class VisionTool:
 
     async def execute(
         self,
-        call: VisionCall,
-        *,
+        function: str = "",
+        arguments: Dict[str, Any] = {},
         brain: Any = None,
         on_progress: Optional[Callable[[str, bool], None]] = None,
         goal: str = "",
         **_kwargs: Any,
     ) -> Dict[str, Any]:
-        """
-        Analyze the image at call.path using brain.run_vision().
+        try:
+            call = self.parse_call(arguments)
+        except Exception as e:
+            return {"OK": False, "ACTION": "", "PATHS": [], "ERROR": str(e)}
 
-        brain is passed by ActionRouter at execution time.
-        Returns a result dict compatible with the executor/responder pipeline.
-        """
         if brain is None:
             logger.error(
                 "vision_tool.execute called without brain — cannot analyze image"
@@ -202,7 +189,7 @@ class VisionTool:
                     # Non-fatal — analysis still proceeds
         else:
             image_inputs = call.paths
-            label = ", ".join(os.path.basename(p) for p in call.paths)
+            label = ", ".join(Path(p).name for p in call.paths)
 
         if on_progress:
             on_progress(f"Analysing · {label}", False)
@@ -281,6 +268,7 @@ def _capture_screen_data_uri() -> str:
     import sys
 
     buf = io.BytesIO()
+    _pillow_exc: Optional[Exception] = None
 
     # Primary: Pillow ImageGrab — works natively on macOS and Windows.
     # On Linux it shells out to scrot if available.
@@ -295,7 +283,7 @@ def _capture_screen_data_uri() -> str:
         pass  # Pillow not installed — try fallback
     except Exception as exc:
         if sys.platform == "linux":
-            pass  # scrot may be missing; try pyscreenshot below
+            _pillow_exc = exc  # Pillow installed but scrot likely missing
         else:
             raise RuntimeError(f"Screen capture failed: {exc}") from exc
 
@@ -308,9 +296,15 @@ def _capture_screen_data_uri() -> str:
         b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
         return f"data:image/png;base64,{b64}"
     except ImportError:
+        if _pillow_exc is not None:
+            raise RuntimeError(
+                f"Screen capture failed on Linux: Pillow raised {_pillow_exc!r} "
+                f"(scrot may be missing — try: sudo apt install scrot). "
+                f"pyscreenshot is also not installed."
+            )
         raise RuntimeError(
             "Screen capture requires Pillow (pip install Pillow) on macOS/Windows, "
-            "or Pillow + scrot on Linux. Neither was found."
+            "or Pillow + scrot on Linux. Neither Pillow nor pyscreenshot was found."
         )
     except Exception as exc:
         raise RuntimeError(f"Screen capture failed: {exc}") from exc
@@ -320,9 +314,9 @@ def _save_data_uri_to_file(data_uri: str, path: str) -> None:
     """Decode a PNG data URI and write it to disk."""
     header, b64 = data_uri.split(",", 1)
     raw = base64.b64decode(b64)
-    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
-    with open(path, "wb") as f:
-        f.write(raw)
+    dest = Path(path).resolve()
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_bytes(raw)
 
 
 # ==========================================================

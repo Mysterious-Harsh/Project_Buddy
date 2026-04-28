@@ -94,13 +94,14 @@ from buddy.buddy_core.model_selector import (
     LLMOption,
     get_or_select_llm_model,
 )
-from buddy.buddy_core.llama_installer import ensure_llama_binary
+from buddy.buddy_core.llama_installer import ensure_llama_binary, check_and_update_llama
 from buddy.buddy_core.vision_selector import VisionChoice, get_or_select_vision
 from buddy.buddy_core.searxng_setup import (
     is_installed as _searxng_installed,
     setup_searxng,
     start_searxng,
     stop_searxng,
+    update_searxng,
 )
 
 logger = get_logger("bootstrap")
@@ -2141,6 +2142,19 @@ def bootstrap(
         _new_path = str(_llama_bin.parent) + os.pathsep + os.environ.get("PATH", "")
         os.environ["PATH"] = _new_path
 
+    # ── STEP 6.55 · llama.cpp update check ───────────────────────────────────
+    _upd_cfg = _sec(buddy_cfg, "updates")
+    _auto_update: bool = bool(_upd_cfg.get("auto_update", True))
+    _upd_interval: float = float(_upd_cfg.get("update_check_interval_days", 7))
+    if _auto_update and _llama_bin:
+        _sp_upd = _ui_step(opts.show_boot_ui, "Checking llama.cpp for updates")
+        check_and_update_llama(
+            _bin_dir,
+            on_progress=lambda m, _d: _ui_info(m),
+            interval_days=_upd_interval,
+        )
+        _sp_upd.stop()
+
     # ── STEP 6.6 · First-boot wizard ─────────────────────────────────────────
     _wizard_result: Optional[Dict[str, Any]] = None
     if first_boot:
@@ -2439,6 +2453,11 @@ def bootstrap(
                     _web_engine = "duckduckgo"
                 sp = _ui_step(opts.show_boot_ui, "Starting SearXNG")
 
+            if _web_engine == "searxng" and _auto_update and _searxng_installed(_searxng_dir):
+                _sp_sxng_upd = _ui_step(opts.show_boot_ui, "Checking SearXNG for updates")
+                update_searxng(_searxng_dir, on_progress=lambda m, _d: _ui_info(m))
+                _sp_sxng_upd.stop()
+
             if _web_engine == "searxng":
                 _searxng_started = start_searxng(
                     _searxng_dir,
@@ -2621,6 +2640,16 @@ def bootstrap(
             if vision_choice.enabled and mmproj_path is not None:
                 cmd.extend(["--mmproj", str(mmproj_path)])
                 logger.info("Vision: injecting --mmproj %s", mmproj_path)
+            # ─────────────────────────────────────────────────────────
+
+            # ── Enable Qwen3 thinking mode for /v1/chat/completions ──
+            # Without this flag Qwen3 (≤14B) disables <think> blocks in
+            # chat completions by default, producing empty outputs.
+            # --chat-template-kwargs is model-agnostic; non-Qwen3 models
+            # ignore unknown kwargs so this is safe to inject always.
+            if "--chat-template-kwargs" not in cmd:
+                cmd.extend(["--chat-template-kwargs", '{"enable_thinking":true}'])
+                logger.info("llama-server: injected --chat-template-kwargs enable_thinking=true")
             # ─────────────────────────────────────────────────────────
 
             sp = _ui_step(opts.show_boot_ui, "Starting llama-server")

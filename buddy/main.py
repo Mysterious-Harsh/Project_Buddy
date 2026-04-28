@@ -2282,7 +2282,7 @@ def main() -> int:
     except KeyboardInterrupt:
         return 0
     except Exception as ex:
-        logger.exception("Main crashed: %r", ex)
+        logger.error("Main crashed: %r", ex)
         return 1
 
 

@@ -71,8 +71,9 @@ def build_retrieval_prompt(
     )
 
     msg_block = (
-        f"<|im_start|>user\n{current_message}\n\nTo give best possible response all"
-        " fulfil the request: which memories do you need to recall?\n<|im_end|>"
+        f"<|im_start|>user\n{current_message}\n\nNow, think which informations or"
+        " memories do you need most to give best possible response or to fullfil the"
+        " user request as the closest friend.\n<|im_end|>"
     )
 
     parts = [sys_block]
@@ -320,7 +321,6 @@ def build_memory_summary_prompt(
 def build_executor_prompt(
     system: str,
     datetime_block: str,
-    tool_info: str,
     instruction: str,
     prior_outputs: str = "",
     step_errors: str = "",
@@ -332,7 +332,7 @@ def build_executor_prompt(
 
     system          → BUDDY_IDENTITY + EXECUTOR_PROMPT + schema (tool_call_format injected)
     datetime_block  → current time info
-    tool_info       → tool prompt + exact call format for this step's tool
+    tool_prompt       → tool prompt + exact call format for this step's tool
     instruction     → single step instruction from planner
     prior_outputs   → outputs from previous steps (optional)
     step_errors     → errors from previous attempts at this step (optional)
@@ -353,7 +353,6 @@ def build_executor_prompt(
         "<|im_start|>user",
         "<context>",
         f"<datetime>\n{datetime_block}\n</datetime>",
-        f"<tool_instructions>\n{tool_info}\n</tool_instructions>",
     ]
     if prior_outputs and prior_outputs.strip():
         ctx_parts.append(

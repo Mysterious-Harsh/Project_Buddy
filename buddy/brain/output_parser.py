@@ -13,6 +13,9 @@ from buddy.schema.models import (
     ExecutorResult,
     MemorySummaryResult,
     FinalRespond,
+    ReaderResult,
+    VisionResult,
+    BrowserAction,
 )
 
 logger = get_logger("output_parser")
@@ -90,7 +93,9 @@ class OutputParser:
             data["search_queries"] = [data["search_queries"]]
         # Strip empty strings from list
         if isinstance(data.get("search_queries"), list):
-            data["search_queries"] = [q for q in data["search_queries"] if str(q).strip()]
+            data["search_queries"] = [
+                q for q in data["search_queries"] if str(q).strip()
+            ]
 
         # 1) strict validate
         model = self._validate(RetrievalGateResult, data)
@@ -148,7 +153,9 @@ class OutputParser:
                     mt = "flash"
                 c["memory_type"] = mt
                 try:
-                    c["salience"] = max(0.0, min(1.0, float(c.get("salience", 0.3) or 0.3)))
+                    c["salience"] = max(
+                        0.0, min(1.0, float(c.get("salience", 0.3) or 0.3))
+                    )
                 except Exception:
                     c["salience"] = 0.3
                 norm.append(c)
@@ -156,6 +163,51 @@ class OutputParser:
 
         # 1) strict validate
         model = self._validate(FinalRespond, data)
+        if model:
+            return model.clean_dict()
+
+        return {}
+
+    def parse_reader(self, raw_text: str) -> Dict[str, Any]:
+        """
+        Parse/validate ExecutorResult from the reader prompt output.
+
+        reader output is STRICT by design.
+        No normalization is applied beyond JSON extraction.
+        """
+        data = self._extract_json_object(raw_text)
+
+        model = self._validate(ReaderResult, data)
+        if model:
+            return model.clean_dict()
+
+        return {}
+
+    def parse_vision(self, raw_text: str) -> Dict[str, Any]:
+        """
+        Parse/validate ExecutorResult from the vision prompt output.
+
+        vision output is STRICT by design.
+        No normalization is applied beyond JSON extraction.
+        """
+        data = self._extract_json_object(raw_text)
+
+        model = self._validate(VisionResult, data)
+        if model:
+            return model.clean_dict()
+
+        return {}
+
+    def parse_browser_action(self, raw_text: str) -> Dict[str, Any]:
+        """
+        Parse/validate ExecutorResult from the browser_action prompt output.
+
+        browser_action output is STRICT by design.
+        No normalization is applied beyond JSON extraction.
+        """
+        data = self._extract_json_object(raw_text)
+
+        model = self._validate(BrowserAction, data)
         if model:
             return model.clean_dict()
 
@@ -297,7 +349,7 @@ class OutputParser:
                 "instruction": self._to_str(s.get("instruction", "")).strip(),
                 "hints": self._to_str(s.get("hints", "")).strip(),
                 "input_steps": self._to_int_list(s.get("input_steps")),
-                "output": self._to_str(s.get("output", "")).strip(),
+                "output": self._to_str(s.get("output", "")).strip() or None,
             })
 
         if status in ("followup", "refusal"):

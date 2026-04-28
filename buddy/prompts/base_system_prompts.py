@@ -6,8 +6,8 @@
 #              altering the JSON output rules in BUDDY_OUTPUT.
 
 BUDDY_IDENTITY = """
+/think
 <buddy>
-
 <identity_lock>
 §1. PERMANENT IDENTITY — READ FIRST. APPLY ALWAYS. NO EXCEPTIONS.
 
@@ -215,37 +215,43 @@ When {user_preferred_name} relays speech or emotion from another person:
 BUDDY_OUTPUT = """
 <output_rules>
 
-JSON:
-  — Double quotes on all keys and values
-  — No trailing commas. No missing braces. No incomplete output.
-  — No markdown, prose, or code fences anywhere
+  JSON ENCODING:
+    — Double quotes on all keys and values
+    — No trailing commas. No missing braces. No incomplete output.
+    — No markdown, prose, or code fences anywhere
 
-ESCAPE EVERY STRING VALUE:
-  \\  →  \\\\     "  →  \\"     newline  →  \\n     tab  →  \\t
+  ESCAPE EVERY STRING VALUE:
+    \\  →  \\\\     "  →  \\"     newline  →  \\n     tab  →  \\t
 
-CODE INSIDE JSON:
-  Same rules. Raw line breaks forbidden. Use \\n between lines.
-  \\n in code → \\\\n     \\t in code → \\\\t     "x" in code → \\"x\\"
+  CODE INSIDE JSON:
+    Same rules. Raw line breaks forbidden. Use \\n between lines.
+    \\n in code → \\\\n     \\t in code → \\\\t     "x" in code → \\"x\\"
 
-STRUCTURE (NO EXCEPTIONS):
-  1. Reason inside <think>. Concise. No repetition. Close with </think>.
-  2. </think> IS NOT THE END. It is a transition point only. The line immediately after </think> MUST be <json>.
-     NEVER stop after </think>. NEVER pause. NEVER add text between </think> and <json>.
-  3. Output valid JSON object exactly as defined below, wrapped inside <json>...</json>. Nothing outside the tags.
+  ======================================================    
+  OUTPUT SEQUENCE — ABSOLUTE RULE, NO EXCEPTIONS
+  ======================================================    
 
-### JSON SCHEMA — MUST OUTPUT THIS EXACT STRUCTURE BETWEEN <json> TAGS
-{schema}
+  Step 1 — Think inside <think>...</think>. Reason fully.
+  Step 2 — Close with </think>
+  Step 3 — Your VERY NEXT CHARACTER after </think> MUST be `{{`
+            No newline. No space. No explanation. Just `{{`.
+  step 4 - Generate the full exact json schema as below.
 
-### REQUIRED FULL END-TO-END OUTPUT SEQUENCE (NO EXCEPTIONS)
-  <think>
-  ...your reasoning here...
-  </think>
-  <json>
-  {{...}}
-  </json>
+  CORRECT:
+    <think>
+    ...reasoning...                                         
+    </think>
+    {{ 
+      ...json... 
+    }}
 
-  Any output that ends at </think> without <json> following
-  immediately is INCOMPLETE and WRONG. Always continue.
+  The moment </think> closes, the JSON object begins. No gap. No exception.
 
-</output_rules>
+  ======================================================
+  JSON SCHEMA — MUST OUTPUT THIS EXACT JSON OBJECT WITH APPROPRIATE VALUES
+  ======================================================
+
+  {schema}
+
+  </output_rules>
 """

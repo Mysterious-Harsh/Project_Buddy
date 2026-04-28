@@ -21,6 +21,7 @@ import time
 import uuid
 from typing import Any, List, Optional
 
+from rich.markup import escape as markup_escape
 from textual.app import App, ComposeResult
 from textual.screen import Screen
 from textual.widgets import ContentSwitcher
@@ -30,20 +31,40 @@ from buddy.logger.logger import get_logger
 from buddy.tools.vision.image_encoder import extract_image_paths
 from buddy.ui.widgets import (
     # color constants (used in CSS strings and hints)
-    _USE_UNICODE, _CYAN, _BLUE, _VIOLET, _DIM, _BG, _GREEN, _YELLOW, _RED,
+    _USE_UNICODE,
+    _CYAN,
+    _BLUE,
+    _VIOLET,
+    _DIM,
+    _BG,
+    _GREEN,
+    _YELLOW,
+    _RED,
     # helpers
-    _should_exit, _match_voice_command,
+    _should_exit,
+    _match_voice_command,
     # data types
-    SystemState, VoiceCmd, InputQueue,
+    SystemState,
+    VoiceCmd,
+    InputQueue,
     # splash
     SplashView,
     # boot widgets
-    BootBanner, BootLog, BootFaceBar,
+    BootBanner,
+    BootLog,
+    BootFaceBar,
     # main widgets
-    BannerPane, InfoPane, BuddyHeader,
-    StatusBar, SpinnerBar,
-    ChatLog, SleepView,
-    MicIndicator, BuddyInput, InputBar, BottomSection,
+    BannerPane,
+    InfoPane,
+    BuddyHeader,
+    StatusBar,
+    SpinnerBar,
+    ChatLog,
+    SleepView,
+    MicIndicator,
+    BuddyInput,
+    InputBar,
+    BottomSection,
 )
 
 logger = get_logger("textual_app")
@@ -236,7 +257,10 @@ class MainScreen(Screen):
                 yield MicIndicator()
                 yield BuddyInput(
                     on_escape=self._handle_escape,
-                    placeholder="Type a message… (Enter to send · Ctrl+J for newline · Esc to interrupt)",
+                    placeholder=(
+                        "Type a message… (Enter to send · Ctrl+J for newline · Esc to"
+                        " interrupt)"
+                    ),
                     id="buddy-input",
                 )
             yield StatusBar()
@@ -377,9 +401,7 @@ class MainScreen(Screen):
             img_paths = extract_image_paths(text)
             if img_paths:
                 names = ", ".join(os.path.basename(p) for p in img_paths)
-                await self.query_one(ChatLog).add_message(
-                    f"[image: {names}]", "meta"
-                )
+                await self.query_one(ChatLog).add_message(f"[image: {names}]", "meta")
         except Exception:
             pass
 
@@ -546,7 +568,9 @@ class MainScreen(Screen):
                 logger.info("turn.cancelled id=%s", turn_id)
             except Exception as ex:
                 logger.exception("turn.crash id=%s err=%r", turn_id, ex)
-                self.query_one(StatusBar).set_hint(f"[{_RED}]⚠ error: {ex}[/]")
+                self.query_one(StatusBar).set_hint(
+                    f"[{_RED}]⚠ error: {markup_escape(str(ex))}[/]"
+                )
             finally:
                 _turn_ms = int((time.perf_counter() - _turn_start) * 1000)
                 self._active_turn = None
@@ -664,7 +688,9 @@ class MainScreen(Screen):
             icon = "🔇 " if _USE_UNICODE else "M "
             self.query_one(StatusBar).set_hint(f"[{_DIM}]{icon}muted[/]")
         else:
-            label = f"[{_GREEN}]🔊 unmuted[/]" if _USE_UNICODE else f"[{_GREEN}]unmuted[/]"
+            label = (
+                f"[{_GREEN}]🔊 unmuted[/]" if _USE_UNICODE else f"[{_GREEN}]unmuted[/]"
+            )
             self.query_one(StatusBar).set_hint(label)
         self._refresh_info_bar()
 
@@ -862,7 +888,7 @@ class BuddyApp(App):
             logger.exception("stt: failed to start: %r", ex)
             if self._main_screen:
                 self._main_screen.query_one(StatusBar).set_hint(
-                    f"[{_RED}]⚠ stt failed: {ex}[/]"
+                    f"[{_RED}]⚠ stt failed: {markup_escape(str(ex))}[/]"
                 )
 
     def on_unmount(self) -> None:
@@ -921,7 +947,9 @@ def _prewarm_whisper_before_textual() -> None:
             _raw = _toml.load(_f)
 
         _buddy_cfg = _raw.get("buddy", _raw) if isinstance(_raw, dict) else {}
-        _feat_cfg = _buddy_cfg.get("features", {}) if isinstance(_buddy_cfg, dict) else {}
+        _feat_cfg = (
+            _buddy_cfg.get("features", {}) if isinstance(_buddy_cfg, dict) else {}
+        )
         if not _feat_cfg.get("enable_audio_stt", False):
             return
 
@@ -959,6 +987,7 @@ def run_textual() -> None:
     _pre_wizard_result: Optional[Any] = None
     try:
         from buddy.buddy_core.boot import run_pre_textual_setup
+
         _pre_wizard_result = run_pre_textual_setup()
     except Exception as _e:
         logger.warning("run_pre_textual_setup failed (non-fatal): %r", _e)
@@ -985,9 +1014,9 @@ def run_textual() -> None:
 
     try:
         app.run()
-    except Exception:
+    except Exception as ex:
         _err = _tb.format_exc()
-        logger.exception("BuddyApp crashed")
+        logger.error(f"BuddyApp crashed : {ex}")
         try:
             with open(_log_path, "a", encoding="utf-8") as _f:
                 _f.write(f"\n{'='*60}\nBuddyApp crash:\n{_err}\n")

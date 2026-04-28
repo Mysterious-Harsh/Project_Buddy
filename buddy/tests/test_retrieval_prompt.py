@@ -321,8 +321,7 @@ SCHEMA — MUST OUTPUT THIS EXACT STRUCTURE
 
 
 {
-  "lookup_message": "string", //5-6 words only to show user what you are looking into memory.  
-  "search_queries": ["string", "string"], 
+  "search_queries": ["string", "string"],
   "deep_recall": false
 }
 

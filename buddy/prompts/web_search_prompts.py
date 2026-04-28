@@ -1,70 +1,62 @@
-# 🔒 LOCKED — web_search_prompts.py
-# Contract: tool_call schema → { query, max_results, region, safe_search }
-# Result fields: OK, ENGINE, QUERY, RESULTS [{title, url, snippet}], TOTAL_FOUND, ERROR
-# Allowed: bug fixes, guidance text improvements.
-# Not allowed: adding/removing schema fields, changing result field names.
-
 WEB_SEARCH_TOOL_PROMPT = """
-<tool_description>
-WEB SEARCH TOOL  —  search only
+TOOL_NAME: web_search
+TOOL_DESCRIPTION: Search the web. Returns title, URL, and snippet (≤400 chars) per result.
 
-Returns a ranked list of results: title, URL, and a short snippet (≤400 chars).
-</tool_description>
+<functions>
+  <function>
+    <name>search</name>
+    <description>Run a web search query.</description>
+    <parameters>
+      - query       (string,  REQUIRED) — short, specific, no question marks
+      - max_results (integer, OPTIONAL, default: 5, max: 20)
+      - region      (string,  OPTIONAL, default: "wt-wt")
+      - safe_search (boolean, OPTIONAL, default: true)
+    </parameters>
+    <returns>OK, ENGINE, QUERY, RESULTS [{title, url, snippet}], TOTAL_FOUND, ERROR</returns>
+    <destructive>NO</destructive>
+    <confirmation_required>NO</confirmation_required>
+  </function>
+</functions>
 
-<when_enough>
-WHEN THIS IS ENOUGH:
-  Snippets contain the full answer for weather, prices, scores, short facts.
-  Read the snippets — if the answer is there, you are done. No fetch needed.
-</when_enough>
+<tool_rules>
 
-<how_many_results>
-HOW MANY RESULTS TO REQUEST:
-  General queries (quick facts, definitions, how-to, current info)  → max_results=5
-  Moderate queries (comparisons, tutorials, moderate research)       → max_results=8
-  Deep research (comprehensive overview, multiple perspectives)      → max_results=15
+1. QUERY CONSTRUCTION
+   1.1 Write the query as short, specific keywords — not a full sentence or question.
+   1.2 Remove filler words: "what is", "how do I", "tell me about".
+   1.3 Include version or qualifier when relevant (e.g. "python 3.11 asyncio timeout").
 
-  Default to 5 unless the user's intent is clearly research-oriented.
-</how_many_results>
+2. RESULT COUNT
+   Quick facts, definitions, current info   → max_results=5   (default)
+   Comparisons, tutorials, moderate depth   → max_results=8
+   Comprehensive research, multiple angles  → max_results=15
 
-<when_to_fetch>
-WHEN TO ALSO USE web_fetch:
-  If you need the full article body, documentation, or source code,
-  plan a web_fetch step AFTER this step and pass these results as input.
-  Do not fetch weather/maps/social sites — they use JavaScript; snippets are better.
-</when_to_fetch>
+3. SNIPPET SUFFICIENCY
+   3.1 Read all snippets before planning a follow-up fetch.
+   3.2 If the answer is fully contained in snippets → you are done. No fetch needed.
+   3.3 Snippets are enough for: weather, prices, scores, dates, short definitions.
 
-<call_schema>
-SCHEMA:
-  query        : string  (required) — short and specific, no question marks
-  max_results  : int     (default 5, max 20)
-  region       : string  (default "wt-wt")
-  safe_search  : bool    (default true)
-</call_schema>
+4. FOLLOW-UP FETCH
+   4.1 If full article body, documentation, or source code is needed → plan a web_fetch step after this one.
+   4.2 Do not fetch: weather, maps, or social media sites — JavaScript renders them; snippets are better.
 
-<result_fields>
-OUTPUT:
-  OK           : bool
-  ENGINE       : "searxng" | "duckduckgo"
-  QUERY        : string
-  RESULTS      : [ { title, url, snippet } ]   — snippet ≤ 400 chars
-  TOTAL_FOUND  : int
-  ERROR        : string | null
-</result_fields>
-"""
+</tool_rules>
 
-WEB_SEARCH_ERROR_RECOVERY_PROMPT = """
-WEB SEARCH ERROR RECOVERY
+<error_recovery>
+Read only when <errors> is present in context.
 
-Read ERROR field. Fix before retrying. Never repeat identical call.
+1. ERROR CATEGORIES
+   A. NO RESULTS — RESULTS is empty or TOTAL_FOUND is 0.
+      Broaden the query: remove specific version numbers, qualifiers, or rare terms.
+      Try a simpler synonym. Never repeat the same query.
 
-  no results    → broaden query, remove specific terms, try simpler keywords
-  network error → retry once; if fails again status="followup"
-  3 failures    → status="followup"
-"""
+   B. NETWORK / ENGINE ERROR — OK=false, ERROR field is set.
+      Retry once with the identical call. If it fails again → status="followup".
 
-tool_call_format = """
-{
-  "query": "weather saint john NB",
-  "max_results": 5
-}
+   C. UNCLASSIFIED — Do not guess. Return status="followup" with the exact ERROR value and one specific question.
+
+2. RETRY RULES
+   2.1 Never repeat the identical call that already failed.
+   2.2 After 3 failures on the same query → status="followup".
+
+</error_recovery>
 """
