@@ -305,14 +305,14 @@ PLANNER_PROMPT_SCHEMA = """
 {
   "status": "success | followup | refusal",
   "message": "string",          // followup: Buddy's voice question | refusal: reason + alternative | success: ""
-  "responder_instruction": "string",
+  "responder_instruction": "Fully self-contained instruction for responder what to evaluate and what to response",
   "steps": [
     {
       "step_id": 1,
-      "tool": "string",
-      "goal": "string",
-      "instruction": "string",
-      "hints": "string",
+      "tool": "tool_name",
+      "goal": "End to End Goal of this step",
+      "instruction": "Fully self contained instruction for executor for this step",
+      "hints": "Any Hints for Executor",
       "input_steps": [1,2,...,N],
       "output": "descriptive_snake_case_name"
     }

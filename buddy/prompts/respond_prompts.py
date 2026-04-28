@@ -147,10 +147,10 @@ memory_text must never contain:
 RESPOND_PROMPT_SCHEMA = """
 {
   "execution_result": "success | error | partial",
-  "response": "", // Full end to end response addressing the user message. See §4 for quality and formatting rules.
+  "response": "Full end to end response addressing the user message. See §4 for quality and formatting rules.",
   "memory_candidates": [
     {
-      "memory_text": "",
+      "memory_text": "your memory text",
       "memory_type": "flash | short | long",
       "salience": 0.0
     }

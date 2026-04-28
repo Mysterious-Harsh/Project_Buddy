@@ -298,6 +298,17 @@ def _linux_playerctl(cmd: str) -> tuple[int, str]:
     return _run(f"playerctl {cmd}")
 
 
+def _yt_resolve(song: str) -> str | None:
+    """Return a YouTube watch URL for the first search result using yt-dlp, or None."""
+    if not shutil.which("yt-dlp"):
+        return None
+    code, out = _run(f'yt-dlp "ytsearch1:{song}" --get-id --no-playlist', timeout=15)
+    vid = out.strip().split()[0] if code == 0 and out.strip() else ""
+    if not vid:
+        return None
+    return f"https://www.youtube.com/watch?v={vid}&autoplay=1"
+
+
 def _exec_action(action: QuickAction) -> str:
     name = action.name
     p = action.params
@@ -356,9 +367,11 @@ def _exec_action(action: QuickAction) -> str:
             "spotify":      f"spotify:search:{song_encoded}",
             "music":        f"music://search?term={song_encoded}",
             "youtubemusic": f"https://music.youtube.com/search?q={song_encoded}",
-            "youtube":      f"https://www.youtube.com/results?search_query={song_encoded}",
         }
-        link = deeplinks.get(app)
+        if app == "youtube":
+            link = _yt_resolve(song) or f"https://www.youtube.com/results?search_query={song_encoded}"
+        else:
+            link = deeplinks.get(app)
         if _IS_MAC:
             if link:
                 code, err = _run(f'open "{link}"')

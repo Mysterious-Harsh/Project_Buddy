@@ -34,7 +34,7 @@ URL, step, or detail that helps answer the user's message?
 READER_SCHEMA = """
 {
   "relevant": true,
-  "content": "rewritten paragraph text preserving all details, or empty string if not relevant"
+  "content": "rewritten paragraph text preserving all the smallest details, or empty string if not relevant"
 }
 """
 
