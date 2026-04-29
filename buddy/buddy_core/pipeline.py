@@ -5,6 +5,7 @@ import asyncio
 import re
 import time
 import uuid
+from datetime import datetime as _dt, timedelta
 from typing import Awaitable, Callable, Optional, Any, Dict, List, Tuple
 import threading
 from buddy.logger.logger import get_logger
@@ -162,6 +163,110 @@ def _compute_encoding_arousal(text: str) -> float:
     return min(1.0, hits / 3.0)
 
 
+_WEEKDAY_NAMES = (
+    "monday", "tuesday", "wednesday", "thursday",
+    "friday", "saturday", "sunday",
+)
+
+
+def _resolve_relative_dates(text: str, now: _dt) -> str:
+    """
+    Replace relative date expressions with absolute YYYY-MM-DD strings.
+    Applied to memory texts before storage and to retrieval queries before search.
+    Keeps memories timelessly accurate — stored timestamps handle recency.
+    """
+    if not text:
+        return text
+    today = now.date()
+
+    def iso(d) -> str:
+        return d.strftime("%Y-%m-%d")
+
+    def mon_year(d) -> str:
+        return d.strftime("%B %Y")
+
+    def _shift_year(d, delta: int):
+        try:
+            return d.replace(year=d.year + delta)
+        except ValueError:
+            return d + timedelta(days=365 * delta)
+
+    # Multi-word phrases must come before single-word to avoid partial matches
+    multi = [
+        (r"\bthis morning\b",   f"morning of {iso(today)}"),
+        (r"\bthis afternoon\b", f"afternoon of {iso(today)}"),
+        (r"\bthis evening\b",   f"evening of {iso(today)}"),
+        (r"\blast night\b",     f"night of {iso(today - timedelta(days=1))}"),
+        (r"\bthis week\b",      f"week of {iso(today - timedelta(days=today.weekday()))}"),
+        (r"\blast week\b",      f"week of {iso(today - timedelta(days=today.weekday() + 7))}"),
+        (r"\bnext week\b",      f"week of {iso(today + timedelta(days=7 - today.weekday()))}"),
+        (r"\bthis month\b",     mon_year(today)),
+        (r"\blast month\b",     mon_year(today.replace(day=1) - timedelta(days=1))),
+        (r"\bnext month\b",     mon_year((today.replace(day=28) + timedelta(days=4)).replace(day=1))),
+        (r"\bthis year\b",      str(today.year)),
+        (r"\blast year\b",      str(today.year - 1)),
+        (r"\bnext year\b",      str(today.year + 1)),
+        (r"\ba week ago\b",     iso(today - timedelta(weeks=1))),
+        (r"\ba month ago\b",    iso(today - timedelta(days=30))),
+        (r"\ba year ago\b",     iso(_shift_year(today, -1))),
+    ]
+    result = text
+    for pat, repl in multi:
+        result = re.sub(pat, repl, result, flags=re.IGNORECASE)
+
+    # "last/next Monday" etc.
+    for idx, day_name in enumerate(_WEEKDAY_NAMES):
+        back = (today.weekday() - idx) % 7 or 7
+        fwd  = (idx - today.weekday()) % 7 or 7
+        result = re.sub(
+            rf"\blast {day_name}\b", iso(today - timedelta(days=back)),
+            result, flags=re.IGNORECASE,
+        )
+        result = re.sub(
+            rf"\bnext {day_name}\b", iso(today + timedelta(days=fwd)),
+            result, flags=re.IGNORECASE,
+        )
+
+    # "N days/weeks ago", "in N days/weeks", "N days from now"
+    result = re.sub(
+        r"\b(\d+)\s+days?\s+ago\b",
+        lambda m: iso(today - timedelta(days=int(m.group(1)))),
+        result, flags=re.IGNORECASE,
+    )
+    result = re.sub(
+        r"\bin\s+(\d+)\s+days?\b",
+        lambda m: iso(today + timedelta(days=int(m.group(1)))),
+        result, flags=re.IGNORECASE,
+    )
+    result = re.sub(
+        r"\b(\d+)\s+days?\s+from\s+now\b",
+        lambda m: iso(today + timedelta(days=int(m.group(1)))),
+        result, flags=re.IGNORECASE,
+    )
+    result = re.sub(
+        r"\b(\d+)\s+weeks?\s+ago\b",
+        lambda m: iso(today - timedelta(weeks=int(m.group(1)))),
+        result, flags=re.IGNORECASE,
+    )
+    result = re.sub(
+        r"\bin\s+(\d+)\s+weeks?\b",
+        lambda m: iso(today + timedelta(weeks=int(m.group(1)))),
+        result, flags=re.IGNORECASE,
+    )
+
+    # Single words last (after multi-word patterns to avoid partial stomping)
+    single = [
+        (r"\btonight\b",   f"evening of {iso(today)}"),
+        (r"\btoday\b",     iso(today)),
+        (r"\byesterday\b", iso(today - timedelta(days=1))),
+        (r"\btomorrow\b",  iso(today + timedelta(days=1))),
+    ]
+    for pat, repl in single:
+        result = re.sub(pat, repl, result, flags=re.IGNORECASE)
+
+    return result
+
+
 def _preview(s: str, n: int = 120) -> str:
     t = (s or "").replace("\n", " ").strip()
     if len(t) <= n:
@@ -290,6 +395,7 @@ async def handle_turn(
 
     src = _safe_source(source)
     user_message = (user_message or "").strip()
+    _turn_now = _dt.now()
 
     if not user_message:
         logger.warning("handle_turn | empty user_message | src=%s", src)
@@ -416,7 +522,7 @@ async def handle_turn(
     # 2) Retrieval gate
     # ------------------------------------------------------
 
-    progress_cb("Remembering", False)
+    progress_cb("Leafing through memories...", False)
     t0 = time.perf_counter()
     try:
         rg_payload = await asyncio.to_thread(
@@ -441,6 +547,7 @@ async def handle_turn(
     if isinstance(search_queries, str):
         search_queries = [search_queries]
     search_queries = [str(q).strip() for q in search_queries if str(q).strip()]
+    search_queries = [_resolve_relative_dates(q, _turn_now) for q in search_queries]
     deep_recall = bool(rg.get("deep_recall"))
 
     logger.info(
@@ -522,7 +629,7 @@ async def handle_turn(
         )
     # ─────────────────────────────────────────────────────────
 
-    progress_cb("Thinking", False)
+    progress_cb("Lost in thought...", False)
 
     t0 = time.perf_counter()
     payload = await asyncio.to_thread(
@@ -602,6 +709,9 @@ async def handle_turn(
     # ------------------------------------------------------
     if mm is not None and memories_list:
         _enc_arousal = _compute_encoding_arousal(user_message)
+        for _m in memories_list:
+            if isinstance(_m.get("memory_text"), str):
+                _m["memory_text"] = _resolve_relative_dates(_m["memory_text"], _turn_now)
 
         def _ingest(
             _mm=mm,
@@ -682,7 +792,7 @@ async def handle_turn(
             memories=mem_text,
             llm_options={},
         )
-        progress_cb("Responding", False)
+        progress_cb("Putting it into words...", False)
         responder_instruction = str(
             action_result.get("responder_instruction") or ""
         ).strip()
@@ -717,8 +827,11 @@ async def handle_turn(
                 text=response,
             )
         if memory_candidates and mm:
-            progress_cb("Creating Some New Memories 🧠", False)
+            progress_cb("Etching it in... ✍️", False)
             _action_arousal = _compute_encoding_arousal(user_message)
+            for _m in memory_candidates:
+                if isinstance(_m.get("memory_text"), str):
+                    _m["memory_text"] = _resolve_relative_dates(_m["memory_text"], _turn_now)
 
             for mem in memory_candidates:
                 try:

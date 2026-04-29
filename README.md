@@ -13,7 +13,7 @@
     <img src="https://img.shields.io/badge/MODEL-Qwen3--14B-000000?style=for-the-badge&logoColor=7c4dff&labelColor=000000&color=000000" alt="Qwen3-14B"/>
   </a>
   <a href="#">
-    <img src="https://img.shields.io/badge/PLATFORM-macOS%20%7C%20LINUX-000000?style=for-the-badge&logoColor=7c4dff&labelColor=000000&color=000000" alt="Platform"/>
+    <img src="https://img.shields.io/badge/PLATFORM-macOS%20%7C%20Linux%20%7C%20Windows-000000?style=for-the-badge&logoColor=7c4dff&labelColor=000000&color=000000" alt="Platform"/>
   </a>
   <a href="#">
     <img src="https://img.shields.io/badge/STATUS-ACTIVE-000000?style=for-the-badge&logoColor=00e5ff&labelColor=000000&color=000000" alt="Active"/>
@@ -37,7 +37,9 @@
   ▶  EMBEDDINGS READY  ·  Qwen3-Embedding-0.6B  ·  1024-dim L2-norm
   ▶  CONSOLIDATION ENGINE v4.1 READY  ·  background thread
   ▶  SEARXNG ONLINE  ·  local web search
-  ▶  ACTION MODE ARMED  ·  terminal · filesystem · web · vision
+  ▶  INTENT INTERCEPTOR ARMED  ·  zero-LLM fast path
+  ▶  ACTION MODE ARMED  ·  terminal · filesystem · clipboard · system control
+  ▶                       web search · web fetch · browser · vision
   ▶  VOICE PIPELINE ONLINE  ·  always listening
   ▶  AURORA TUI READY
   ▶  AWAITING INPUT
@@ -69,6 +71,8 @@ Most AI assistants today share the same fundamental flaw — they have no real m
 | Context        | Fixed window, no budget           | Hardware-aware context budgeting, dynamic truncation   |
 | Search         | None, or cloud-dependent          | Local SearXNG — private, fast, self-hosted             |
 | Vision         | Cloud API or none                 | Local Qwen VL via llama.cpp — multi-image offline      |
+| Speed          | LLM for everything                | Intent interceptor — deterministic actions, zero LLM   |
+| Browser        | None, or cloud-dependent          | Playwright browser automation — fully local            |
 
 Buddy was built to explore a different direction: **AI as a private, self-maintaining cognitive system that actually knows you.**
 
@@ -82,8 +86,17 @@ Buddy was built to explore a different direction: **AI as a private, self-mainta
 ╠══════════════════════════════════════════════════════════════════╣
 ║                                                                  ║
 ║   ┌─────────────┐     ┌──────────────────────────────────┐       ║
-║   │  User Input │────▶│  0. RAM memory entry (raw query) │       ║
-║   └─────────────┘     └───────────────┬──────────────────┘       ║
+║   │  User Input │────▶│  INTENT INTERCEPTOR (fast path)  │       ║
+║   └─────────────┘     │  Deterministic actions — no LLM  │       ║
+║                       │  volume · media · apps · lock     │       ║
+║                       └───────────┬──────────────┬────────┘       ║
+║                                   │ matched       │ unmatched     ║
+║                                   ▼               ▼               ║
+║                              instant reply   continue pipeline    ║
+║                                                   │               ║
+║                       ┌───────────────────────────▼──────────┐   ║
+║                       │  0. RAM memory entry (raw query)      │   ║
+║                       └───────────────┬──────────────────────┘   ║
 ║                                       │                          ║
 ║                       ┌───────────────▼──────────────────┐       ║
 ║                       │  1. Anchor extraction             │       ║
@@ -121,10 +134,14 @@ Buddy was built to explore a different direction: **AI as a private, self-mainta
 ║              │                             (per step)           ║
 ║              │    ┌─────────────────────────────────┐           ║
 ║              │    │  Tools available:               │           ║
-║              │    │  · terminal  (OS commands)      │           ║
-║              │    │  · filesystem (read/write/list) │           ║
-║              │    │  · web search (SearXNG)         │           ║
-║              │    │  · vision (Qwen VL, multi-image)│           ║
+║              │    │  · terminal    (OS commands)    │           ║
+║              │    │  · filesystem  (read/write/ls)  │           ║
+║              │    │  · clipboard   (copy/paste)     │           ║
+║              │    │  · system_control (media/vol)   │           ║
+║              │    │  · web_search  (SearXNG)        │           ║
+║              │    │  · web_fetch   (page/download)  │           ║
+║              │    │  · browser     (Playwright)     │           ║
+║              │    │  · vision      (Qwen VL)        │           ║
 ║              │    └──────────────┬──────────────────┘           ║
 ║              │                   │                              ║
 ║              │                   ▼  Responder → ui_output()     ║
@@ -181,7 +198,7 @@ Every memory carries: an importance score, a `consolidation_strength` that sleep
 
 ## `$ consolidation --show-sleep-cycle`
 
-When Buddy is idle, the **Consolidation Engine v4.1** runs automatically in a background thread — the same way the human brain consolidates memories during sleep. (v5 with the closed recall loop is the next major upgrade, queued after the performance pass.)
+When Buddy is idle, the **Consolidation Engine v4.1** runs automatically in a background thread — the same way the human brain consolidates memories during sleep. (v5 with the closed recall loop is the next major upgrade, queued after the browser tool ships.)
 
 ```
 ┌──────────────────────────────────────────────────────────┐
@@ -230,7 +247,32 @@ The engine is research-grounded:
 
 ## `$ tools --show-capabilities`
 
-Buddy has four native tools it can invoke in ACTION mode. The Brain decides whether a tool is needed; the Planner breaks the task into steps; the Executor runs each step; the Responder synthesizes the result into a natural reply.
+Buddy has eight native tools it can invoke in ACTION mode, plus a zero-LLM fast path for common system commands. The Brain decides whether a tool is needed; the Planner breaks the task into steps; the Executor runs each step; the Responder synthesizes the result into a natural reply.
+
+### Intent Interceptor — Zero-LLM Fast Path
+
+Before any LLM call is made, the **Intent Interceptor** pattern-matches the user's message against a catalogue of deterministic system actions. If it matches, the action runs instantly — no Brain, no Planner, no Executor.
+
+```
+┌──────────────────────────────────────────────────────┐
+│           INTENT  INTERCEPTOR  FAST  PATH            │
+├──────────────────────────────────────────────────────┤
+│  Matched actions (zero LLM):                         │
+│  · Media: play / pause / next / previous / toggle    │
+│  · Volume: up / down / set to N%                     │
+│  · App: open <app> / launch <app>                    │
+│  · App + play: open Spotify and play <song>          │
+│  · System: lock screen / sleep                       │
+│                                                      │
+│  Normalizes filler first:                            │
+│  "hey buddy can you please just turn it up"          │
+│    → "volume up"  → instant execution                │
+│                                                      │
+│  Cross-platform: macOS · Linux · Windows             │
+└──────────────────────────────────────────────────────┘
+```
+
+Anything ambiguous falls through to the Brain as normal. No false positives.
 
 ### Terminal
 
@@ -240,6 +282,42 @@ Real OS-level execution. Buddy can run shell commands, scripts, and system opera
 
 Read, write, list, move, delete. Structured output at every step. Path validation and non-destructive rules enforced.
 
+### Clipboard
+
+```
+┌──────────────────────────────────────────────────────┐
+│                  CLIPBOARD  TOOL                     │
+├──────────────────────────────────────────────────────┤
+│  get  →  read current clipboard text                 │
+│  set  →  write text to clipboard                     │
+│                                                      │
+│  macOS:   pbpaste / pbcopy                           │
+│  Windows: PowerShell Get-Clipboard / Set-Clipboard   │
+│  Linux:   xclip / xsel / wl-clipboard (auto-detect)  │
+└──────────────────────────────────────────────────────┘
+```
+
+Buddy can read what you copied, write a result directly to your clipboard, or relay clipboard content into any other tool in the pipeline.
+
+### System Control
+
+```
+┌──────────────────────────────────────────────────────┐
+│               SYSTEM  CONTROL  TOOL                  │
+├──────────────────────────────────────────────────────┤
+│  Media:   play / pause / next / previous             │
+│  Volume:  step up/down, set absolute level           │
+│  Apps:    launch any application by name             │
+│  System:  lock screen / sleep                        │
+│                                                      │
+│  macOS:   AppleScript / osascript                    │
+│  Linux:   playerctl / amixer / xdg-open / loginctl   │
+│  Windows: PowerShell WScript.Shell virtual keys      │
+└──────────────────────────────────────────────────────┘
+```
+
+The Planner picks `system_control` for any system-level action that doesn't require reasoning. For instant pattern-matched commands, the Intent Interceptor fires first and skips the LLM entirely.
+
 ### Web Search (SearXNG)
 
 ```
@@ -248,12 +326,62 @@ Read, write, list, move, delete. Structured output at every step. Path validatio
 ├──────────────────────────────────────────┤
 │  Query → SearXNG (self-hosted, local)    │
 │        → Result extraction               │
-│        → Context injection into Buddy    │
+│        → Context injection into Buddy   │
 │  No cloud. No tracking. No API keys.     │
 └──────────────────────────────────────────┘
 ```
 
 SearXNG is cloned, configured, and started automatically by `searxng_setup.py` on boot. Completely private. Buddy can search the web without sending your queries to any external service.
+
+### Web Fetch
+
+```
+┌──────────────────────────────────────────────────┐
+│               WEB  FETCH  TOOL                   │
+├──────────────────────────────────────────────────┤
+│  fetch     → extract readable text from URLs     │
+│              (up to 5 URLs per call)             │
+│  download  → save binary files to disk           │
+│              ZIPs, PDFs, images, executables     │
+│                                                  │
+│  Used after web_search — Buddy follows links     │
+│  and reads full page content, not just snippets  │
+└──────────────────────────────────────────────────┘
+```
+
+Web Fetch fills the gap between search result snippets and full content. Buddy can search with SearXNG, then fetch and read the actual pages — entirely offline and private.
+
+### Browser (Playwright — Autonomous)
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│               BROWSER  AUTOMATION  TOOL                          │
+├──────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  run_task        →  URL + natural language task                  │
+│                     Autonomous micro-planner loop (max 20 steps) │
+│                     Screenshot → action → repeat until done      │
+│                                                                  │
+│  fill_form       →  URL + {field: value} dict → fill & submit    │
+│                     HTML-first, vision fallback                  │
+│                                                                  │
+│  screenshot_query →  Navigate to URL → screenshot → answer Q    │
+│                                                                  │
+│  manage_session  →  save / load / clear browser session          │
+│                                                                  │
+│  check_page      →  title, URL, detected fields — no interaction │
+│                                                                  │
+│  Actions: fill · click · scroll · wait · ask_user · done        │
+│  Memory: fetch_memory → pull personal data (email, address…)    │
+│          Not found → ask_user → stores answer automatically      │
+│                                                                  │
+│  Human simulation: 50–150ms typing, hover jitter, random delays  │
+│  Sessions persist per domain in buddy/data/browser_sessions/     │
+│  CAPTCHA / 2FA: pauses loop, asks user, resumes on response      │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+Buddy controls a real browser like a human. The micro-planner loop runs entirely inside the tool — screenshot → vision → action → repeat — with no extra pipeline stages. Hybrid strategy: HTML selectors first, vision coordinates as fallback for JS-heavy / shadow-DOM / canvas pages.
 
 ### Vision (Qwen VL — multi-image)
 
@@ -329,7 +457,7 @@ ACT mode is a capability layered on top of the memory system. When a task requir
 - Directory and path validation before every execution
 - Structured tool output logging at every step
 - Error stack tracking with full context
-- Planner can refusal or request followup before any step runs
+- Planner can refuse or request followup before any step runs
 
 ---
 
@@ -356,6 +484,7 @@ BrainResult       →  decision (intent + response) + ingestion (memory instruct
 PlannerResult     →  steps[] + followup + refusal
 ExecutorResult    →  status + tool_call + followup_question + abort_reason
 FinalRespond      →  execution_result + response + memory_candidates
+BrowserAction     →  action + target + value + reason  (4 fields — flat, local-model safe)
 ```
 
 ---
@@ -484,7 +613,12 @@ Buddy's interface is a **Textual TUI** styled with the Aurora palette — a term
 | 🌊  | **Spreading activation**      | Top recalled memories activate their semantic neighbors                  |
 | 🔥  | **Encoding arousal**          | Emotional intensity captured at encoding; English + Hindi keywords       |
 | 🛡️  | **Protection tiers**          | normal / critical / immortal — LLM-assigned, enforced at all stages      |
-| ⚡️  | **ACT mode**                  | Real OS-level action execution with planner, executor, retry logic       |
+| ⚡️  | **Intent interceptor**        | Zero-LLM fast path for deterministic actions — instant response          |
+| 🎮  | **System control**            | Media · volume · app launch · lock/sleep — cross-platform                |
+| 📋  | **Clipboard**                 | Read/write system clipboard — macOS, Linux, Windows                      |
+| 🌐  | **Web fetch**                 | Full page text extraction + binary file download — follows search links  |
+| 🌍  | **Browser automation**        | Playwright — autonomous loop, form fill, session persistence, ask_user   |
+| ⚙️  | **ACT mode**                  | Real OS-level action execution with planner, executor, retry logic       |
 | 🔒  | **Fully offline**             | Local LLM via llama.cpp — zero cloud calls                               |
 | 🎤  | **Always-listening voice**    | No wake word — continuous dual-VAD STT pipeline                          |
 | 🔍  | **Semantic retrieval**        | Qwen3-Embedding-0.6B · 1024-dim · composite scoring                      |
@@ -516,6 +650,7 @@ buddy/
 ├── brain/
 │   ├── brain.py                 # Brain — builds context, calls LLM, parses result
 │   ├── action_router.py         # ActionRouter — CHAT vs ACTION routing, planner, executor
+│   ├── intent_interceptor.py    # Fast-path — deterministic actions, zero LLM calls
 │   ├── prompt_builder.py        # PromptBuilder — formats all LLM inputs
 │   └── output_parser.py         # OutputParser — validates and parses strict JSON
 ├── memory/
@@ -523,10 +658,11 @@ buddy/
 │   ├── memory_manager.py        # MemoryManager — add/search/touch/consolidate
 │   ├── sqlite_store.py          # SQLiteStore — source of truth
 │   ├── vector_store.py          # VectorStore — Qdrant/local hybrid search + reranking
-│   ├── consolidation_engine.py  # Sleep consolidation (v4.1-patched)
-│   └── consolidation_engine_v3.py  # REFERENCE ONLY
+│   └── consolidation_engine.py  # Sleep consolidation (v4.1-patched)
 ├── context/
 │   └── conversations.py         # RAM conversation buffer with crash-safe snapshotting
+├── logger/
+│   └── logger.py                # Centralized structured logger
 ├── prompts/
 │   ├── brain_prompts.py         # Brain prompt — decision + ingestion schema
 │   ├── planner_prompts.py       # Planner prompt — PlannerResult schema
@@ -534,12 +670,16 @@ buddy/
 │   ├── respond_prompts.py       # Respond prompt — FinalRespond schema
 │   ├── terminal_prompts.py      # Terminal tool prompt — destructive gate
 │   ├── filesystem_prompts.py    # Filesystem tool prompt
+│   ├── clipboard_prompts.py     # Clipboard tool prompt
+│   ├── system_control_prompts.py # System control tool prompt
 │   ├── web_search_prompts.py    # Web search tool prompt
+│   ├── web_fetch_prompts.py     # Web fetch tool prompt
+│   ├── browser_prompts.py       # Browser tool prompt — 5 functions
 │   ├── memory_prompts.py        # Memory summary prompts
 │   ├── vision_prompts.py        # Vision tool prompt + JSON schema
 │   └── base_system_prompts.py   # BUDDY_IDENTITY, BUDDY_BEHAVIOR, BUDDY_MEMORY
 ├── schema/
-│   └── models.py                # All Pydantic models — BrainResult, PlannerResult, etc.
+│   └── models.py                # All Pydantic models — BrainResult, BrowserAction, etc.
 ├── llm/
 │   ├── llama_client.py          # llama.cpp HTTP client (streaming, JSON extract, interrupts)
 │   └── json_repair.py           # JSON repair utility — auto-corrects malformed LLM output
@@ -547,16 +687,21 @@ buddy/
 │   └── embedding_provider.py    # Qwen3-Embedding-0.6B — singleton, 1024-dim, L2-normalized
 ├── tools/
 │   ├── registry.py              # Tool registry — cached discovery, no hot-reload
-│   ├── os/terminal.py           # Terminal execution tool
-│   ├── os/filesystem.py         # Filesystem tool v2
-│   ├── web/search.py            # Web search tool (SearXNG)
+│   ├── os/
+│   │   ├── terminal.py          # Terminal execution tool
+│   │   ├── filesystem.py        # Filesystem tool v2
+│   │   ├── clipboard.py         # Clipboard read/write — macOS, Linux, Windows
+│   │   └── system_control.py    # Media · volume · apps · lock/sleep — cross-platform
+│   ├── web/
+│   │   ├── search.py            # Web search tool (SearXNG)
+│   │   ├── fetch.py             # Web fetch — page text + binary download
+│   │   └── browser.py           # Playwright browser — autonomous micro-planner loop
 │   └── vision/
 │       ├── image_encoder.py     # base64 + data-URI encoder, path extraction
 │       └── vision_tool.py       # multi-image vision — calls brain.run_vision()
 ├── ui/
 │   ├── textual_app.py           # ACTIVE — Textual TUI (screens, widgets, input pipeline)
 │   ├── boot_ui.py               # Aurora palette constants
-│   ├── face_frames.py           # Buddy face animation frames
 │   ├── stt.py                   # faster-whisper + Silero VAD
 │   └── tts.py                   # Text-to-speech (pyttsx3 / coqui-tts)
 ├── config/
@@ -590,6 +735,13 @@ python -m buddy.main
 
 On first boot, Buddy's orchestrator downloads the llama.cpp binary for your platform, sets up SearXNG, selects the best model for your hardware, and loads the embedding model. Subsequent boots are silent and automatic — no configuration required.
 
+**Optional:** Install `playwright` and `playwright-stealth` for browser automation:
+
+```bash
+pip install playwright playwright-stealth
+playwright install chromium
+```
+
 ---
 
 ## `$ run --dev`
@@ -611,11 +763,16 @@ LLM endpoint: `http://127.0.0.1:8080` (auto-started by `boot.py`).
 ## `$ roadmap --show-next`
 
 ```
-[in progress]  Performance pass — strip dead code, reduce latency, optimize STT
-               across the full pipeline (pipeline → brain → prompts → tools → config)
+[shipped]      Browser automation — Playwright micro-planner loop, session persistence,
+               CAPTCHA/2FA handling, HTML-first + vision fallback
+
+[shipped]      Intent interceptor — zero-LLM fast path for media, volume, apps, system
+
+[shipped]      Clipboard tool — read/write clipboard cross-platform
+
+[shipped]      Web fetch — full page extraction + binary file download
 
 [queued]       Consolidation Engine v5 — closed recall loop, improved clustering
-               Resume after performance pass ships.
 
 [planned]      Deeper memory introspection (Buddy explains what it remembers and why)
 [planned]      Emotional memory weighting (affect-aware importance scoring)
@@ -640,6 +797,7 @@ If you are interested in any of:
 - Context engineering and minimal prompt design
 - Offline / privacy-preserving AI infrastructure
 - Local LLM tooling (llama.cpp, Qwen, quantized models)
+- Browser automation and agent-loop design
 
 Open an issue or start a discussion. The codebase is modular by design — individual components can be improved independently.
 

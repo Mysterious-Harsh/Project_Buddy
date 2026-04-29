@@ -136,6 +136,8 @@ Content rules:
   — Max 80 words. Need more → split into separate self-contained entries.
   — User facts → second person. System/env facts and Buddy observations → first person.
   — Never third person. Never session log. Store conclusions, not reasoning.
+  — DATE RULE: NEVER write "today", "yesterday", "tomorrow", or any relative time expression.
+    Use exact YYYY-MM-DD dates from <datetime>. Relative dates rot immediately after storage.
 
 memory_text must never contain:
   "user requested/asked/wanted" · "clarification needed" · "as previously stored"

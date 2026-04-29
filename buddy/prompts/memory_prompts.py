@@ -115,13 +115,16 @@ Write what is true about the subject — not what was said or exchanged in this 
 <episodic_transform>
 §7. EPISODIC TRANSFORM
 Strip:
-- Time references (unless intrinsic)
+- RELATIVE time references (today, yesterday, last week, next month, etc.) — these rot after storage
 - First-person framing
 - Hedging language
 - Narrative sequencing
 
+KEEP:
+- Absolute dates (YYYY-MM-DD or "April 2026") — intrinsic, irreplaceable, must survive consolidation
+
 Rewrite as:
-Timeless, present-tense declarative statements.
+Timeless, present-tense declarative statements. Where a date is factually significant, keep it.
 </episodic_transform>
 
 <salience_guide>

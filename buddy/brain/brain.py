@@ -1,7 +1,7 @@
 # buddy/brain/brain.py
 from __future__ import annotations
 
-from typing import Any, Callable, Dict, List, Optional, Protocol, Union
+from typing import Any, Callable, Dict, List, Optional, Protocol, Tuple, Union
 
 from buddy.logger.logger import get_logger
 from buddy.brain.output_parser import OutputParser
@@ -84,7 +84,7 @@ class LLM(Protocol):
         interrupt_event: Optional[threading.Event] = None,
         think: bool = True,
         gate_marker: Optional[str] = None,
-    ) -> str: ...
+    ) -> Tuple[str, str]: ...
     def chat(
         self,
         *,
@@ -114,7 +114,7 @@ class LLM(Protocol):
         # before scanning for JSON (None = scan directly after think/start).
         think: bool = True,
         gate_marker: Optional[str] = None,
-    ) -> str: ...
+    ) -> Tuple[str, str]: ...
 
 
 def _render_system_prompt(*, username: str, os_profile: Dict[str, Any]) -> str:
@@ -249,10 +249,10 @@ class Brain:
         *,
         active_task: str,
         recent_turns: str,
-        temperature: float = 0.6,
-        top_p: float = 0.96,
+        temperature: float = 0.4,
+        top_p: float = 0.94,
         repeat_penalty: float = 1.06,
-        repeat_last_n: int = 256,
+        repeat_last_n: int = 64,
         stream: bool = True,
         llm_options: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
@@ -273,7 +273,7 @@ class Brain:
             current_message=active_task,
         )
 
-        raw = self._call_llm_generate(
+        think_block, raw = self._call_llm_generate(
             prompt=prompt,
             temperature=temperature,
             top_p=top_p,
@@ -286,6 +286,20 @@ class Brain:
         )
 
         parsed = self.parser.parse_retrieval_gate(raw)
+        if not parsed and think_block:
+            raw = self._retry_with_think(
+                prompt=prompt,
+                system=None,
+                think_block=think_block,
+                stream=bool(stream),
+                temperature=0.2,
+                top_p=top_p,
+                repeat_penalty=repeat_penalty,
+                repeat_last_n=repeat_last_n,
+                n_predict=None,
+                opts=llm_options if isinstance(llm_options, dict) else {},
+            )
+            parsed = self.parser.parse_retrieval_gate(raw)
 
         return {
             "raw_text": raw,
@@ -298,10 +312,10 @@ class Brain:
         active_task: str,
         recent_turns: str,
         memories: str,
-        temperature: float = 0.6,
-        top_p: float = 0.96,
+        temperature: float = 0.5,
+        top_p: float = 0.94,
         repeat_penalty: float = 1.06,
-        repeat_last_n: int = 256,
+        repeat_last_n: int = 64,
         stream: bool = True,
         llm_options: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
@@ -323,7 +337,7 @@ class Brain:
             memories=memories,
         )
 
-        raw = self._call_llm_generate(
+        think_block, raw = self._call_llm_generate(
             prompt=prompt,
             temperature=temperature,
             top_p=top_p,
@@ -336,6 +350,20 @@ class Brain:
         )
 
         parsed = self.parser.parse_brain(raw)
+        if not parsed and think_block:
+            raw = self._retry_with_think(
+                prompt=prompt,
+                system=None,
+                think_block=think_block,
+                stream=bool(stream),
+                temperature=0.2,
+                top_p=top_p,
+                repeat_penalty=repeat_penalty,
+                repeat_last_n=repeat_last_n,
+                n_predict=None,
+                opts=llm_options if isinstance(llm_options, dict) else {},
+            )
+            parsed = self.parser.parse_brain(raw)
 
         return {
             "raw_text": raw,
@@ -349,10 +377,10 @@ class Brain:
         planner_instructions: str,
         memories: str,
         available_tools: str,
-        temperature: float = 0.6,
-        top_p: float = 0.96,
+        temperature: float = 0.4,
+        top_p: float = 0.94,
         repeat_penalty: float = 1.06,
-        repeat_last_n: int = 256,
+        repeat_last_n: int = 64,
         stream: bool = True,
         llm_options: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
@@ -374,7 +402,7 @@ class Brain:
             followups=active_task,
         )
 
-        raw = self._call_llm_generate(
+        think_block, raw = self._call_llm_generate(
             prompt=prompt,
             temperature=temperature,
             top_p=top_p,
@@ -387,6 +415,20 @@ class Brain:
         )
 
         parsed = self.parser.parse_planner(raw)
+        if not parsed and think_block:
+            raw = self._retry_with_think(
+                prompt=prompt,
+                system=None,
+                think_block=think_block,
+                stream=bool(stream),
+                temperature=0.2,
+                top_p=top_p,
+                repeat_penalty=repeat_penalty,
+                repeat_last_n=repeat_last_n,
+                n_predict=None,
+                opts=llm_options if isinstance(llm_options, dict) else {},
+            )
+            parsed = self.parser.parse_planner(raw)
 
         return {
             "raw_text": raw,
@@ -401,10 +443,10 @@ class Brain:
         step_followups: Optional[str] = "",
         step_errors: Optional[str] = "",
         tool_prompt: str,
-        temperature: float = 0.6,
-        top_p: float = 0.96,
+        temperature: float = 0.4,
+        top_p: float = 0.94,
         repeat_penalty: float = 1.06,
-        repeat_last_n: int = 256,
+        repeat_last_n: int = 64,
         stream: bool = True,
         llm_options: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
@@ -426,7 +468,7 @@ class Brain:
             followups=step_followups or "",
         )
 
-        raw = self._call_llm_generate(
+        think_block, raw = self._call_llm_generate(
             prompt=prompt,
             temperature=temperature,
             top_p=top_p,
@@ -439,6 +481,20 @@ class Brain:
         )
 
         parsed = self.parser.parse_executor(raw)
+        if not parsed and think_block:
+            raw = self._retry_with_think(
+                prompt=prompt,
+                system=None,
+                think_block=think_block,
+                stream=bool(stream),
+                temperature=0.2,
+                top_p=top_p,
+                repeat_penalty=repeat_penalty,
+                repeat_last_n=repeat_last_n,
+                n_predict=None,
+                opts=llm_options if isinstance(llm_options, dict) else {},
+            )
+            parsed = self.parser.parse_executor(raw)
 
         return {
             "raw_text": raw,
@@ -450,10 +506,10 @@ class Brain:
         *,
         memories: str,
         now: Optional[float] = None,
-        temperature: float = 0.6,
-        top_p: float = 0.96,
+        temperature: float = 0.4,
+        top_p: float = 0.94,
         repeat_penalty: float = 1.06,
-        repeat_last_n: int = 256,
+        repeat_last_n: int = 64,
         stream: bool = True,
         llm_options: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
@@ -476,7 +532,7 @@ class Brain:
             today=today_str,
         )
 
-        raw = self._call_llm_generate(
+        think_block, raw = self._call_llm_generate(
             prompt=prompt,
             temperature=temperature,
             top_p=top_p,
@@ -489,6 +545,20 @@ class Brain:
         )
 
         parsed = self.parser.parse_memory_summary(raw)
+        if not parsed and think_block:
+            raw = self._retry_with_think(
+                prompt=prompt,
+                system=None,
+                think_block=think_block,
+                stream=bool(stream),
+                temperature=0.2,
+                top_p=top_p,
+                repeat_penalty=repeat_penalty,
+                repeat_last_n=repeat_last_n,
+                n_predict=None,
+                opts=llm_options if isinstance(llm_options, dict) else {},
+            )
+            parsed = self.parser.parse_memory_summary(raw)
 
         return {
             "raw_text": raw,
@@ -501,10 +571,10 @@ class Brain:
         active_task: str,
         memories: str,
         execution_results: str,
-        temperature: float = 0.6,
-        top_p: float = 0.96,
+        temperature: float = 0.4,
+        top_p: float = 0.94,
         repeat_penalty: float = 1.06,
-        repeat_last_n: int = 256,
+        repeat_last_n: int = 64,
         stream: bool = True,
         llm_options: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
@@ -513,7 +583,7 @@ class Brain:
         Strict validation via OutputParser.parse_respond().
         """
         system_prompt = self._build_system_prompt([
-            BUDDY_BEHAVIOR,
+            BUDDY_MEMORY,
             RESPOND_PROMPT,
             BUDDY_OUTPUT.format(schema=RESPOND_PROMPT_SCHEMA),
         ])
@@ -525,7 +595,7 @@ class Brain:
             responder_instruction=active_task,
         )
 
-        raw = self._call_llm_generate(
+        think_block, raw = self._call_llm_generate(
             prompt=prompt,
             temperature=temperature,
             top_p=top_p,
@@ -538,6 +608,20 @@ class Brain:
         )
 
         parsed = self.parser.parse_respond(raw)
+        if not parsed and think_block:
+            raw = self._retry_with_think(
+                prompt=prompt,
+                system=None,
+                think_block=think_block,
+                stream=bool(stream),
+                temperature=0.2,
+                top_p=top_p,
+                repeat_penalty=repeat_penalty,
+                repeat_last_n=repeat_last_n,
+                n_predict=None,
+                opts=llm_options if isinstance(llm_options, dict) else {},
+            )
+            parsed = self.parser.parse_respond(raw)
 
         return {
             "raw_text": raw,
@@ -550,10 +634,10 @@ class Brain:
         paragraph: str,
         query: str,
         rolling_context: str = "",
-        temperature: float = 0.6,
-        top_p: float = 0.96,
+        temperature: float = 0.4,
+        top_p: float = 0.94,
         repeat_penalty: float = 1.06,
-        repeat_last_n: int = 256,
+        repeat_last_n: int = 64,
         stream: bool = True,
         llm_options: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
@@ -581,7 +665,7 @@ class Brain:
             ),
         )
 
-        raw = self._call_llm_generate(
+        think_block, raw = self._call_llm_generate(
             prompt=prompt,
             temperature=temperature,
             top_p=top_p,
@@ -592,17 +676,33 @@ class Brain:
             json_mode=True,
         )
 
-        return self.parser.parse_reader(raw)
+        result = self.parser.parse_reader(raw)
+        if not result and think_block:
+            raw = self._retry_with_think(
+                prompt=prompt,
+                system=None,
+                think_block=think_block,
+                stream=bool(stream),
+                temperature=0.2,
+                top_p=top_p,
+                repeat_penalty=repeat_penalty,
+                repeat_last_n=repeat_last_n,
+                n_predict=None,
+                opts=llm_options if isinstance(llm_options, dict) else {},
+            )
+            result = self.parser.parse_reader(raw)
+
+        return result
 
     def run_vision(
         self,
         *,
         image_paths: "Union[str, List[str]]",
         query: str,
-        temperature: float = 0.6,
-        top_p: float = 0.96,
+        temperature: float = 0.4,
+        top_p: float = 0.94,
         repeat_penalty: float = 1.06,
-        repeat_last_n: int = 256,
+        repeat_last_n: int = 64,
         stream: bool = True,
         llm_options: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
@@ -656,7 +756,7 @@ class Brain:
         }]
 
         try:
-            raw = self.llm.chat(
+            _, raw = self.llm.chat(
                 messages=messages,
                 system=system_prompt,
                 images=data_uris,
@@ -706,10 +806,10 @@ class Brain:
         dom_hints: str = "",
         ask_history: Optional[List[Dict[str, Any]]] = None,
         last_error: str = "",
-        temperature: float = 0.6,
-        top_p: float = 0.96,
+        temperature: float = 0.4,
+        top_p: float = 0.94,
         repeat_penalty: float = 1.06,
-        repeat_last_n: int = 256,
+        repeat_last_n: int = 64,
         stream: bool = True,
         llm_options: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
@@ -794,7 +894,7 @@ class Brain:
         )
 
         try:
-            raw = self.llm.chat(
+            _, raw = self.llm.chat(
                 messages=messages,
                 system=system_prompt,
                 images=[screenshot_uri],
@@ -837,13 +937,13 @@ class Brain:
         temperature: float,
         stream: bool,
         json_mode: bool,
-        top_p: float = 0.96,
+        top_p: float = 0.94,
         repeat_penalty: float = 1.06,
         repeat_last_n: int = 64,
         n_predict: Optional[int] = None,
         options: Optional[Dict[str, Any]],
         system: Optional[str] = None,
-    ) -> str:
+    ) -> Tuple[str, str]:
 
         # Normalize options for predictable downstream handling
         opts: Dict[str, Any] = options if isinstance(options, dict) else {}
@@ -859,7 +959,7 @@ class Brain:
                 n_predict,
             )
 
-        out = self.llm.generate(
+        think_block, text = self.llm.generate(
             prompt=prompt,
             system=system,
             stream=bool(stream),
@@ -875,55 +975,78 @@ class Brain:
             json_root="object",
             json_max_chars=120_000,
             interrupt_event=self._interrupt_event,
+            stop=["<|im_end|>", "<|endoftext|>"],
             think=True,
         )
 
-        text = "" if out is None else str(out)
-        # ── Detect missing JSON and re-prompt ────────────────────────────
-        # Failure mode A: model output only the <think> block and stopped.
-        #   Qwen3 emits lowercase </think>; handle both cases for safety.
-        # Failure mode B (json_mode only): model emitted think + prose but
-        #   forgot <json>. Common when execution_results are very long and
-        #   the think block exhausts the model's attention budget.
-        # Fix: trim to the think portion and inject <json> so the follow-up
-        #   call skips re-thinking and goes straight to JSON emission.
-        _text_lower = text.lower()
-        _think_only = _text_lower.rstrip().endswith("</think>")
+        if text is None:
+            text = ""
 
-        _prose_instead_of_json = False
-        if json_mode and not _think_only and "</think>" in _text_lower:
-            try:
-                json.loads(text)
-            except Exception:
-                _prose_instead_of_json = True
+        # Retry when json_mode but text is missing or not valid JSON.
+        # think_block from the first call is reused to skip re-thinking.
+        _need_retry = False
+        if json_mode:
+            if not text.strip():
+                _need_retry = True
+            else:
+                try:
+                    json.loads(text)
+                except Exception:
+                    _need_retry = True
 
-        if _think_only or _prose_instead_of_json:
-            _idx = _text_lower.rfind("</think>")
-            _think_part = text[: _idx + len("</think>")] if _idx >= 0 else text
-            prompt = prompt + f"\n{_think_part}\n" + "{"
-            text = self.llm.generate(
+        if _need_retry and think_block:
+            text = self._retry_with_think(
                 prompt=prompt,
                 system=system,
+                think_block=think_block,
                 stream=bool(stream),
                 temperature=float(temperature),
                 top_p=float(top_p),
                 repeat_penalty=float(repeat_penalty),
                 repeat_last_n=int(repeat_last_n),
                 n_predict=n_predict,
-                options=opts,
-                on_delta=None,
-                json_extract=False,
-                json_validate=False,
-                stop=["<|im_end|>", "<|endoftext|>"],
-                interrupt_event=self._interrupt_event,
-                think=False,
+                opts=opts,
             )
-            text = "{\n" + text
 
         if self.debug:
-            logger.debug(f"LLM output: \n {text}")
+            logger.debug(f"LLM output: \n{think_block} \n {text}")
 
-        return text
+        return think_block, text
+
+    def _retry_with_think(
+        self,
+        *,
+        prompt: str,
+        system: Optional[str],
+        think_block: str,
+        stream: bool,
+        temperature: float,
+        top_p: float,
+        repeat_penalty: float,
+        repeat_last_n: int,
+        n_predict: Optional[int],
+        opts: Dict[str, Any],
+    ) -> str:
+        """Retry JSON generation by seeding with the model's own think block."""
+        retry_prompt = prompt + f"\n{think_block}\n" + "{"
+        _, text = self.llm.generate(
+            prompt=retry_prompt,
+            system=system,
+            stream=bool(stream),
+            temperature=float(temperature),
+            top_p=float(top_p),
+            repeat_penalty=float(repeat_penalty),
+            repeat_last_n=int(repeat_last_n),
+            n_predict=n_predict,
+            options=opts,
+            on_delta=None,
+            json_extract=False,
+            json_validate=False,
+            stop=["<|im_end|>", "<|endoftext|>"],
+            interrupt_event=self._interrupt_event,
+            think=False,
+        )
+        return "{\n" + (text or "")
 
     # -------------------------
     # Helpers

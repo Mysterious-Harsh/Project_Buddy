@@ -18,6 +18,7 @@ import time
 from typing import Any, Callable, List, Optional
 
 from rich.align import Align
+from rich.cells import cell_len
 from rich.markup import escape as markup_escape
 from rich.panel import Panel
 from rich.text import Text
@@ -897,31 +898,34 @@ class ChatBubble(Static):
             self.update(f"[dim {_DIM}]  ◦ {markup_escape(text)}[/]")
             return
 
-        display = text + ("▋" if cursor else "")
+        try:
+            display = text + ("▋" if cursor else "")
+            lines = (text or " ").splitlines() or [" "]
+            _longest = max(cell_len(line) for line in lines)
+            _w = min(72, max(32, _longest + 8))
 
-        _longest = max((len(line) for line in text.splitlines()), default=0)
-        _w = min(72, max(32, _longest + 8))
-
-        if self._kind == "user":
-            panel = Panel(
-                Text(display, style=_WHITE),
-                title=f"[{_CYAN}]▌ You[/]",
-                title_align="left",
-                border_style=_CYAN,
-                width=_w,
-                padding=(0, 1),
-            )
-            self.update(panel)
-        else:
-            panel = Panel(
-                Text(display, style=_WHITE),
-                title=f"[{_VIOLET}]◈ Buddy[/]",
-                title_align="left",
-                border_style=_VIOLET,
-                width=_w,
-                padding=(0, 1),
-            )
-            self.update(Align(panel, align="right"))
+            if self._kind == "user":
+                panel = Panel(
+                    Text(display, style=_WHITE),
+                    title=f"[{_CYAN}]▌ You[/]",
+                    title_align="left",
+                    border_style=_CYAN,
+                    width=_w,
+                    padding=(0, 1),
+                )
+                self.update(Align(panel, align="right"))
+            else:
+                panel = Panel(
+                    Text(display, style=_WHITE),
+                    title=f"[{_VIOLET}]◈ Buddy[/]",
+                    title_align="left",
+                    border_style=_VIOLET,
+                    width=_w,
+                    padding=(0, 1),
+                )
+                self.update(panel)
+        except Exception:
+            self.update(f"[{_DIM}]{markup_escape(str(text)[:500])}[/]")
 
     def stream_update(self, text: str, done: bool = False) -> None:
         self._text = text

@@ -65,6 +65,7 @@ STEP 6 — 2–3 queries only if the message clearly touches distinct memory pat
 §6. TIME AWARENESS
 Read NOW_ISO. Time changes recall only when the hour carries genuine meaning for this person.
 Social openers → always read the hour. Pure tasks → ignore it.
+QUERY DATES: If a query references time, use exact dates (YYYY-MM-DD) from NOW_ISO — never "today", "yesterday", or "last week".
 </time_awareness>
 
 <minimal_messages>
@@ -371,6 +372,10 @@ MUST be "" when:
           — Buddy's own state, commitment, observation, or relational impression → first person.
           — Never third person. Never session log.
           — Specific, factual, natural. Never vague.
+          — DATE RULE: NEVER write relative time expressions (today, yesterday, tomorrow, tonight,
+            last week, next month, etc.). Use the exact ISO date from NOW_ISO in <datetime>
+            (YYYY-MM-DD). Example: write "2026-04-29" not "today". The stored timestamp prefix
+            handles recency — the memory text itself must be timelessly accurate.
 
         MUST NEVER CONTAIN:
           — Any description of what the user said, asked, or requested

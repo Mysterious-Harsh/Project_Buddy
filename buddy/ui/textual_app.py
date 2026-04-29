@@ -480,12 +480,12 @@ class MainScreen(Screen):
             with self._state_lock:
                 self._sys_state.pipeline_running = True
 
-            self._start_spinner("Remembering", "working")
+            self._start_spinner("Leafing through memories...", "working")
             self._refresh_info_bar()
             _turn_start = time.perf_counter()
 
             loop = self._main_loop
-            current_label = "Remembering"
+            current_label = "Leafing through memories..."
             stream_buf: List[str] = []
             _last_preview_t = 0.0
             _thinking_done = False

@@ -413,6 +413,50 @@ search:
 ui:
   default_theme: simple
   default_locale: en
+
+# Tune outgoing HTTP for a single-user local instance.
+outgoing:
+  request_timeout: 6.0
+  max_request_timeout: 12.0
+  pool_connections: 10
+  pool_maxsize: 15
+  enable_http2: true
+
+# Only enable engines that reliably work on a local self-hosted instance.
+# Google direct scraping and Brave without an API key get blocked quickly.
+engines:
+  - name: brave
+    disabled: true
+  - name: brave.news
+    disabled: true
+  - name: karmasearch
+    disabled: true
+  - name: karmasearch videos
+    disabled: true
+  - name: google
+    disabled: true
+  - name: google news
+    disabled: true
+  - name: google videos
+    disabled: true
+  - name: google images
+    disabled: true
+  - name: google scholar
+    disabled: true
+  - name: duckduckgo
+    disabled: false
+  - name: bing
+    disabled: false
+  - name: bing news
+    disabled: false
+  - name: startpage
+    disabled: false
+  - name: mojeek
+    disabled: true
+  - name: wikipedia
+    disabled: false
+  - name: wikidata
+    disabled: false
 """
     settings_path.parent.mkdir(parents=True, exist_ok=True)
     settings_path.write_text(content, encoding="utf-8")

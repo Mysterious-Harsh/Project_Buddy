@@ -91,14 +91,14 @@ def _project_success(tool_name: str, result: Dict[str, Any]) -> Dict[str, Any]:
 # Maps tool name → action verb shown in the spinner during executor + tool execution.
 # Tools may override this with a more specific label via their own on_progress call.
 _TOOL_VERB: Dict[str, str] = {
-    "filesystem": "Working on files",
-    "terminal": "Executing",
-    "web_search": "Searching",
-    "web_fetch": "Fetching",
-    "vision": "Analysing",
-    "system_control": "Controlling",
-    "browser": "Browsing",
-    "clipboard": "Clipboard",
+    "filesystem": "Tending to files...",
+    "terminal": "Setting things in motion...",
+    "web_search": "Wandering the web...",
+    "web_fetch": "Pulling it close...",
+    "vision": "Studying this...",
+    "system_control": "Taking hold...",
+    "browser": "Wandering through...",
+    "clipboard": "Holding onto that...",
 }
 
 
@@ -341,7 +341,7 @@ class ActionRouter:
         t0 = time.perf_counter()
         planner_parsed: Dict[str, Any] = {}
         if on_token:
-            on_token("Planning", False)
+            on_token("Drawing up a plan...", False)
         while True:
 
             planner_payload = await asyncio.to_thread(
@@ -546,7 +546,7 @@ class ActionRouter:
                     break
                 if attempt > 0:
                     if on_token:
-                        on_token("Oo.. Got some error let me solve it 🫣", False)
+                        on_token("Something slipped... catching it 🫣", False)
 
                 logger.info(
                     "step %d attempt %d/%d executor_call tool=%s",

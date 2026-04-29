@@ -507,7 +507,7 @@ class LlamaClient:
         # before scanning for JSON (None = scan directly after think/start).
         think: bool = True,
         gate_marker: Optional[str] = None,
-    ) -> str:
+    ) -> Tuple[str, str]:
         """
         Chat completion endpoint (/v1/chat/completions).
 
@@ -536,7 +536,10 @@ class LlamaClient:
                          for JSON. When None (default), scan directly.
 
         Returns:
-            Generated text (or extracted JSON if json_extract=True)
+            Tuple of (think_block, text_or_json). think_block is the raw
+            <think>...</think> content (empty string if none). text_or_json
+            is the extracted JSON if json_extract=True, otherwise raw text
+            after the think block.
         """
         if not messages:
             raise ValueError("messages must be non-empty")
@@ -561,7 +564,7 @@ class LlamaClient:
         if stream and json_extract:
             json_capture = _JsonCapture(root=json_root, max_chars=int(json_max_chars))
 
-        text = self._call(
+        text, _raw_think = self._call(
             endpoint="/v1/chat/completions",
             payload=payload,
             on_delta=on_delta,
@@ -572,13 +575,22 @@ class LlamaClient:
             gate_marker=gate_marker,
         )
 
+        # Normalize: separate think_block from post-think text
+        think_block = ""
+        post_text = text
+        if think:
+            _idx = text.lower().find("</think>")
+            if _idx != -1:
+                think_block = text[: _idx + len("</think>")]
+                post_text = text[_idx + len("</think>") :]
+            elif _raw_think:
+                # Streaming+json_extract: think block captured separately, text is JSON
+                think_block = _raw_think
+                post_text = text
+
         # Blocking mode JSON extraction
         if json_extract and not stream:
-            _src = text
-            if think:
-                _ti = _src.find("</think>")
-                if _ti != -1:
-                    _src = _src[_ti + len("</think>") :]
+            _src = post_text
             if gate_marker:
                 _gi = _src.find(gate_marker)
                 if _gi != -1:
@@ -590,9 +602,9 @@ class LlamaClient:
                 max_chars=int(json_max_chars),
             )
             if extracted is not None:
-                return extracted
+                return think_block, extracted
 
-        return text
+        return think_block, post_text
 
     def generate(
         self,
@@ -618,7 +630,7 @@ class LlamaClient:
         interrupt_event: Optional[threading.Event] = None,
         think: bool = True,
         gate_marker: Optional[str] = None,
-    ) -> str:
+    ) -> Tuple[str, str]:
         """
         Text completion endpoint (/completions).
 
@@ -646,7 +658,10 @@ class LlamaClient:
                          for JSON. When None (default), scan directly.
 
         Returns:
-            Generated text (or extracted JSON if json_extract=True)
+            Tuple of (think_block, text_or_json). think_block is the raw
+            <think>...</think> content (empty string if none). text_or_json
+            is the extracted JSON if json_extract=True, otherwise raw text
+            after the think block.
         """
         if prompt is None:
             raise ValueError("prompt must be a string")
@@ -700,7 +715,7 @@ class LlamaClient:
         # restriction. Newer llama.cpp builds reject these on /v1/completions
         # because that endpoint is now strictly OpenAI-spec only (400 Bad Request).
         # Response parsing already handles the native {"content": "..."} format.
-        text = self._call(
+        text, _raw_think = self._call(
             endpoint="/completion",
             payload=payload,
             on_delta=on_delta,
@@ -711,13 +726,22 @@ class LlamaClient:
             gate_marker=gate_marker,
         )
 
+        # Normalize: separate think_block from post-think text
+        think_block = ""
+        post_text = text
+        if think:
+            _idx = text.lower().find("</think>")
+            if _idx != -1:
+                think_block = text[: _idx + len("</think>")]
+                post_text = text[_idx + len("</think>") :]
+            elif _raw_think:
+                # Streaming+json_extract: think block captured separately, text is JSON
+                think_block = _raw_think
+                post_text = text
+
         # Blocking mode JSON extraction
         if json_extract and not stream:
-            _src = text
-            if think:
-                _ti = _src.find("</think>")
-                if _ti != -1:
-                    _src = _src[_ti + len("</think>") :]
+            _src = post_text
             if gate_marker:
                 _gi = _src.find(gate_marker)
                 if _gi != -1:
@@ -729,9 +753,9 @@ class LlamaClient:
                 max_chars=int(json_max_chars),
             )
             if extracted is not None:
-                return extracted
+                return think_block, extracted
 
-        return text
+        return think_block, post_text
 
     def warmup(self) -> bool:
         """
@@ -1005,6 +1029,7 @@ class LlamaClient:
         done_seen: Optional[bool] = None
         client_early_stop: Optional[bool] = None
         json_attempts: int = 0
+        think_block: str = ""
 
     def _call(
         self,
@@ -1017,7 +1042,7 @@ class LlamaClient:
         interrupt_event: Optional[threading.Event] = None,
         think: bool = True,
         gate_marker: Optional[str] = None,
-    ) -> str:
+    ) -> Tuple[str, str]:
         """Execute request with retry logic. Thread-safe: each request gets its own interrupt_event."""
         # Create per-request interrupt if not provided
         if interrupt_event is None:
@@ -1112,7 +1137,7 @@ class LlamaClient:
                         self.model,
                     )
 
-                return text
+                return text, rs.think_block
 
             except (
                 ConnectionError,
@@ -1221,6 +1246,13 @@ class LlamaClient:
                     finish_reason or "-",
                 )
 
+            # Extract think block from raw text
+            _tb = ""
+            _tl = text.lower()
+            _ti = _tl.find("</think>")
+            if _ti != -1:
+                _tb = text[: _ti + len("</think>")]
+
             dt = perf() - t0
             return text, self._RawStats(
                 total_s=dt,
@@ -1230,6 +1262,7 @@ class LlamaClient:
                 prompt_tokens=pt,
                 completion_tokens=ct,
                 total_tokens=tt,
+                think_block=_tb,
             )
 
         finally:
@@ -1282,6 +1315,8 @@ class LlamaClient:
 
         think_passed = not think
         think_tail = ""
+        think_block_parts: List[str] = []
+        think_block_sealed = not think
 
         gate_marker_str = gate_marker
         gate_open = think_passed and (gate_marker_str is None)
@@ -1379,6 +1414,10 @@ class LlamaClient:
                             )
                         # Continue streaming despite callback failure
 
+                # Capture think block (all chunks until </think> is found)
+                if not think_block_sealed:
+                    think_block_parts.append(piece)
+
                 # Buffer output (unless JSON gate has closed)
                 if cap is None or not gate_open:
                     out_append(piece)
@@ -1400,6 +1439,7 @@ class LlamaClient:
                             )
                             continue
                         think_passed = True
+                        think_block_sealed = True
                         think_tail = ""
                         _json_piece = scan[idx + len(_THINK_END) :]
                         # If no gate marker needed, open the gate now
@@ -1541,6 +1581,14 @@ class LlamaClient:
                 json_attempts,
             )
 
+        # Extract clean think block (everything up through </think>)
+        if think_block_parts:
+            _raw_think = "".join(think_block_parts)
+            _te = _raw_think.lower().find("</think>")
+            think_blk = _raw_think[: _te + len("</think>")] if _te != -1 else ""
+        else:
+            think_blk = ""
+
         return text, self._RawStats(
             total_s=dt,
             ttfb_s=ttfb,
@@ -1552,6 +1600,7 @@ class LlamaClient:
             done_seen=done_seen,
             client_early_stop=client_early_stop,
             json_attempts=json_attempts,
+            think_block=think_blk,
         )
 
     # --------------------------
