@@ -236,7 +236,7 @@ def build_responder_prompt(
         f"<|im_start|>assistant\n<memories>\n{memories}\n</memories>\n<|im_end|>"
     )
 
-    tool_block = f"<|im_start|>tool\n<step_execution_result>\n{execution_results}\n</step_execution_result>\n<|im_end|>"
+    tool_block = f"<|im_start|>tool\n<execution_result_map>\n{execution_results}\n</execution_result_map>\n<|im_end|>"
 
     task_block = (
         f"<|im_start|>user\n<task>\n{responder_instruction}\n</task>\n<|im_end|>"
