@@ -4,7 +4,7 @@ import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Literal
+from typing import Any, Dict, List, Optional, Literal, Tuple
 
 from buddy.logger.logger import get_logger
 
@@ -36,13 +36,9 @@ class Conversations:
 
     - Stores last N messages (max_turns == max_messages)
     - Bidirectional: User/Buddy can speak in any order
-    - Tracks a single pending message (the last message awaiting a reply)
+    - Consecutive same-role messages are merged into one block at render time
     - Automatically loads snapshot on construction (if snapshot_path provided)
     - Automatically saves snapshot after any mutation (if snapshot_path provided)
-
-    Pending rule:
-    - If the last message in the buffer is unanswered (no opposite-role reply yet),
-      it is treated as PENDING in the formatted output.
     """
 
     def __init__(
@@ -127,6 +123,13 @@ class Conversations:
     def add_buddy(self, text: str) -> None:
         self._add_message(role="Buddy", text=text)
 
+    def add_buddy_if_unanswered(self, text: str) -> None:
+        """Add a Buddy message only when the last message is from User.
+        Used to record interruption messages without doubling up when
+        Buddy already responded before the cancel fired."""
+        if self._messages and self._messages[-1].role == "User":
+            self._add_message(role="Buddy", text=text)
+
     def _add_message(self, role: Role, text: str) -> None:
         msg = (text or "").strip()
         ts = self._now_iso()
@@ -136,63 +139,41 @@ class Conversations:
         self._autosave_snapshot()
 
     # ==========================================================
-    # Pending detection
-    # ==========================================================
-
-    def _pending_index(self) -> Optional[int]:
-        """
-        Returns the index of the pending message (if any).
-
-        Definition:
-        - A message is pending if it is the last message AND there is no later opposite-role reply.
-          With a pure timeline, that means: the last message is always pending unless you decide
-          to treat "pending" only when Buddy asked a question.
-
-        Practical rule (recommended):
-        - Pending exists if the last message is from Buddy (Buddy is waiting for user),
-          OR if you explicitly want "pending always" then return last index.
-        """
-        if not self._messages:
-            return None
-
-        # Recommended: only Buddy-waiting is "pending"
-        last = self._messages[-1]
-        if last.role == "Buddy":
-            return len(self._messages) - 1
-        return None
-
-    # ==========================================================
     # Read (LLM-friendly timeline)
     # ==========================================================
 
-    def get_recent_conversations(self, include_pending: bool = False) -> str:
+    def get_recent_conversations(self) -> str:
         """
-        Returns the conversation as ChatML-formatted turns:
+        Returns the conversation as ChatML-formatted turns.
+
+        Consecutive messages from the same role are merged into one block
+        so the LLM sees clean alternating user/assistant turns.
 
         <|im_start|>user
         [time]: ...
         <|im_end|>
         <|im_start|>assistant
         [time]: ...
-        <|im_end|>
 
-        If include_pending=True and a pending message exists, the last Buddy
-        message is tagged with [PENDING] before the timestamp.
+        [time]: ...
+        <|im_end|>
         """
         if not self._messages:
             return ""
 
-        pending_i = self._pending_index() if include_pending else None
+        # Group consecutive same-role messages together
+        groups: List[Tuple[str, List[ConversationMessage]]] = []
+        for m in self._messages:
+            if groups and groups[-1][0] == m.role:
+                groups[-1][1].append(m)
+            else:
+                groups.append((m.role, [m]))
 
         blocks: List[str] = []
-
-        for i, m in enumerate(self._messages):
-            chatml_role = "assistant" if m.role == "Buddy" else "user"
-            is_pending = include_pending and i == pending_i
-            tag = "[PENDING] " if is_pending else ""
-            blocks.append(
-                f"<|im_start|>{chatml_role}\n{tag}[{m.time}]: {m.text}\n<|im_end|>"
-            )
+        for role, msgs in groups:
+            chatml_role = "assistant" if role == "Buddy" else "user"
+            lines = "\n\n".join(f"[{m.time}]: {m.text}" for m in msgs)
+            blocks.append(f"<|im_start|>{chatml_role}\n{lines}\n<|im_end|>")
 
         return "\n".join(blocks)
 
@@ -209,7 +190,7 @@ class Conversations:
             p.parent.mkdir(parents=True, exist_ok=True)
 
             payload: Dict[str, Any] = {
-                "version": 1,  # time-based message log + PENDING rendering at read-time
+                "version": 1,
                 "messages": [
                     {"role": m.role, "time": m.time, "text": m.text}
                     for m in self._messages

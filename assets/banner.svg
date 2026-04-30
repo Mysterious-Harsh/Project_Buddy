@@ -1,192 +1,172 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 300" width="900" height="300">
+<svg width="900" height="420" viewBox="0 0 900 420" xmlns="http://www.w3.org/2000/svg">
+
   <defs>
-    <linearGradient id="g" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%"   stop-color="#00e5ff"/>
-      <stop offset="48%"  stop-color="#7c4dff"/>
-      <stop offset="100%" stop-color="#e040fb"/>
-    </linearGradient>
     <linearGradient id="bar" x1="0%" y1="0%" x2="100%" y2="0%">
       <stop offset="0%"   stop-color="#00e5ff"/>
       <stop offset="100%" stop-color="#e040fb"/>
     </linearGradient>
-    <linearGradient id="glow-g" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%"   stop-color="#00e5ff" stop-opacity="0.25"/>
-      <stop offset="100%" stop-color="#e040fb" stop-opacity="0.10"/>
-    </linearGradient>
-    <filter id="glow" x="-20%" y="-40%" width="140%" height="180%">
-      <feGaussianBlur stdDeviation="6" result="blur"/>
-      <feMerge>
-        <feMergeNode in="blur"/>
-        <feMergeNode in="blur"/>
-        <feMergeNode in="SourceGraphic"/>
-      </feMerge>
-    </filter>
-    <filter id="soft" x="-5%" y="-20%" width="110%" height="140%">
-      <feGaussianBlur stdDeviation="2" result="blur"/>
-      <feMerge>
-        <feMergeNode in="blur"/>
-        <feMergeNode in="SourceGraphic"/>
-      </feMerge>
-    </filter>
-    <style>
-      @keyframes fadeUp   { from { opacity:0; transform:translateY(8px) } to { opacity:1; transform:translateY(0) } }
-      @keyframes fadeIn   { from { opacity:0 } to { opacity:1 } }
-      @keyframes barGrow  { from { width:0px } to { width:544px } }
-      @keyframes scanMove { 0%{transform:translateY(-2px)} 100%{transform:translateY(300px)} }
-      @keyframes glitch {
-        0%,87%,100% { transform:translate(0,0); opacity:1 }
-        88%          { transform:translate(-3px,0); opacity:.9 }
-        89%          { transform:translate(3px,0);  opacity:.9 }
-        90%          { transform:translate(-2px,0); opacity:1 }
-        91%          { transform:translate(0,0);    opacity:1 }
-      }
-      @keyframes pulseDot { 0%,100%{opacity:.5} 50%{opacity:1} }
 
-      .bg    { fill:#000000 }
-      .title {
-        font-family:'Courier New',Courier,monospace;
-        font-weight:900;
-        font-size:84px;
-        fill:url(#g);
-        letter-spacing:16px;
+    <style>
+      @keyframes fadeIn  { from{opacity:0} to{opacity:1} }
+      @keyframes barGrow { from{width:0} to{width:480px} }
+      @keyframes scan    { 0%{transform:translateY(0)} 100%{transform:translateY(420px)} }
+
+      /* Pure fade-up — zero blur */
+      @keyframes rowReveal {
+        0%   { opacity:0; transform:translateY(12px) }
+        100% { opacity:1; transform:translateY(0) }
       }
-      .sub {
-        font-family:'Courier New',Courier,monospace;
-        font-size:10.5px;
-        fill:#4a4a6a;
-        letter-spacing:6.5px;
+      @keyframes logoShimmer {
+        0%,100% { opacity:.87 }
+        50%     { opacity:1 }
       }
-      .sl {
-        font-family:'Courier New',Courier,monospace;
-        font-size:10.5px;
-        fill:#00e5ff;
-        letter-spacing:2px;
+      @keyframes dotDrop {
+        0%   { opacity:0; transform:scale(0) translateY(-6px) }
+        55%  { opacity:1; transform:scale(1.4) translateY(2px) }
+        75%  { transform:scale(0.85) translateY(0) }
+        100% { opacity:1; transform:scale(1) translateY(0) }
       }
-      .sr {
-        font-family:'Courier New',Courier,monospace;
-        font-size:10.5px;
-        fill:#ce93d8;
-        letter-spacing:2px;
+      @keyframes dotWave {
+        0%,100% { opacity:.5 }
+        50%     { opacity:1  }
       }
-      .pct {
-        font-family:'Courier New',Courier,monospace;
-        font-size:10.5px;
-        fill:#3a3a5a;
-      }
-      .a1 { opacity:0; animation: fadeUp  .7s ease forwards .05s }
-      .a2 { opacity:0; animation: fadeIn  .6s ease forwards  .9s }
-      .a3 { opacity:0; animation: fadeIn  .5s ease forwards 1.35s }
-      .a4 { opacity:0; animation: fadeIn  .5s ease forwards 1.80s }
-      .a5 { opacity:0; animation: fadeIn  .4s ease forwards 2.10s }
-      .bw { width:0;   animation: barGrow 2.6s cubic-bezier(.4,0,.2,1) forwards 2.15s }
-      .gl { animation: glitch 10s ease-in-out infinite }
-      .sc { animation: scanMove 3.5s linear infinite; opacity:.035 }
-      .pd { animation: pulseDot 2.2s ease-in-out infinite }
+
+      .sub { font-family:'Courier New',Courier,monospace; font-size:10.5px; fill:#4a4a6a; letter-spacing:6.5px; }
+      .sl  { font-family:'Courier New',Courier,monospace; font-size:10.5px; fill:#00e5ff; letter-spacing:2px; }
+      .sr  { font-family:'Courier New',Courier,monospace; font-size:10.5px; fill:#ce93d8; letter-spacing:2px; }
+      .pct { font-family:'Courier New',Courier,monospace; font-size:10.5px; fill:#3a3a5a; }
+
+      .a2 { opacity:0; animation:fadeIn .6s ease forwards 1.20s }
+      .a4 { opacity:0; animation:fadeIn .5s ease forwards 1.80s }
+      .a5 { opacity:0; animation:fadeIn .4s ease forwards 2.10s }
+      /* barGrow now targets 480px */
+      .bw { width:0; animation:barGrow 2.6s cubic-bezier(.4,0,.2,1) forwards 2.15s }
+      .sc { animation:scan 4s linear infinite; opacity:.03 }
+
+      /* Logo rows — no filter, pure fade-up */
+      .r1 { opacity:0; animation:rowReveal .5s ease-out forwards .08s, logoShimmer 3.5s ease-in-out infinite .65s }
+      .r2 { opacity:0; animation:rowReveal .5s ease-out forwards .22s, logoShimmer 3.5s ease-in-out infinite .79s }
+      .r3 { opacity:0; animation:rowReveal .5s ease-out forwards .36s, logoShimmer 3.5s ease-in-out infinite .93s }
+      .r4 { opacity:0; animation:rowReveal .5s ease-out forwards .50s, logoShimmer 3.5s ease-in-out infinite 1.07s }
+      .r5 { opacity:0; animation:rowReveal .5s ease-out forwards .64s, logoShimmer 3.5s ease-in-out infinite 1.21s }
+      .r6 { opacity:0; animation:rowReveal .5s ease-out forwards .78s, logoShimmer 3.5s ease-in-out infinite 1.35s }
     </style>
   </defs>
 
-  <!-- Background -->
-  <rect width="900" height="300" class="bg"/>
+  <rect width="900" height="420" fill="#05070d"/>
+  <rect width="900" height="420" fill="#000" opacity="0.45"/>
 
-  <!-- Dot grid -->
-  <g opacity="0.07">
-    <g fill="#00e5ff">
-      <circle cx="50"  cy="40"  r="1"/><circle cx="110" cy="40"  r="1"/><circle cx="170" cy="40"  r="1"/>
-      <circle cx="230" cy="40"  r="1"/><circle cx="290" cy="40"  r="1"/><circle cx="350" cy="40"  r="1"/>
-      <circle cx="410" cy="40"  r="1"/><circle cx="470" cy="40"  r="1"/><circle cx="530" cy="40"  r="1"/>
-      <circle cx="590" cy="40"  r="1"/><circle cx="650" cy="40"  r="1"/><circle cx="710" cy="40"  r="1"/>
-      <circle cx="770" cy="40"  r="1"/><circle cx="830" cy="40"  r="1"/>
-      <circle cx="50"  cy="260" r="1"/><circle cx="110" cy="260" r="1"/><circle cx="170" cy="260" r="1"/>
-      <circle cx="230" cy="260" r="1"/><circle cx="290" cy="260" r="1"/><circle cx="350" cy="260" r="1"/>
-      <circle cx="410" cy="260" r="1"/><circle cx="470" cy="260" r="1"/><circle cx="530" cy="260" r="1"/>
-      <circle cx="590" cy="260" r="1"/><circle cx="650" cy="260" r="1"/><circle cx="710" cy="260" r="1"/>
-      <circle cx="770" cy="260" r="1"/><circle cx="830" cy="260" r="1"/>
-    </g>
+  <!-- Scanline -->
+  <rect width="900" height="2" class="sc" fill="#00e5ff"/>
+
+  <!-- Dot grid top -->
+  <g opacity="0.07" fill="#00e5ff">
+    <circle cx="50"  cy="28" r="1"/><circle cx="110" cy="28" r="1"/><circle cx="170" cy="28" r="1"/>
+    <circle cx="230" cy="28" r="1"/><circle cx="290" cy="28" r="1"/><circle cx="350" cy="28" r="1"/>
+    <circle cx="410" cy="28" r="1"/><circle cx="470" cy="28" r="1"/><circle cx="530" cy="28" r="1"/>
+    <circle cx="590" cy="28" r="1"/><circle cx="650" cy="28" r="1"/><circle cx="710" cy="28" r="1"/>
+    <circle cx="770" cy="28" r="1"/><circle cx="830" cy="28" r="1"/>
+  </g>
+
+  <!-- Dot grid bottom -->
+  <g opacity="0.07" fill="#00e5ff">
+    <circle cx="50"  cy="392" r="1"/><circle cx="110" cy="392" r="1"/><circle cx="170" cy="392" r="1"/>
+    <circle cx="230" cy="392" r="1"/><circle cx="290" cy="392" r="1"/><circle cx="350" cy="392" r="1"/>
+    <circle cx="410" cy="392" r="1"/><circle cx="470" cy="392" r="1"/><circle cx="530" cy="392" r="1"/>
+    <circle cx="590" cy="392" r="1"/><circle cx="650" cy="392" r="1"/><circle cx="710" cy="392" r="1"/>
+    <circle cx="770" cy="392" r="1"/><circle cx="830" cy="392" r="1"/>
   </g>
 
   <!-- Corner brackets -->
-  <g stroke="#00e5ff" stroke-width="1.5" fill="none" opacity="0.25">
-    <polyline points="20,50 20,20 50,20"/>
+  <g stroke="#00e5ff" stroke-width="1.5" fill="none" opacity="0.22">
+    <polyline points="20,50  20,20  50,20"/>
     <polyline points="880,50 880,20 850,20"/>
-    <polyline points="20,250 20,280 50,280"/>
-    <polyline points="880,250 880,280 850,280"/>
+    <polyline points="20,370  20,400  50,400"/>
+    <polyline points="880,370 880,400 850,400"/>
   </g>
 
-  <!-- Scanline sweep -->
-  <rect width="900" height="2" class="sc" fill="#00e5ff"/>
-
-  <!-- Glow halo behind BUDDY -->
-  <text x="450" y="125" text-anchor="middle"
-        font-family="'Courier New',monospace" font-weight="900" font-size="84px"
-        letter-spacing="16px" fill="url(#glow-g)" filter="url(#glow)"
-        class="a1">BUDDY</text>
-
-  <!-- BUDDY title -->
-  <g class="gl a1">
-    <text x="450" y="125" text-anchor="middle" class="title">BUDDY</text>
+  <!-- ════════════════════════════════════════════
+       LOGO — centered at x=450, no filter
+       ════════════════════════════════════════════ -->
+  <g font-family="monospace" font-size="22" text-anchor="middle">
+    <text x="450" y="75"  class="r1" fill="#00ffff" style="white-space:pre;">██████╗ ██╗   ██╗██████╗ ██████╗ ██╗   ██╗</text>
+    <text x="450" y="100" class="r2" fill="#00d7ff" style="white-space:pre;">██╔══██╗██║   ██║██╔══██╗██╔══██╗╚██╗ ██╔╝</text>
+    <text x="450" y="125" class="r3" fill="#5fafff" style="white-space:pre;">██████╔╝██║   ██║██║  ██║██║  ██║ ╚████╔╝ </text>
+    <text x="450" y="150" class="r4" fill="#8787ff" style="white-space:pre;">██╔══██╗██║   ██║██║  ██║██║  ██║  ╚██╔╝  </text>
+    <text x="450" y="175" class="r5" fill="#af5fff" style="white-space:pre;">██████╔╝╚██████╔╝██████╔╝██████╔╝   ██║   </text>
+    <text x="450" y="200" class="r6" fill="#875fff" style="white-space:pre;">╚═════╝  ╚═════╝ ╚═════╝ ╚═════╝    ╚═╝   </text>
   </g>
+
+  <!-- ════════════════════════════════════════════
+       All elements below: width=480px
+       center=450  →  x_start=210  x_end=690
+       ════════════════════════════════════════════ -->
+
+  <!-- Separator -->
+  <line x1="210" y1="218" x2="690" y2="218" stroke="#1c1c35" stroke-width="1" class="a2"/>
 
   <!-- CONSCIOUSNESS ESTABLISHED -->
-  <text x="450" y="153" text-anchor="middle" class="sub a2">CONSCIOUSNESS ESTABLISHED</text>
+  <text x="450" y="238" text-anchor="middle" class="sub a2">CONSCIOUSNESS ESTABLISHED</text>
 
-  <!-- Dot progress row (36 dots, 178–718, 15px spacing) -->
-  <!-- Gradient: cyan → mid-purple → violet, matching boot screen -->
-  <g class="a3">
-    <circle cx="178" cy="173" r="2.8" fill="#00e5ff"/>
-    <circle cx="193" cy="173" r="2.8" fill="#08dbf5"/>
-    <circle cx="208" cy="173" r="2.8" fill="#10d1eb"/>
-    <circle cx="223" cy="173" r="2.8" fill="#18c7e1"/>
-    <circle cx="238" cy="173" r="2.8" fill="#25b8d4"/>
-    <circle cx="253" cy="173" r="2.8" fill="#32a8c6"/>
-    <circle cx="268" cy="173" r="2.8" fill="#4095b8"/>
-    <circle cx="283" cy="173" r="2.8" fill="#5080aa"/>
-    <circle cx="298" cy="173" r="2.8" fill="#606098"/>
-    <circle cx="313" cy="173" r="2.8" fill="#703888"/>
-    <circle cx="328" cy="173" r="2.8" fill="#7c3890"/>
-    <circle cx="343" cy="173" r="2.8" fill="#883898"/>
-    <circle cx="358" cy="173" r="2.8" fill="#9440a0"/>
-    <circle cx="373" cy="173" r="2.8" fill="#9f4aa8"/>
-    <circle cx="388" cy="173" r="2.8" fill="#aa54b0"/>
-    <circle cx="403" cy="173" r="2.8" fill="#b25eb8"/>
-    <circle cx="418" cy="173" r="2.8" fill="#ba68bf"/>
-    <circle cx="433" cy="173" r="2.8" fill="#c070c5"/>
-    <circle cx="448" cy="173" r="2.8" fill="#c878cc"/>
-    <circle cx="463" cy="173" r="2.8" fill="#cc80d0"/>
-    <circle cx="478" cy="173" r="2.8" fill="#ce85d2"/>
-    <circle cx="493" cy="173" r="2.8" fill="#ce88d4"/>
-    <circle cx="508" cy="173" r="2.8" fill="#ce8bd6"/>
-    <circle cx="523" cy="173" r="2.8" fill="#ce8ed7"/>
-    <circle cx="538" cy="173" r="2.8" fill="#ce90d8"/>
-    <circle cx="553" cy="173" r="2.8" fill="#ce92d8"/>
-    <circle cx="568" cy="173" r="2.8" fill="#ce93d8"/>
-    <circle cx="583" cy="173" r="2.8" fill="#ce93d8"/>
-    <circle cx="598" cy="173" r="2.8" fill="#ce93d8"/>
-    <circle cx="613" cy="173" r="2.8" fill="#ce93d8"/>
-    <circle cx="628" cy="173" r="2.8" fill="#ce93d8"/>
-    <circle cx="643" cy="173" r="2.8" fill="#ce93d8"/>
-    <circle cx="658" cy="173" r="2.8" fill="#ce93d8"/>
-    <!-- Semi-active -->
-    <circle cx="673" cy="173" r="2.8" fill="none" stroke="#ce93d8" stroke-width="1.2" opacity="0.6"/>
-    <!-- Inactive -->
-    <circle cx="688" cy="173" r="2.8" fill="#161625"/>
-    <circle cx="703" cy="173" r="2.8" fill="#0e0e1a"/>
-    <circle cx="718" cy="173" r="2.8" fill="#0a0a14"/>
-  </g>
+  <!-- ════════════════════════════════════════════
+       DOTS — 33 dots, cx 210→690, step 15
+       (32 steps × 15px = 480px), center=450
+       28 active | 1 semi | 3 inactive = 33 total
+       ════════════════════════════════════════════ -->
 
-  <!-- Status row -->
+  <!-- active dots — cyan to purple gradient -->
+  <circle cx="210" cy="265" r="2.8" fill="#00e5ff" style="opacity:0;transform-box:fill-box;transform-origin:center;animation:dotDrop .42s ease forwards 1.35s,dotWave 2.5s ease-in-out infinite 1.78s"/>
+  <circle cx="225" cy="265" r="2.8" fill="#06daf7" style="opacity:0;transform-box:fill-box;transform-origin:center;animation:dotDrop .42s ease forwards 1.39s,dotWave 2.5s ease-in-out infinite 1.82s"/>
+  <circle cx="240" cy="265" r="2.8" fill="#0dcfef" style="opacity:0;transform-box:fill-box;transform-origin:center;animation:dotDrop .42s ease forwards 1.43s,dotWave 2.5s ease-in-out infinite 1.86s"/>
+  <circle cx="255" cy="265" r="2.8" fill="#18c0e3" style="opacity:0;transform-box:fill-box;transform-origin:center;animation:dotDrop .42s ease forwards 1.47s,dotWave 2.5s ease-in-out infinite 1.90s"/>
+  <circle cx="270" cy="265" r="2.8" fill="#26aed4" style="opacity:0;transform-box:fill-box;transform-origin:center;animation:dotDrop .42s ease forwards 1.51s,dotWave 2.5s ease-in-out infinite 1.94s"/>
+  <circle cx="285" cy="265" r="2.8" fill="#3799c3" style="opacity:0;transform-box:fill-box;transform-origin:center;animation:dotDrop .42s ease forwards 1.55s,dotWave 2.5s ease-in-out infinite 1.98s"/>
+  <circle cx="300" cy="265" r="2.8" fill="#4a82b1" style="opacity:0;transform-box:fill-box;transform-origin:center;animation:dotDrop .42s ease forwards 1.59s,dotWave 2.5s ease-in-out infinite 2.02s"/>
+  <circle cx="315" cy="265" r="2.8" fill="#5d6aa0" style="opacity:0;transform-box:fill-box;transform-origin:center;animation:dotDrop .42s ease forwards 1.63s,dotWave 2.5s ease-in-out infinite 2.06s"/>
+  <circle cx="330" cy="265" r="2.8" fill="#6e528e" style="opacity:0;transform-box:fill-box;transform-origin:center;animation:dotDrop .42s ease forwards 1.67s,dotWave 2.5s ease-in-out infinite 2.10s"/>
+  <circle cx="345" cy="265" r="2.8" fill="#7a3e92" style="opacity:0;transform-box:fill-box;transform-origin:center;animation:dotDrop .42s ease forwards 1.71s,dotWave 2.5s ease-in-out infinite 2.14s"/>
+  <circle cx="360" cy="265" r="2.8" fill="#853d99" style="opacity:0;transform-box:fill-box;transform-origin:center;animation:dotDrop .42s ease forwards 1.75s,dotWave 2.5s ease-in-out infinite 2.18s"/>
+  <circle cx="375" cy="265" r="2.8" fill="#8f3da0" style="opacity:0;transform-box:fill-box;transform-origin:center;animation:dotDrop .42s ease forwards 1.79s,dotWave 2.5s ease-in-out infinite 2.22s"/>
+  <circle cx="390" cy="265" r="2.8" fill="#9844a6" style="opacity:0;transform-box:fill-box;transform-origin:center;animation:dotDrop .42s ease forwards 1.83s,dotWave 2.5s ease-in-out infinite 2.26s"/>
+  <circle cx="405" cy="265" r="2.8" fill="#a050ae" style="opacity:0;transform-box:fill-box;transform-origin:center;animation:dotDrop .42s ease forwards 1.87s,dotWave 2.5s ease-in-out infinite 2.30s"/>
+  <circle cx="420" cy="265" r="2.8" fill="#a85cb5" style="opacity:0;transform-box:fill-box;transform-origin:center;animation:dotDrop .42s ease forwards 1.91s,dotWave 2.5s ease-in-out infinite 2.34s"/>
+  <circle cx="435" cy="265" r="2.8" fill="#b068bc" style="opacity:0;transform-box:fill-box;transform-origin:center;animation:dotDrop .42s ease forwards 1.95s,dotWave 2.5s ease-in-out infinite 2.38s"/>
+  <circle cx="450" cy="265" r="2.8" fill="#b872c2" style="opacity:0;transform-box:fill-box;transform-origin:center;animation:dotDrop .42s ease forwards 1.99s,dotWave 2.5s ease-in-out infinite 2.42s"/>
+  <circle cx="465" cy="265" r="2.8" fill="#be7cc7" style="opacity:0;transform-box:fill-box;transform-origin:center;animation:dotDrop .42s ease forwards 2.03s,dotWave 2.5s ease-in-out infinite 2.46s"/>
+  <circle cx="480" cy="265" r="2.8" fill="#c383cb" style="opacity:0;transform-box:fill-box;transform-origin:center;animation:dotDrop .42s ease forwards 2.07s,dotWave 2.5s ease-in-out infinite 2.50s"/>
+  <circle cx="495" cy="265" r="2.8" fill="#c788ce" style="opacity:0;transform-box:fill-box;transform-origin:center;animation:dotDrop .42s ease forwards 2.11s,dotWave 2.5s ease-in-out infinite 2.54s"/>
+  <circle cx="510" cy="265" r="2.8" fill="#ca8cd1" style="opacity:0;transform-box:fill-box;transform-origin:center;animation:dotDrop .42s ease forwards 2.15s,dotWave 2.5s ease-in-out infinite 2.58s"/>
+  <circle cx="525" cy="265" r="2.8" fill="#cc8fd3" style="opacity:0;transform-box:fill-box;transform-origin:center;animation:dotDrop .42s ease forwards 2.19s,dotWave 2.5s ease-in-out infinite 2.62s"/>
+  <circle cx="540" cy="265" r="2.8" fill="#ce91d5" style="opacity:0;transform-box:fill-box;transform-origin:center;animation:dotDrop .42s ease forwards 2.23s,dotWave 2.5s ease-in-out infinite 2.66s"/>
+  <circle cx="555" cy="265" r="2.8" fill="#ce93d8" style="opacity:0;transform-box:fill-box;transform-origin:center;animation:dotDrop .42s ease forwards 2.27s,dotWave 2.5s ease-in-out infinite 2.70s"/>
+  <circle cx="570" cy="265" r="2.8" fill="#ce93d8" style="opacity:0;transform-box:fill-box;transform-origin:center;animation:dotDrop .42s ease forwards 2.31s,dotWave 2.5s ease-in-out infinite 2.74s"/>
+  <circle cx="585" cy="265" r="2.8" fill="#ce93d8" style="opacity:0;transform-box:fill-box;transform-origin:center;animation:dotDrop .42s ease forwards 2.35s,dotWave 2.5s ease-in-out infinite 2.78s"/>
+  <circle cx="600" cy="265" r="2.8" fill="#ce93d8" style="opacity:0;transform-box:fill-box;transform-origin:center;animation:dotDrop .42s ease forwards 2.39s,dotWave 2.5s ease-in-out infinite 2.82s"/>
+  <circle cx="615" cy="265" r="2.8" fill="#ce93d8" style="opacity:0;transform-box:fill-box;transform-origin:center;animation:dotDrop .42s ease forwards 2.43s,dotWave 2.5s ease-in-out infinite 2.86s"/>
+  <circle cx="630" cy="265" r="2.8" fill="#ce93d8" style="opacity:0;transform-box:fill-box;transform-origin:center;animation:dotDrop .42s ease forwards 2.47s,dotWave 2.5s ease-in-out infinite 2.90s"/>
+  <!-- semi-active -->
+  <circle cx="645" cy="265" r="2.8" fill="none" stroke="#ce93d8" stroke-width="1.2" style="opacity:0;transform-box:fill-box;transform-origin:center;animation:dotDrop .42s ease forwards 2.51s,dotWave 2.5s ease-in-out infinite 2.94s"/>
+  <!-- inactive -->
+  <circle cx="660" cy="265" r="2.8" fill="#161625" style="opacity:0;transform-box:fill-box;transform-origin:center;animation:dotDrop .42s ease forwards 2.55s"/>
+  <circle cx="675" cy="265" r="2.8" fill="#0e0e1a" style="opacity:0;transform-box:fill-box;transform-origin:center;animation:dotDrop .42s ease forwards 2.59s"/>
+  <circle cx="690" cy="265" r="2.8" fill="#0a0a14" style="opacity:0;transform-box:fill-box;transform-origin:center;animation:dotDrop .42s ease forwards 2.63s"/>
+
+  <!-- ════════════════════════════════════════════
+       Status row — left=210, right=690
+       ════════════════════════════════════════════ -->
   <g class="a4">
-    <text x="178" y="195" class="sl">▶  IDENTITY STABLE</text>
-    <text x="722" y="195" text-anchor="end" class="sr">cognitive loop online</text>
+    <text x="210" y="288" class="sl">▶  IDENTITY STABLE</text>
+    <text x="690" y="288" text-anchor="end" class="sr">cognitive loop online</text>
   </g>
 
-  <!-- Progress bar track -->
+  <!-- ════════════════════════════════════════════
+       Progress bar — x=210, width=480, right=690
+       ════════════════════════════════════════════ -->
   <g class="a5">
-    <rect x="178" y="208" width="544" height="13" fill="#08080f" rx="1.5"/>
-    <!-- Animated fill -->
-    <rect x="178" y="208" height="13" fill="url(#bar)" rx="1.5" class="bw"/>
-    <!-- Shimmer block over fill -->
-    <rect x="178" y="208" height="13" fill="url(#bar)" rx="1.5" opacity="0.15" width="544"/>
-    <text x="732" y="219" class="pct">94%</text>
+    <rect x="210" y="300" width="480" height="13" fill="#08080f" rx="1.5"/>
+    <rect x="210" y="300" height="13" fill="url(#bar)" rx="1.5" class="bw"/>
+    <rect x="210" y="300" height="13" fill="url(#bar)" rx="1.5" opacity="0.12" width="480"/>
+    <text x="698" y="311" class="pct">94%</text>
   </g>
 
 </svg>

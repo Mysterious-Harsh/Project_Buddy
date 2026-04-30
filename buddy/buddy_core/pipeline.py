@@ -445,6 +445,9 @@ async def handle_turn(
         logger.warning("handle_turn | missing conversations buffer in artifacts")
         return None
 
+    # Record user input immediately — captured regardless of pipeline outcome
+    conversations.add_user(text=user_message)
+
     # ── Context budget ────────────────────────────────────────
     _base_budget = getattr(state, "context_budget", None)
 
@@ -764,19 +767,18 @@ async def handle_turn(
     mode = decision.get("mode")
     response = str(decision.get("response") or "")
     afterthought = str(decision.get("afterthought") or "")
-    await ui_output(response)
 
     if mode == "CHAT":
-        conversations.add_user(
-            text=user_message,
-        )
-        conversations.add_buddy(
-            text=response,
-        )
+        # Commit to conversation immediately — before any await — so a cancel
+        # during UI output doesn't leave this turn without a Buddy entry.
+        conversations.add_buddy(text=response)
         if afterthought:
             conversations.add_buddy(text=afterthought)
+        await ui_output(response)
+        if afterthought:
             await ui_output(afterthought)
     elif mode == "ACTION":
+        await ui_output(response)
         action_router = ActionRouter(
             brain=brain,
             ui_output=ui_output,
@@ -819,13 +821,8 @@ async def handle_turn(
         response = parsed_respond.get("response")
         memory_candidates = parsed_respond.get("memory_candidates", [])
         if response:
+            conversations.add_buddy(text=response)
             await ui_output(response)
-            conversations.add_user(
-                text=user_message,
-            )
-            conversations.add_buddy(
-                text=response,
-            )
         if memory_candidates and mm:
             progress_cb("Etching it in... ✍️", False)
             _action_arousal = _compute_encoding_arousal(user_message)

@@ -146,7 +146,8 @@ class SystemState:
 
 class VoiceCmd(Enum):
     NONE = "none"
-    STOP = "stop"
+    STOP = "stop"           # cancel the pipeline turn
+    QUIET = "quiet"         # stop TTS voice output only (pipeline keeps running)
     SLEEP = "sleep"
     WAKE = "wake"
     MUTE = "mute"
@@ -158,8 +159,12 @@ def _match_voice_command(text: str) -> VoiceCmd:
     t = text.strip().lower()
     if not t:
         return VoiceCmd.NONE
-    if t in {"stop", "buddy stop", "cancel", "interrupt"}:
+    if t in {"stop", "buddy stop", "stop buddy", "cancel", "buddy cancel",
+             "cancel buddy", "interrupt", "buddy interrupt", "enough", "buddy enough"}:
         return VoiceCmd.STOP
+    if t in {"shut up", "be quiet", "stop talking", "buddy stop talking",
+             "stop speaking", "quiet"}:
+        return VoiceCmd.QUIET
     if t in {"sleep", "buddy sleep", "go to sleep"}:
         return VoiceCmd.SLEEP
     if t in {"wake", "wake up", "buddy wake", "buddy wake up"}:

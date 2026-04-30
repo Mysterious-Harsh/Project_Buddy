@@ -236,6 +236,7 @@ class MainScreen(Screen):
         self._quit_event = asyncio.Event()
         self._last_interrupt_ts = 0.0
         self._last_ctrl_c_ts = 0.0
+        self._interrupt_reason: str = ""
         self._main_loop: Optional[asyncio.AbstractEventLoop] = None
         self._stt: Any = None
         self._idle_timeout_s: float = 20 * 60
@@ -307,19 +308,20 @@ class MainScreen(Screen):
     # ── Interrupt / quit ──────────────────────────────────────────────────────
 
     def _handle_escape(self) -> None:
-        self._request_interrupt()
+        self._request_interrupt("you pressed Escape")
 
-    def _request_interrupt(self) -> None:
+    def _request_interrupt(self, reason: str = "you interrupted me") -> None:
         now = time.monotonic()
         if (now - self._last_interrupt_ts) < 0.75:
             return
         self._last_interrupt_ts = now
+        self._interrupt_reason = reason
         self._interrupt_event.set()
         if self._active_turn and not self._active_turn.done():
             self._active_turn.cancel()
         self._stop_spinner()
         self.query_one(StatusBar).set_hint(f"[{_YELLOW}]⛔ interrupted[/]")
-        logger.info("interrupt: requested via ESC")
+        logger.info("interrupt: requested — reason=%r", reason)
         loop = self._main_loop
         if loop:
             loop.call_soon_threadsafe(self._iq._q.put_nowait, INTERRUPT_SENTINEL)
@@ -342,7 +344,7 @@ class MainScreen(Screen):
             self.app.exit()
         else:
             self._last_ctrl_c_ts = now
-            self._request_interrupt()
+            self._request_interrupt("you pressed Ctrl+C")
             try:
                 self.query_one(StatusBar).set_hint(
                     f"[{_YELLOW}]Ctrl+C again to quit[/]", 2.0
@@ -431,7 +433,10 @@ class MainScreen(Screen):
             running = self._sys_state.pipeline_running
 
         if running and cmd == VoiceCmd.STOP:
-            self._request_interrupt()
+            self._request_interrupt("you asked me to stop")
+            return
+        if cmd == VoiceCmd.QUIET:
+            self._stop_tts()
             return
         if running and cmd == VoiceCmd.NONE:
             return
@@ -565,7 +570,13 @@ class MainScreen(Screen):
                 )
                 logger.info("turn.done id=%s", turn_id)
             except asyncio.CancelledError:
-                logger.info("turn.cancelled id=%s", turn_id)
+                logger.info("turn.cancelled id=%s reason=%r", turn_id, self._interrupt_reason)
+                _convs = getattr(
+                    getattr(self._state, "artifacts", None), "conversations", None
+                )
+                if _convs is not None:
+                    _reason = self._interrupt_reason or "you interrupted me"
+                    _convs.add_buddy_if_unanswered(f"I got interrupted — {_reason}.")
             except Exception as ex:
                 logger.exception("turn.crash id=%s err=%r", turn_id, ex)
                 self.query_one(StatusBar).set_hint(
@@ -731,6 +742,11 @@ class MainScreen(Screen):
         except Exception:
             pass
 
+    def _stop_tts(self) -> None:
+        """Stop TTS voice output immediately. No-op until TTS is wired into the app."""
+        # Wire up: self._tts.interrupt() once TextToSpeech is initialised here.
+        pass
+
     # ── Activity / idle ───────────────────────────────────────────────────────
 
     def _notify_activity(self) -> None:
@@ -844,9 +860,11 @@ class BuddyApp(App):
                 # mic idle is handled by on_segment_end, not here
 
             def on_interrupt() -> None:
-                # Called at speech onset — cancel any active response turn.
+                # Speech detected — update mic UI only.
+                # Pipeline cancellation is word-gated in handle_voice_text;
+                # only "stop" / "cancel" / "buddy stop" etc. will interrupt.
                 if self._main_screen and loop:
-                    loop.call_soon_threadsafe(self._main_screen._handle_voice_interrupt)
+                    loop.call_soon_threadsafe(self._main_screen.set_mic_active)
 
             def on_speech_start() -> None:
                 # Called at speech onset — update mic UI only.

@@ -76,6 +76,27 @@ try:
 except ImportError:
     pass
 
+# Common Whisper hallucinations on short/silent clips — strip these from output.
+# Lowercase; matched against the lowercased, stripped transcription result.
+_HALLUCINATIONS: frozenset = frozenset({
+    "thank you.",
+    "thanks.",
+    "thank you for watching.",
+    "thank you for watching",
+    "thanks for watching.",
+    "thanks for watching",
+    "goodbye.",
+    "bye.",
+    "you.",
+    "you",
+    ".",
+    "...",
+    "[ silence ]",
+    "[silence]",
+    "[ music ]",
+    "[music]",
+})
+
 # =============================================================================
 # Tuning constants
 # =============================================================================
@@ -989,10 +1010,13 @@ class SpeechToText:
     def _on_speech_detected(self) -> None:
         """
         Called by both VAD back-ends the instant real speech is confirmed.
-        Submits on_interrupt (cancel active response) and on_speech_start (mic UI).
-        Beep is NOT played here — it plays at segment end (do_tx=True) so it
-        never bleeds into the recording buffer via acoustic coupling.
+        Plays the confirmation beep immediately so the user knows Buddy is
+        listening, then submits on_interrupt and on_speech_start callbacks.
+        A pure-tone beep at recording onset is not transcribed by Whisper
+        (vad_filter strips it; even without it, a brief sine tone produces
+        no text output).
         """
+        self._play_beep()
         self._cbw.submit(self.on_interrupt)
         self._cbw.submit(self.on_speech_start)
 
@@ -1419,7 +1443,6 @@ class SpeechToText:
             ) or time_rec >= MAX_RECORD_SEC:
                 do_tx = time_rec >= MIN_SPEECH_SEC
                 if do_tx:
-                    self._play_beep()
                     self._enqueue(self._concat_i16(audio_buf), vad_sr)
                 else:
                     self._cbw.submit(self.on_segment_end)
@@ -1589,7 +1612,7 @@ class SpeechToText:
 
             # ── 8. Cooldown gate ──────────────────────────────────────────────
             if now < cooldown_until:
-                if not recording and e < baseline * CEILING_MULT:
+                if e < baseline * CEILING_MULT:
                     baseline = baseline * (1.0 - NOISE_ALPHA) + e * NOISE_ALPHA
                 continue
 
@@ -1732,7 +1755,8 @@ class SpeechToText:
             if (e >= keep_thr) and not impulsive:
                 last_voiced = now
                 below_for = 0.0
-                voiced_frames += 1
+                if self.debug:
+                    voiced_frames += 1
             else:
                 below_for += frame_sec
 
@@ -1756,7 +1780,6 @@ class SpeechToText:
                 do_tx = time_rec >= MIN_SPEECH_SEC and not is_knock
 
                 if do_tx:
-                    self._play_beep()
                     self._enqueue(self._concat_i16(audio_buf), vad_sr)
                 else:
                     self._cbw.submit(self.on_segment_end)
@@ -1849,7 +1872,11 @@ class SpeechToText:
                 beam_size=self.beam_size,
                 vad_filter=self.whisper_vad_filter,
             )
-            return " ".join(s.text.strip() for s in segs if s.text.strip())
+            text = " ".join(s.text.strip() for s in segs if s.text.strip())
+            if text.lower() in _HALLUCINATIONS:
+                logger.debug("[STT] Hallucination filtered: %r", text)
+                return ""
+            return text
         except Exception:
             logger.exception("[STT] Whisper transcription failed")
             return ""
