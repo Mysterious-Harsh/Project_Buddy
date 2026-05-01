@@ -485,7 +485,7 @@ def _build_patterns() -> list[tuple]:
     def media_play(m):
         after = (m.group("after") or "").strip()
         if _play_is_ambiguous(after):
-            return None
+            return QuickAction("play_on_app", {"song": after, "app": "youtube"})
         return QuickAction("media_play")
 
     # FIX: dedicated builder for resume/continue — media_play builder needs "after" group
