@@ -171,7 +171,6 @@ qwen_model = "Qwen/Qwen3-Reranker-0.6B"
 dense_threshold = 0.24
 rerank_threshold = 0.24
 rerank_min_keep = 0
-skip_rerank_above = 0.92
 
 # -----------------------------------------
 # Auto-update

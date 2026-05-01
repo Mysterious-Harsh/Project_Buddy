@@ -1,16 +1,14 @@
-# 🔒 LOCKED — llama_client.py
-# Contract: LlamaClient.generate() / .chat() — streaming + blocking, JSON extraction,
-#           think/gate-marker extraction, interrupt support.
-# Allowed: bug fixes, compatibility patches, perf improvements that preserve the public API.
-# Not allowed: changing generate()/chat()/generate() signatures, removing n_predict /
-#              json_extract / interrupt_event / think / gate_marker params, changing
-#              SSE parsing or _JsonCapture behaviour, altering retry/backoff logic.
 """
-llama.cpp HTTP client — O(n) SSE streaming, incremental JSON capture,
-think-block + gate-marker extraction, JSON repair, interrupt support.
+🔒 LOCKED — llama_client.py
+Contract: LlamaClient.generate() / .chat() — streaming + blocking, JSON extraction,
+think/gate-marker extraction, interrupt support.
+Allowed: bug fixes, compatibility patches, perf improvements that preserve the public API.
+Not allowed: changing generate()/chat() signatures, removing n_predict /
+json_extract / interrupt_event / think / gate_marker params, changing
+SSE parsing or _JsonCapture behaviour, altering retry/backoff logic.
 """
-from __future__ import annotations
 
+from __future__ import annotations
 import json
 import threading
 import time
@@ -21,41 +19,30 @@ import requests
 from requests.adapters import HTTPAdapter
 from requests.exceptions import ConnectionError, HTTPError, ReadTimeout, Timeout
 from urllib3.util.retry import Retry
-from buddy.llm.json_repair import repair_json
-
 from buddy.logger.logger import get_logger
 
 try:
     import orjson  # type: ignore
 
     USE_ORJSON = True
-except Exception:
+except ImportError:
     USE_ORJSON = False
 
 logger = get_logger("llama_client")
 
-# Stop strings: empty by default (pass explicitly if needed)
 DEFAULT_STOP_STRINGS: List[str] = []
-
-# Connection pooling config
 POOL_CONNECTIONS = 4
 POOL_MAXSIZE = 16
-
-# Preview lengths for logging
 _ERR_BODY_PREVIEW = 1200
 _JSON_PREVIEW = 1200
 _JSON_FAILURE_PREVIEW = 400
 
-# Think-block detection constants (used in streaming state machine)
 _THINK_END = "</think>"
-_THINK_TAIL_KEEP = len(_THINK_END) - 1  # overlap chars kept across chunk boundaries
+_THINK_TAIL_KEEP = len(_THINK_END) - 1
 
-# Pre-compiled patterns for JSON diagnosis
-_RE_UNQUOTED_KEYS = re.compile(r"\{\s*[a-zA-Z_]\w*\s*:")
-_RE_TRAILING_COMMA = re.compile(r",\s*[}\]]")
+_RE_UNQUOTED_KEYS = re.compile(r"{\s*[a-zA-Z_]\w*\s*:")
+_RE_TRAILING_COMMA = re.compile(r",\s*[}]]")
 
-# Module-level SSE JSON parser — avoids re-creating a closure on every streaming call.
-# USE_ORJSON is a constant so the right branch is chosen once at import time.
 if USE_ORJSON:
 
     def _sse_loads(b: bytes) -> Any:
@@ -89,7 +76,6 @@ class LlamaStats:
 class _JsonCapture:
     """
     Incremental JSON capture with O(1) buffer tracking.
-
     Supports object {...}, array [...], or either. Returns (captured, remainder)
     when a complete top-level JSON value has been seen.
     """
@@ -108,11 +94,6 @@ class _JsonCapture:
     )
 
     def __init__(self, *, root: str = "object", max_chars: int = 120_000) -> None:
-        """
-        Args:
-            root: "object" | "array" | "either"
-            max_chars: Safety limit to prevent unbounded growth
-        """
         if root not in ("object", "array", "either"):
             raise ValueError("root must be one of: object | array | either")
         self._root = root
@@ -120,9 +101,8 @@ class _JsonCapture:
         self.reset()
 
     def reset(self) -> None:
-        """Reset capture state (call after failed validation to search for next JSON)"""
         self._started = False
-        self._root_ch = ""
+        self._root_ch = " "
         self._depth_obj = 0
         self._depth_arr = 0
         self._in_string = False
@@ -131,7 +111,6 @@ class _JsonCapture:
         self._buf_len = 0
 
     def _root_ok(self, ch: str) -> bool:
-        """Check if character is acceptable root"""
         if self._root == "either":
             return ch in ("{", "[")
         if self._root == "object":
@@ -139,25 +118,15 @@ class _JsonCapture:
         return ch == "["
 
     def _depth_total(self) -> int:
-        """Total nesting depth"""
         return self._depth_obj + self._depth_arr
 
     def started(self) -> bool:
-        """Has JSON root been found?"""
         return self._started
 
     def feed(self, chunk: str) -> Optional[Tuple[str, str]]:
-        """
-        Feed chunk of text, return (captured_json, remainder) when complete.
-
-        Returns:
-            None if JSON not yet complete
-            (json_text, remainder_after_json) when complete
-        """
         if not chunk:
             return None
 
-        # Find acceptable root character
         if not self._started:
             for i, ch in enumerate(chunk):
                 if self._root_ok(ch):
@@ -165,80 +134,95 @@ class _JsonCapture:
                     self._root_ch = ch
                     self._depth_obj = 0
                     self._depth_arr = 0
-
                     s = chunk[i:]
                     self._buf.append(s)
                     self._buf_len += len(s)
-
                     return self._scan_for_end(s)
             return None
 
-        # Already started, accumulate
         self._buf.append(chunk)
         self._buf_len += len(chunk)
 
         if self._buf_len > self._max_chars:
             raise RuntimeError(
-                f"json_capture exceeded max_chars={self._max_chars}"
-                f" (buf_len={self._buf_len})"
+                f"json_capture exceeded max_chars={self._max_chars} "
+                f"(buf_len={self._buf_len})"
             )
 
         return self._scan_for_end(chunk)
 
     def _scan_for_end(self, s: str) -> Optional[Tuple[str, str]]:
-        """
-        Scan newly-added segment to detect JSON completion.
+        in_string = self._in_string
+        escape = self._escape
+        depth_obj = self._depth_obj
+        depth_arr = self._depth_arr
 
-        Returns:
-            (captured_json, remainder) when complete, None otherwise
-        """
-        for j in range(len(s)):
-            ch = s[j]
-
-            if self._in_string:
-                if self._escape:
-                    self._escape = False
+        for j, ch in enumerate(s):
+            if in_string:
+                if escape:
+                    escape = False
                     continue
                 if ch == "\\":
-                    self._escape = True
+                    escape = True
                     continue
                 if ch == '"':
-                    self._in_string = False
+                    in_string = False
                 continue
 
-            # Not in string
             if ch == '"':
-                self._in_string = True
+                in_string = True
                 continue
 
             if ch == "{":
-                self._depth_obj += 1
+                depth_obj += 1
             elif ch == "}":
-                self._depth_obj -= 1
-                if self._depth_obj < 0:
-                    return None  # Malformed
+                depth_obj -= 1
+                if depth_obj < 0:
+                    self._in_string, self._escape, self._depth_obj, self._depth_arr = (
+                        in_string,
+                        escape,
+                        depth_obj,
+                        depth_arr,
+                    )
+                    return None
             elif ch == "[":
-                self._depth_arr += 1
+                depth_arr += 1
             elif ch == "]":
-                self._depth_arr -= 1
-                if self._depth_arr < 0:
-                    return None  # Malformed
+                depth_arr -= 1
+                if depth_arr < 0:
+                    self._in_string, self._escape, self._depth_obj, self._depth_arr = (
+                        in_string,
+                        escape,
+                        depth_obj,
+                        depth_arr,
+                    )
+                    return None
 
-            # Complete when all depths return to zero
-            if self._depth_total() == 0:
+            if depth_obj + depth_arr == 0:
+                self._in_string, self._escape, self._depth_obj, self._depth_arr = (
+                    in_string,
+                    escape,
+                    0,
+                    0,
+                )
                 full = "".join(self._buf)
                 end_pos = len(full) - (len(s) - (j + 1))
                 captured = full[:end_pos]
                 remainder = s[j + 1 :]
                 return captured, remainder
 
+        self._in_string, self._escape, self._depth_obj, self._depth_arr = (
+            in_string,
+            escape,
+            depth_obj,
+            depth_arr,
+        )
         return None
 
 
 def _iter_sse_data_lines(resp: requests.Response, *, chunk_size: int = 4096):
     """
     O(n) SSE parser using offset-based reading.
-
     Uses offset tracking with periodic compaction instead of `del buf[:n]` on every
     line, which avoids the O(n²) behaviour of the naive approach.
 
@@ -262,19 +246,18 @@ def _iter_sse_data_lines(resp: requests.Response, *, chunk_size: int = 4096):
                     offset = 0
                 break
 
-            line = bytes(buf[offset:nl])
+            line = buf[offset:nl]
             offset = nl + 1
 
             if line.endswith(b"\r"):
                 line = line[:-1]
             if not line:
                 continue
-            if not line.startswith(b"data:"):
+            if not line.startswith(b"data: "):
                 continue
 
             yield line[5:].lstrip()
 
-        # Safety: prevent unbounded growth
         if len(buf) > MAX_BUF:
             buf.clear()
             offset = 0
@@ -282,37 +265,28 @@ def _iter_sse_data_lines(resp: requests.Response, *, chunk_size: int = 4096):
 
 
 def _find_plausible_json_root(s: str) -> int:
-    """
-    Find index of plausible JSON root in string.
-
-    Heuristics:
-    - Object: '{' followed by '"' (key) or '}' (empty)
-    - Array: '[' followed by ']', '{', '"', digit, 't', 'f', 'n', '-'
-
-    Returns:
-        Index of plausible root, or -1 if not found
-    """
     n = len(s)
     i = 0
     while i < n:
-        ch = s[i]
-        if ch not in "{[":
-            i += 1
-            continue
+        brace = s.find("{", i)
+        bracket = s.find("[", i)
+        if brace == -1 and bracket == -1:
+            return -1
+        # Pick the earliest candidate
+        idx = brace if brace != -1 and (bracket == -1 or brace < bracket) else bracket
 
-        j = i + 1
+        j = idx + 1
+        # Skip whitespace
         while j < n and s[j] in " \t\r\n":
             j += 1
 
-        if ch == "{":
+        if s[idx] == "{":
             if j < n and (s[j] == '"' or s[j] == "}"):
-                return i
-        else:  # '['
-            if j < n and (s[j] in ']"{' or s[j].isdigit() or s[j] in "tfn-"):
-                return i
-
-        i += 1
-
+                return idx
+        elif s[idx] == "[":
+            if j < n and (s[j] in "]{0123456789" or s[j] in "tfn-"):
+                return idx
+        i = idx + 1
     return -1
 
 
@@ -320,9 +294,7 @@ def _diagnose_json_error(json_text: str) -> str:
     """Diagnose common JSON errors for warning logs."""
     if not json_text:
         return "empty"
-
     issues = []
-
     if _RE_UNQUOTED_KEYS.search(json_text):
         issues.append("unquoted_keys")
     if "'" in json_text and '"' not in json_text:
@@ -345,11 +317,6 @@ def _diagnose_json_error(json_text: str) -> str:
 class LlamaClient:
     """
     llama.cpp HTTP client with streaming JSON extraction and interrupt support.
-
-    - O(n) SSE parsing with incremental _JsonCapture and early stream close
-    - Per-request interrupt events (thread-safe)
-    - JSON validation with repair fallback and think/gate-marker extraction
-    - Connection pooling with keep-alive; orjson fast path when available
     """
 
     __slots__ = (
@@ -363,7 +330,6 @@ class LlamaClient:
         "api_key",
         "_session",
         "_perf",
-        "_mono",
         "_req_counter",
         "_req_lock",
     )
@@ -400,18 +366,11 @@ class LlamaClient:
         self.api_key = api_key
 
         self._session = self._create_session(api_key, session_pool_maxsize)
-
         self._perf = time.perf_counter
-        self._mono = time.monotonic
-
         self._req_counter = 0
         self._req_lock = threading.Lock()
 
-    # --------------------------
-    # Session & Request IDs
-    # --------------------------
     def _next_req_id(self) -> str:
-        """Generate unique request ID"""
         with self._req_lock:
             self._req_counter += 1
             c = self._req_counter
@@ -420,7 +379,6 @@ class LlamaClient:
         return f"llm-{ms}-{c}-{tid}"
 
     def _create_session(self, api_key: Optional[str], maxsize: int) -> requests.Session:
-        """Create optimized session with connection pooling"""
         s = requests.Session()
         s.trust_env = False
 
@@ -434,7 +392,6 @@ class LlamaClient:
             headers["Authorization"] = f"Bearer {api_key}"
         s.headers.update(headers)
 
-        # Disable adapter retries (we handle retries manually with better logging)
         retry = Retry(
             total=0,
             connect=0,
@@ -455,29 +412,20 @@ class LlamaClient:
         return s
 
     def _stream_timeout(self) -> Tuple[float, float]:
-        """Get (connect_timeout, read_timeout) for streaming"""
         connect_t = 3.0
         if isinstance(self.timeout, tuple) and len(self.timeout) == 2:
             connect_t = float(self.timeout[0])
         elif isinstance(self.timeout, (int, float)):
             connect_t = float(self.timeout)
-
         read_t = float(self.stream_idle_timeout)
         return (connect_t, read_t)
 
-    # --------------------------
-    # Control
-    # --------------------------
     def close(self) -> None:
-        """Close session and cleanup"""
         try:
             self._session.close()
         except Exception:
             pass
 
-    # --------------------------
-    # Public API
-    # --------------------------
     def chat(
         self,
         *,
@@ -494,53 +442,14 @@ class LlamaClient:
         options: Optional[Dict[str, Any]] = None,
         on_delta: Optional[Callable[[str], None]] = None,
         interrupt_event: Optional[threading.Event] = None,
-        # Vision: data URIs for multimodal input ["data:image/jpeg;base64,...", ...]
-        # Injected into the last user message as OAI content array (image_url entries).
-        # Supports multiple images — one entry per image.
         images: Optional[List[str]] = None,
-        # JSON extraction (streaming-optimized, mirrors generate())
         json_extract: bool = False,
         json_validate: bool = False,
         json_root: str = "object",
         json_max_chars: int = 120_000,
-        # Think + gate: wait for </think> before JSON capture; look for gate_marker
-        # before scanning for JSON (None = scan directly after think/start).
         think: bool = True,
         gate_marker: Optional[str] = None,
     ) -> Tuple[str, str]:
-        """
-        Chat completion endpoint (/v1/chat/completions).
-
-        Args:
-            messages: Conversation history [{"role": "user", "content": "..."}]
-            system: Optional system message
-            stream: Enable streaming (faster TTFB)
-            temperature: Sampling temperature (0.0 = greedy)
-            max_tokens: Maximum tokens to generate
-            top_p: Nucleus sampling threshold
-            repeat_penalty: Repetition penalty
-            repeat_last_n: Look back N tokens for repetition
-            seed: Random seed for reproducibility
-            stop: Stop sequences (string or list)
-            options: Additional model-specific options
-            on_delta: Callback for streaming chunks
-            interrupt_event: Event to cancel request (thread-safe)
-            images: Data URIs for vision input (["data:image/png;base64,...", ...]).
-                    Injected into the last user message as image_url content blocks.
-            json_extract: Extract first valid JSON object/array from stream
-            json_validate: Validate extracted JSON (retries if invalid)
-            json_root: "object" | "array" | "either"
-            json_max_chars: Safety limit for JSON buffer
-            think: When True (default), wait for </think> before JSON capture.
-            gate_marker: When set, wait for this marker after think before scanning
-                         for JSON. When None (default), scan directly.
-
-        Returns:
-            Tuple of (think_block, text_or_json). think_block is the raw
-            <think>...</think> content (empty string if none). text_or_json
-            is the extracted JSON if json_extract=True, otherwise raw text
-            after the think block.
-        """
         if not messages:
             raise ValueError("messages must be non-empty")
 
@@ -559,7 +468,6 @@ class LlamaClient:
             images=images,
         )
 
-        # Streaming JSON extraction setup (mirrors generate())
         json_capture = None
         if stream and json_extract:
             json_capture = _JsonCapture(root=json_root, max_chars=int(json_max_chars))
@@ -575,20 +483,17 @@ class LlamaClient:
             gate_marker=gate_marker,
         )
 
-        # Normalize: separate think_block from post-think text
         think_block = ""
         post_text = text
         if think:
-            _idx = text.lower().find("</think>")
+            _idx = text.find("</think>")
             if _idx != -1:
                 think_block = text[: _idx + len("</think>")]
                 post_text = text[_idx + len("</think>") :]
             elif _raw_think:
-                # Streaming+json_extract: think block captured separately, text is JSON
                 think_block = _raw_think
                 post_text = text
 
-        # Blocking mode JSON extraction
         if json_extract and not stream:
             _src = post_text
             if gate_marker:
@@ -622,7 +527,6 @@ class LlamaClient:
         stop: Optional[Union[str, List[str]]] = None,
         options: Optional[Dict[str, Any]] = None,
         on_delta: Optional[Callable[[str], None]] = None,
-        # JSON extraction (streaming-optimized)
         json_extract: bool = False,
         json_validate: bool = False,
         json_root: str = "object",
@@ -631,38 +535,6 @@ class LlamaClient:
         think: bool = True,
         gate_marker: Optional[str] = None,
     ) -> Tuple[str, str]:
-        """
-        Text completion endpoint (/completions).
-
-        Args:
-            prompt: Input prompt
-            system: Optional system context (prepended to prompt)
-            stream: Enable streaming
-            temperature: Sampling temperature
-            max_tokens: Maximum tokens
-            n_predict: Alternative to max_tokens (llama.cpp specific)
-            top_p: Nucleus sampling
-            repeat_penalty: Repetition penalty
-            repeat_last_n: Repetition window
-            seed: Random seed
-            stop: Stop sequences
-            options: Additional options
-            on_delta: Streaming callback
-            json_extract: Extract first valid JSON object/array
-            json_validate: Validate extracted JSON (retries if invalid)
-            json_root: "object" | "array" | "either"
-            json_max_chars: Safety limit for JSON buffer
-            interrupt_event: Cancellation event
-            think: When True (default), wait for </think> before JSON capture.
-            gate_marker: When set, wait for this marker after think before scanning
-                         for JSON. When None (default), scan directly.
-
-        Returns:
-            Tuple of (think_block, text_or_json). think_block is the raw
-            <think>...</think> content (empty string if none). text_or_json
-            is the extracted JSON if json_extract=True, otherwise raw text
-            after the think block.
-        """
         if prompt is None:
             raise ValueError("prompt must be a string")
 
@@ -678,15 +550,12 @@ class LlamaClient:
         }
 
         user_opts: Dict[str, Any] = dict(options or {})
-
-        # Stop handling
         if stop is None:
             if "stop" not in user_opts and DEFAULT_STOP_STRINGS:
                 user_opts["stop"] = DEFAULT_STOP_STRINGS[:]
         else:
             user_opts["stop"] = stop
 
-        # Token limits
         if n_predict is not None:
             user_opts["n_predict"] = int(n_predict)
             user_opts.pop("max_tokens", None)
@@ -705,16 +574,10 @@ class LlamaClient:
 
         payload.update(user_opts)
 
-        # Streaming JSON extraction setup
         json_capture = None
         if stream and json_extract:
             json_capture = _JsonCapture(root=json_root, max_chars=int(json_max_chars))
 
-        # Always use the native /completion endpoint — it accepts all llama.cpp
-        # parameters (repeat_penalty, repeat_last_n, n_predict, etc.) without
-        # restriction. Newer llama.cpp builds reject these on /v1/completions
-        # because that endpoint is now strictly OpenAI-spec only (400 Bad Request).
-        # Response parsing already handles the native {"content": "..."} format.
         text, _raw_think = self._call(
             endpoint="/completion",
             payload=payload,
@@ -726,20 +589,17 @@ class LlamaClient:
             gate_marker=gate_marker,
         )
 
-        # Normalize: separate think_block from post-think text
         think_block = ""
         post_text = text
         if think:
-            _idx = text.lower().find("</think>")
+            _idx = text.find("</think>")
             if _idx != -1:
                 think_block = text[: _idx + len("</think>")]
                 post_text = text[_idx + len("</think>") :]
             elif _raw_think:
-                # Streaming+json_extract: think block captured separately, text is JSON
                 think_block = _raw_think
                 post_text = text
 
-        # Blocking mode JSON extraction
         if json_extract and not stream:
             _src = post_text
             if gate_marker:
@@ -758,22 +618,14 @@ class LlamaClient:
         return think_block, post_text
 
     def warmup(self) -> bool:
-        """
-        Warm up model with small requests.
-
-        Returns:
-            True if successful, False otherwise
-        """
         try:
             t0 = self._perf()
-
             self.chat(
                 messages=[{"role": "user", "content": "ready"}],
                 stream=False,
                 temperature=0.0,
                 max_tokens=1,
             )
-
             if self.debug:
                 logger.info(
                     "llama warmup ok: model=%s time=%.3fs",
@@ -785,9 +637,6 @@ class LlamaClient:
             logger.warning("llama warmup failed: model=%s err=%r", self.model, e)
             return False
 
-    # --------------------------
-    # Payload Building
-    # --------------------------
     def _build_chat_payload(
         self,
         *,
@@ -804,17 +653,10 @@ class LlamaClient:
         options: Optional[Dict[str, Any]],
         images: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
-        """Build chat completion payload.
-
-        When images (data URIs) are provided, the last user message's content is
-        converted from a plain string into an OAI multimodal content array:
-          [{"type": "text", "text": "..."}, {"type": "image_url", "image_url": {"url": "data:..."}}, ...]
-        """
         final_msgs: List[Dict[str, Any]] = list(messages)
         if system:
             final_msgs = [{"role": "system", "content": system}] + final_msgs
 
-        # Inject images into last user message as OAI multimodal content array
         if images:
             for i in range(len(final_msgs) - 1, -1, -1):
                 if final_msgs[i].get("role") == "user":
@@ -833,10 +675,8 @@ class LlamaClient:
             "stream": bool(stream),
             "temperature": float(temperature),
         }
-
         if options:
             payload.update(options)
-
         if max_tokens is not None:
             payload["max_tokens"] = int(max_tokens)
             payload.pop("n_predict", None)
@@ -854,36 +694,28 @@ class LlamaClient:
         else:
             if "stop" not in payload and DEFAULT_STOP_STRINGS:
                 payload["stop"] = DEFAULT_STOP_STRINGS[:]
-
         return payload
 
     def _dumps(self, payload: Dict[str, Any]) -> bytes:
-        """Serialize payload to JSON bytes (uses orjson if available)"""
         if USE_ORJSON:
             return orjson.dumps(payload)
         return json.dumps(payload, ensure_ascii=False).encode("utf-8")
 
     def _loads(self, b: bytes) -> Any:
-        """Deserialize JSON bytes (uses orjson if available)"""
         if USE_ORJSON:
             return orjson.loads(b)
         return json.loads(b.decode("utf-8", errors="replace"))
 
-    # --------------------------
-    # Diagnostics
-    # --------------------------
     def _payload_summary(
         self, payload: Dict[str, Any], endpoint: str
     ) -> Dict[str, Any]:
-        """Generate payload summary for logging"""
         stream = bool(payload.get("stream", False))
-        temp = payload.get("temperature", None)
-        max_tokens = payload.get("max_tokens", None)
-        n_predict = payload.get("n_predict", None)
-        stop = payload.get("stop", None)
+        temp = payload.get("temperature")
+        max_tokens = payload.get("max_tokens")
+        n_predict = payload.get("n_predict")
+        stop = payload.get("stop")
+        msg_count = msg_chars = prompt_chars = None
 
-        msg_count = None
-        msg_chars = None
         if "messages" in payload and isinstance(payload.get("messages"), list):
             msgs = payload["messages"]
             msg_count = len(msgs)
@@ -894,12 +726,11 @@ class LlamaClient:
             except Exception:
                 msg_chars = None
 
-        prompt_chars = None
         if "prompt" in payload:
             try:
                 prompt_chars = len(str(payload.get("prompt", "")))
             except Exception:
-                prompt_chars = None
+                pass
 
         return {
             "endpoint": endpoint,
@@ -920,7 +751,6 @@ class LlamaClient:
         }
 
     def _log_http_response_debug(self, req_id: str, resp: requests.Response) -> None:
-        """Log HTTP response details (debug mode only)"""
         if not self.debug:
             return
         try:
@@ -939,19 +769,15 @@ class LlamaClient:
             pass
 
     def _preview_bytes(self, b: bytes, limit: int) -> str:
-        """Create preview of bytes for logging"""
         if not b:
             return ""
         try:
             s = b.decode("utf-8", errors="replace")
         except Exception:
             s = repr(b)
-        if len(s) > limit:
-            return s[:limit] + "…(truncated)"
-        return s
+        return s if len(s) <= limit else s[:limit] + "…(truncated)"
 
     def _json_try_load(self, s: str) -> bool:
-        """Test if string is valid JSON"""
         try:
             if USE_ORJSON:
                 orjson.loads(s)
@@ -962,15 +788,10 @@ class LlamaClient:
             return False
 
     def _json_try_repair(self, s: str) -> Optional[str]:
-        """
-        Attempt to repair broken JSON text and return a compact valid JSON string.
-        Returns None if repair fails.
-        """
         try:
-            # repair_json may return dict if return_dict=True
-            obj = repair_json(s, return_dict=True)
+            from buddy.llm.json_repair import repair_json
 
-            # Normalize output (compact) using fastest encoder available
+            obj = repair_json(s, return_dict=True)
             if USE_ORJSON:
                 return orjson.dumps(obj).decode("utf-8")
             return json.dumps(obj, ensure_ascii=False)
@@ -978,22 +799,13 @@ class LlamaClient:
             return None
 
     def _extract_first_json_value(
-        self,
-        text: str,
-        *,
-        root: str,
-        validate: bool,
-        max_chars: int,
+        self, text: str, *, root: str, validate: bool, max_chars: int
     ) -> Optional[str]:
         if not text:
             return None
-
         cap = _JsonCapture(root=root, max_chars=int(max_chars))
-
-        # Feed full text in one pass — text is already in memory, chunking gains nothing.
-        # On invalid JSON try the remainder once (handles multiple JSON objects in text).
         pending: Optional[str] = text
-        for _ in range(2):  # at most 2 attempts: main text, then remainder
+        for _ in range(2):
             if pending is None:
                 break
             res = cap.feed(pending)
@@ -1009,16 +821,10 @@ class LlamaClient:
                 return repaired
             cap.reset()
             pending = remainder or None
-
         return None
 
-    # --------------------------
-    # Core Request Logic
-    # --------------------------
     @dataclass(frozen=True)
     class _RawStats:
-        """Internal statistics before enrichment"""
-
         total_s: float
         ttfb_s: Optional[float]
         chunks: int
@@ -1037,14 +843,12 @@ class LlamaClient:
         endpoint: str,
         payload: Dict[str, Any],
         on_delta: Optional[Callable[[str], None]],
-        json_capture: Optional[_JsonCapture] = None,
-        json_validate: bool = False,
-        interrupt_event: Optional[threading.Event] = None,
-        think: bool = True,
-        gate_marker: Optional[str] = None,
+        json_capture: Optional[_JsonCapture],
+        json_validate: bool,
+        interrupt_event: Optional[threading.Event],
+        think: bool,
+        gate_marker: Optional[str],
     ) -> Tuple[str, str]:
-        """Execute request with retry logic. Thread-safe: each request gets its own interrupt_event."""
-        # Create per-request interrupt if not provided
         if interrupt_event is None:
             interrupt_event = threading.Event()
 
@@ -1061,7 +865,6 @@ class LlamaClient:
             )
 
         last_err: Optional[Exception] = None
-
         for attempt in range(self.max_retries + 1):
             try:
                 if want_stream:
@@ -1136,7 +939,6 @@ class LlamaClient:
                         rs.json_attempts,
                         self.model,
                     )
-
                 return text, rs.think_block
 
             except (
@@ -1149,7 +951,6 @@ class LlamaClient:
                 RuntimeError,
             ) as ex:
                 last_err = ex
-
                 logger.warning(
                     "llama call_error: req_id=%s endpoint=%s attempt=%d/%d err=%r",
                     req_id,
@@ -1158,21 +959,14 @@ class LlamaClient:
                     self.max_retries + 1,
                     ex,
                 )
-
-                if interrupt_event.is_set():
+                if interrupt_event.is_set() or attempt >= self.max_retries:
                     break
-                if attempt >= self.max_retries:
-                    break
-
                 time.sleep(self.backoff_base * (2**attempt))
 
         raise RuntimeError(
             f"llama call failed req_id={req_id} after retries={attempt}: {last_err!r}"
         ) from last_err
 
-    # --------------------------
-    # Blocking Request
-    # --------------------------
     def _request_blocking(
         self,
         *,
@@ -1181,17 +975,13 @@ class LlamaClient:
         payload: Dict[str, Any],
         interrupt_event: threading.Event,
     ) -> Tuple[str, _RawStats]:
-        """Execute blocking (non-streaming) request"""
         perf = self._perf
         t0 = perf()
-
         body = self._dumps(payload)
-
         resp: Optional[requests.Response] = None
         try:
             resp = self._session.post(url, data=body, timeout=self._stream_timeout())
             self._log_http_response_debug(req_id, resp)
-
             if resp.status_code >= 400:
                 preview = self._preview_bytes(resp.content or b"", _ERR_BODY_PREVIEW)
                 logger.error(
@@ -1202,7 +992,6 @@ class LlamaClient:
                 )
                 resp.raise_for_status()
 
-            # Parse response
             try:
                 data = self._loads(resp.content)
             except Exception as je:
@@ -1225,13 +1014,11 @@ class LlamaClient:
                 )
                 data = {}
 
-            # Check for server error
             if "error" in data and isinstance(data.get("error"), dict):
                 err = data["error"]
                 msg = err.get("message") if isinstance(err, dict) else None
                 raise RuntimeError(f"llama server_error req_id={req_id}: {msg!r}")
 
-            # Extract text and metadata
             text, finish_reason = self._extract_text_openai(data)
             pt, ct, tt = self._extract_usage_openai(data)
 
@@ -1246,10 +1033,8 @@ class LlamaClient:
                     finish_reason or "-",
                 )
 
-            # Extract think block from raw text
             _tb = ""
-            _tl = text.lower()
-            _ti = _tl.find("</think>")
+            _ti = text.lower().find("</think>")
             if _ti != -1:
                 _tb = text[: _ti + len("</think>")]
 
@@ -1264,7 +1049,6 @@ class LlamaClient:
                 total_tokens=tt,
                 think_block=_tb,
             )
-
         finally:
             try:
                 if resp is not None:
@@ -1272,9 +1056,6 @@ class LlamaClient:
             except Exception:
                 pass
 
-    # --------------------------
-    # Streaming Request (SSE)
-    # --------------------------
     def _request_streaming(
         self,
         *,
@@ -1285,8 +1066,8 @@ class LlamaClient:
         json_capture: Optional[_JsonCapture],
         json_validate: bool,
         interrupt_event: threading.Event,
-        think: bool = True,
-        gate_marker: Optional[str] = None,
+        think: bool,
+        gate_marker: Optional[str],
     ) -> Tuple[str, _RawStats]:
         perf = self._perf
         interrupt_check = interrupt_event.is_set
@@ -1301,12 +1082,9 @@ class LlamaClient:
 
         out_parts: List[str] = []
         out_append = out_parts.append
-
         finish_reason: Optional[str] = None
         pt = ct = tt = None
-
         body = self._dumps(payload)
-
         resp: Optional[requests.Response] = None
 
         cap = json_capture
@@ -1328,7 +1106,6 @@ class LlamaClient:
                 url, data=body, stream=True, timeout=self._stream_timeout()
             )
             self._log_http_response_debug(req_id, resp)
-
             if resp.status_code >= 400:
                 preview = self._preview_bytes(resp.content or b"", _ERR_BODY_PREVIEW)
                 logger.error(
@@ -1338,8 +1115,6 @@ class LlamaClient:
                     preview,
                 )
                 resp.raise_for_status()
-
-            resp.raise_for_status()
 
             for data_part in _iter_sse_data_lines(resp, chunk_size=4096):
                 if interrupt_check():
@@ -1354,7 +1129,6 @@ class LlamaClient:
                     done_seen = True
                     break
 
-                # Parse SSE data
                 try:
                     obj = _sse_loads(data_part)
                     if not isinstance(obj, dict):
@@ -1370,7 +1144,6 @@ class LlamaClient:
                         )
                     continue
 
-                # Check for server error in stream
                 if "error" in obj and isinstance(obj.get("error"), dict):
                     err = obj["error"]
                     msg = err.get("message") if isinstance(err, dict) else None
@@ -1378,12 +1151,10 @@ class LlamaClient:
                         f"llama server_error(stream) req_id={req_id}: {msg!r}"
                     )
 
-                # Extract content delta
                 piece, fr = self._extract_delta_openai(obj)
                 if fr is not None:
                     finish_reason = fr
 
-                # Extract usage if present
                 usage = obj.get("usage")
                 if isinstance(usage, dict):
                     _pt, _ct, _tt = self._extract_usage_openai(obj)
@@ -1396,7 +1167,6 @@ class LlamaClient:
 
                 if not piece:
                     continue
-
                 if t_first is None:
                     t_first = perf()
                 chunks += 1
@@ -1412,22 +1182,17 @@ class LlamaClient:
                                 chunks,
                                 e,
                             )
-                        # Continue streaming despite callback failure
 
-                # Capture think block (all chunks until </think> is found)
                 if not think_block_sealed:
                     think_block_parts.append(piece)
 
-                # Buffer output (unless JSON gate has closed)
                 if cap is None or not gate_open:
                     out_append(piece)
 
-                # JSON extraction with think detection + parameterized gate
                 if cap is not None and not have_valid_json:
                     res = None
                     _json_piece = piece
 
-                    # PHASE 1: wait for </think>
                     if not think_passed:
                         scan = think_tail + _json_piece
                         idx = scan.find(_THINK_END)
@@ -1442,11 +1207,9 @@ class LlamaClient:
                         think_block_sealed = True
                         think_tail = ""
                         _json_piece = scan[idx + len(_THINK_END) :]
-                        # If no gate marker needed, open the gate now
                         if gate_marker_str is None:
                             gate_open = True
 
-                    # PHASE 2: wait for gate marker (only when gate still closed)
                     if not gate_open and gate_marker_str is not None:
                         scan = gate_tail + _json_piece
                         idx = scan.find(gate_marker_str)
@@ -1469,7 +1232,6 @@ class LlamaClient:
                         _json_piece = after[root_i:]
                         res = cap.feed(_json_piece)
                     else:
-                        # PHASE 3: gate open, accumulate JSON
                         if not cap.started():
                             scan = gate_tail + _json_piece
                             root_i = _find_plausible_json_root(scan)
@@ -1489,17 +1251,14 @@ class LlamaClient:
                     while res is not None and not have_valid_json:
                         captured, remainder = res
                         json_attempts += 1
-
                         if not json_validate:
                             have_valid_json = True
                             valid_json_text = captured
                             break
-
                         if json_try_load(captured):
                             have_valid_json = True
                             valid_json_text = captured
                             break
-
                         repaired = self._json_try_repair(captured)
                         if repaired is not None:
                             have_valid_json = True
@@ -1532,8 +1291,6 @@ class LlamaClient:
                         )
 
                         cap.reset()
-
-                        # search for next JSON in remainder
                         if remainder:
                             root_i = _find_plausible_json_root(remainder)
                             if root_i != -1:
@@ -1551,7 +1308,6 @@ class LlamaClient:
                     if have_valid_json:
                         client_early_stop = True
                         break
-
         finally:
             try:
                 if resp is not None:
@@ -1559,18 +1315,15 @@ class LlamaClient:
             except Exception:
                 pass
 
-        # Final text: use extracted JSON if valid, otherwise full output
         text = (
             valid_json_text
             if (have_valid_json and valid_json_text)
             else "".join(out_parts)
         )
-
         dt = perf() - t0
         ttfb = (t_first - t0) if t_first is not None else None
 
-        # Warn if stream ended unexpectedly
-        if (not done_seen) and (not client_early_stop):
+        if not done_seen and not client_early_stop:
             logger.warning(
                 "llama stream_end_without_done: req_id=%s chunks=%d out_len=%d"
                 " finish=%s json_attempts=%d",
@@ -1581,7 +1334,6 @@ class LlamaClient:
                 json_attempts,
             )
 
-        # Extract clean think block (everything up through </think>)
         if think_block_parts:
             _raw_think = "".join(think_block_parts)
             _te = _raw_think.lower().find("</think>")
@@ -1603,100 +1355,69 @@ class LlamaClient:
             think_block=think_blk,
         )
 
-    # --------------------------
-    # OpenAI Format Extraction
-    # --------------------------
     @staticmethod
     def _extract_usage_openai(
         obj: Dict[str, Any],
     ) -> Tuple[Optional[int], Optional[int], Optional[int]]:
-        """Extract token usage from response"""
         usage = obj.get("usage")
         if not usage or not isinstance(usage, dict):
             return None, None, None
-
         pt = usage.get("prompt_tokens")
         ct = usage.get("completion_tokens")
         tt = usage.get("total_tokens")
-
         try:
-            prompt_tokens = int(pt) if pt is not None else None
-            completion_tokens = int(ct) if ct is not None else None
-            total_tokens = int(tt) if tt is not None else None
-            return prompt_tokens, completion_tokens, total_tokens
+            return (
+                int(pt) if pt is not None else None,
+                int(ct) if ct is not None else None,
+                int(tt) if tt is not None else None,
+            )
         except (ValueError, TypeError):
             return None, None, None
 
     @staticmethod
     def _extract_text_openai(obj: Dict[str, Any]) -> Tuple[str, Optional[str]]:
-        """Extract text from blocking response.
-
-        Handles two response shapes:
-        - OAI /v1/completions & /v1/chat/completions: {"choices": [...]}
-        - Native llama.cpp /completion: {"content": "...", "stop": true}
-        """
         choices = obj.get("choices")
         if choices and isinstance(choices, list):
             c0 = choices[0]
             if isinstance(c0, dict):
                 fr = c0.get("finish_reason")
                 finish_reason = str(fr) if fr is not None else None
-
                 t = c0.get("text")
                 if isinstance(t, str) and t:
                     return t, finish_reason
-
                 msg = c0.get("message")
                 if isinstance(msg, dict):
                     content = msg.get("content")
                     if isinstance(content, str) and content:
                         return content, finish_reason
-
                 return "", finish_reason
-
-        # Fallback: native llama.cpp /completion format {"content": "...", "stop": true}
         native = obj.get("content")
         if isinstance(native, str):
             stop = obj.get("stop")
-            finish_reason = "stop" if stop else None
-            return native, finish_reason
-
+            return native, "stop" if stop else None
         return "", None
 
     @staticmethod
     def _extract_delta_openai(obj: Dict[str, Any]) -> Tuple[str, Optional[str]]:
-        """Extract delta from streaming chunk.
-
-        Handles two streaming shapes:
-        - OAI SSE: {"choices": [{"delta": {"content": "..."}, "finish_reason": null}]}
-        - Native llama.cpp /completion SSE: {"content": "...", "stop": false}
-        """
         choices = obj.get("choices")
         if choices and isinstance(choices, list):
             c0 = choices[0]
             if isinstance(c0, dict):
                 fr = c0.get("finish_reason")
                 finish_reason = str(fr) if fr is not None else None
-
                 t = c0.get("text")
                 if isinstance(t, str) and t:
                     return t, finish_reason
-
                 delta = c0.get("delta")
                 if isinstance(delta, dict):
                     content = delta.get("content")
                     if isinstance(content, str) and content:
                         return content, finish_reason
-
                 return "", finish_reason
-
-        # Fallback: native llama.cpp /completion streaming {"content": "...", "stop": false}
         native = obj.get("content")
         if isinstance(native, str):
             stop = obj.get("stop")
-            finish_reason = "stop" if stop else None
-            return native, finish_reason
-
+            return native, "stop" if stop else None
         return "", None
 
 
@@ -1724,12 +1445,12 @@ if __name__ == "__main__":
 
     try:
         print("\n[stream completion w/ json_extract+validate]")
-        out = client.generate(
+        think, out = client.generate(
             prompt=test_brain_prompt,
             stream=True,
-            temperature=0.6,
+            temperature=0.4,
             top_p=0.96,
-            repeat_last_n=256,
+            repeat_last_n=64,
             repeat_penalty=1.0,
             on_delta=on_print,
             json_extract=True,
@@ -1737,7 +1458,6 @@ if __name__ == "__main__":
             json_root="object",
             stop=["<|im_end|>"],
         )
-        print("\n---\nEXTRACTED:\n", out)
-
+        print("\n---\nEXTRACTED:\n", think, out)
     finally:
         client.close()

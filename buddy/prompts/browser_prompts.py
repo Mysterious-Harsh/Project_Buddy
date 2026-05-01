@@ -212,11 +212,21 @@ TOOL_DESCRIPTION: Control a web browser one action at a time. The attached JPEG 
    6.4 Never target off-screen elements by coords — scroll first.
 
 7. COMPLETION AND FAILURE
-   7.1 done → only after visually confirming a success indicator on the page.
+   7.1 done → call when the page or URL confirms the goal is met. Do NOT keep acting.
    7.2 error → only after all recovery options are exhausted.
+   7.3 URL-BASED DONE TRIGGERS — call done immediately when current_url confirms success:
+       • Task involves "play/watch/open video" AND current_url contains "/watch?v=" → done
+       • Task involves "search for X" AND search results page is visible with results → done
+       • Task involves "go to / navigate to / open" a URL AND that URL is loaded → done
+       • Task involves "fill form / submit" AND page shows confirmation or success → done
+   7.4 TRUST <progress>. If <progress> already records a step as successful (e.g. navigated
+       to video page, clicked a video link), do NOT redo it or go back to search. Move forward
+       or call done.
 
 8. SUMMARY FIELD
-   8.1 Copy <progress> exactly as-is, then append what you did in this step in past tense.
+   8.1 <progress> contains authoritative step records in format [step=N fn=X url=Y] summary.
+       Append what you did in this step in past tense AFTER the existing progress. Never omit
+       or replace the earlier [step=...] records — they are ground truth.
    8.2 First step (no <progress>): write only what you did in past tense.
    8.3 Always include: Gate decisions, errors encountered, retries attempted.
 

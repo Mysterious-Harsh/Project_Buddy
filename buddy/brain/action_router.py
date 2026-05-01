@@ -344,15 +344,29 @@ class ActionRouter:
             on_token("Drawing up a plan...", False)
         while True:
 
-            planner_payload = await asyncio.to_thread(
-                self.brain.run_planner,
-                active_task=self.stack.appendix,
-                planner_instructions=planner_instructions,
-                available_tools=available_tools_str,
-                memories=memories,
-                stream=True,
-                llm_options=llm_options,
-            )
+            try:
+                planner_payload = await asyncio.to_thread(
+                    self.brain.run_planner,
+                    active_task=self.stack.appendix,
+                    planner_instructions=planner_instructions,
+                    available_tools=available_tools_str,
+                    memories=memories,
+                    stream=True,
+                    llm_options=llm_options,
+                )
+            except Exception as exc:
+                logger.warning("planner_llm_exception: %r", exc)
+                self.stack.clear()
+                return {
+                    "now_iso": now_iso,
+                    "timezone": timezone,
+                    "planner": {},
+                    "responder_instruction": (
+                        "Buddy's planning failed due to an internal error. "
+                        "Tell the user something went wrong and ask them to try again."
+                    ),
+                    "step_execution_map": {},
+                }
             planner_parsed = planner_payload.get("parsed") or planner_payload or {}
             _status = str(planner_parsed.get("status") or "").strip().lower()
 
@@ -558,16 +572,29 @@ class ActionRouter:
 
                 # 1) Ask executor for tool_call (or followup/abort)
                 t0 = time.perf_counter()
-                exec_payload = await asyncio.to_thread(
-                    self.brain.run_executor,
-                    instruction=instruction_json,
-                    prior_outputs=prior_outputs_json,
-                    step_followups=self.stack.appendix,
-                    step_errors=self.errors.appendix,
-                    tool_prompt=tool_prompt,
-                    stream=True,
-                    llm_options=llm_options,
-                )
+                try:
+                    exec_payload = await asyncio.to_thread(
+                        self.brain.run_executor,
+                        instruction=instruction_json,
+                        prior_outputs=prior_outputs_json,
+                        step_followups=self.stack.appendix,
+                        step_errors=self.errors.appendix,
+                        tool_prompt=tool_prompt,
+                        stream=True,
+                        llm_options=llm_options,
+                    )
+                except Exception as exc:
+                    exec_ms = int((time.perf_counter() - t0) * 1000)
+                    logger.warning(
+                        "step %d attempt %d executor_llm_exception dt_ms=%d err=%r",
+                        step_id, attempt, exec_ms, exc,
+                    )
+                    self.errors.add(
+                        tool_result={"OK": False, "ERROR": f"Executor LLM call raised: {exc}"},
+                        attempt=attempt,
+                    )
+                    attempt += 1
+                    continue
                 exec_ms = int((time.perf_counter() - t0) * 1000)
 
                 exec_result = exec_payload.get("parsed") or {}

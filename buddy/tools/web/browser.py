@@ -30,7 +30,7 @@ _TYPE_DELAY = (0.05, 0.15)
 _FOCUS_DELAY = 0.15  # s — wait after click-to-focus before typing
 _SCROLL_STEP_PX = 200
 _SCROLL_STEP_DELAY = (0.1, 0.3)
-_MEMORY_TOP_K = 3
+_MEMORY_TOP_K = 4
 _NAV_DETECT_TIMEOUT = 5_000  # ms — wait for post-click navigation
 _LOOP_HISTORY_SIZE = 3
 _DEFAULT_SCROLL_PX = 300
@@ -38,12 +38,20 @@ _HUMAN_TYPE_PAUSE_INTERVAL = 5
 _CLICK_MOVE_DELAY = (0.10, 0.20)
 
 # Actions that are exempt from infinite-loop detection
-_LOOP_EXEMPT: frozenset = frozenset(
-    {"wait", "scroll", "fetch_memory", "ask_user", "done", "error"}
-)
+_LOOP_EXEMPT: frozenset = frozenset({
+    "wait",
+    "scroll",
+    "fetch_memory",
+    "ask_user",
+    "done",
+    "error",
+    "hover",
+    "press_key",
+})
 
-# Compiled once — detects CSS metacharacters in a selector target
-_CSS_META = re.compile(r"[\[\]#.>~+:()\\/]")
+# Compiled once — detects CSS metacharacters in a selector target.
+# | is the CSS namespace separator and causes parse errors in locator().
+_CSS_META = re.compile(r"[\[\]#.>~+:()\\/|]")
 
 # Selector regex patterns — compiled once to avoid per-call overhead
 _RE_HAS_TEXT_OR_CONTAINS = re.compile(r":(?:has-text|contains)\(['\"]([^'\"]+)['\"]\)")
@@ -69,7 +77,7 @@ _JS_CLICK_SEARCH = """(text) => {
     const tags = [
         'a', 'button', 'input[type="submit"]', 'input[type="button"]',
         '[role="button"]', '[role="link"]', '[role="menuitem"]',
-        '[role="tab"]', 'span', 'div', 'li', 'td', 'th', 'label'
+        '[role="tab"]', 'label', 'span', 'li', 'div'
     ];
     const lc = text.toLowerCase();
     for (const sel of tags) {
@@ -183,7 +191,7 @@ class BrowserTool:
     async def execute(
         self,
         function: str = "",
-        arguments: Dict[str, Any] = {},
+        arguments: Optional[Dict[str, Any]] = None,
         brain: Any = None,
         memory_manager: Any = None,
         on_progress: Optional[Callable[[str, bool], None]] = None,
@@ -192,6 +200,7 @@ class BrowserTool:
         **_kwargs: Any,
     ) -> Dict[str, Any]:
         fn = (function or "").strip().lower()
+        arguments = arguments or {}
         if "/" in fn:
             fn = fn.split("/")[-1]
 
@@ -232,6 +241,7 @@ class BrowserTool:
         url = _normalize_url(str(args.get("url") or "").strip())
         task = str(args.get("task") or "").strip()
         headless = bool(args.get("headless", False))
+        max_actions = max(1, int(args.get("max_actions", _MAX_ACTIONS)))
 
         if not task:
             return {"OK": False, "ERROR": "task is required"}
@@ -273,6 +283,7 @@ class BrowserTool:
                 on_progress=on_progress,
                 ui_output=ui_output,
                 ui_input=ui_input,
+                max_actions=max_actions,
             )
         except Exception as exc:
             result = {"OK": False, "ERROR": str(exc)}
@@ -282,6 +293,20 @@ class BrowserTool:
 
         _ie = getattr(brain, "_interrupt_event", None) if brain else None
         interrupted = _ie is not None and _ie.is_set()
+
+        # Always save the session BEFORE closing the context — the fire-and-forget
+        # create_task() path races with _close_browser() and loses every time.
+        # We save on every exit (success AND failure) so a successful mid-task login
+        # is never thrown away just because a later step failed.
+        if not interrupted and self._ctx is not None:
+            try:
+                open_pages = [p for p in self._ctx.pages if not p.is_closed()]
+                save_url = open_pages[-1].url if open_pages else url
+                save_domain = _domain(save_url)
+                if save_domain:
+                    await _save_session_now(self._ctx, save_domain)
+            except Exception as _se:
+                logger.warning("browser: pre-close session save error: %r", _se)
 
         # Close strategy:
         #   interrupted                 → always close (user cancelled — no retry)
@@ -312,6 +337,7 @@ class BrowserTool:
         on_progress: Optional[Callable],
         ui_output: Optional[Callable] = None,
         ui_input: Optional[Callable] = None,
+        max_actions: int = _MAX_ACTIONS,
     ) -> Dict[str, Any]:
         if url:
             nav_err = await _navigate(page, url)
@@ -325,12 +351,22 @@ class BrowserTool:
         progress_summary = ""
         memory_ctx: Dict[str, str] = {}
         memory_str = ""  # recomputed only when memory_ctx changes
+
+        # Pre-seed memory from the task description so step-1 context is richer.
+        if memory_manager and task:
+            _pre = _search_memory(memory_manager, task)
+            if _pre:
+                memory_ctx["task_context"] = _pre
+                memory_str = f"task_context={_pre}"
+                logger.info("browser: pre-seeded memory for task")
+
         ask_history: collections.deque = collections.deque(maxlen=20)
         consecutive_errors = 0
         last_error = ""
         action_history: collections.deque = collections.deque(maxlen=_LOOP_HISTORY_SIZE)
+        url_visit_count: collections.Counter = collections.Counter()
 
-        for step in range(1, _MAX_ACTIONS + 1):
+        for step in range(1, max_actions + 1):
             _ie = getattr(brain, "_interrupt_event", None)
             if _ie is not None and _ie.is_set():
                 logger.info("browser: interrupted at step=%d — exiting loop", step)
@@ -342,7 +378,7 @@ class BrowserTool:
                 }
 
             if on_progress:
-                on_progress(f"Step {step}/{_MAX_ACTIONS}…", False)
+                on_progress(f"Step {step}/{max_actions}…", False)
 
             page = await _get_active_page(ctx, page)
 
@@ -353,9 +389,42 @@ class BrowserTool:
                 page.title(),
             )
             page_url = page.url
+            url_visit_count[page_url] += 1
+            if url_visit_count[page_url] >= 4 and step > 4:
+                logger.warning(
+                    "browser: oscillation detected at step=%d — url=%r visited %d"
+                    " times",
+                    step,
+                    page_url,
+                    url_visit_count[page_url],
+                )
+                return {
+                    "OK": False,
+                    "ACTION": "run_task",
+                    "ERROR": (
+                        f"Stuck oscillating — returned to {page_url!r}"
+                        f" {url_visit_count[page_url]} times without completing task."
+                    ),
+                    "STEPS": step,
+                }
+
             dom_hints = f"[current_url={page_url}] [page_title={page_title!r}]" + (
                 "\n" + dom_hints if dom_hints else ""
             )
+
+            # CAPTCHA gate — pause and wait for human resolution before continuing.
+            if await _has_captcha(page):
+                logger.warning(
+                    "browser: CAPTCHA detected at step=%d url=%r", step, page_url
+                )
+                await _ask_user(
+                    "⚠️ CAPTCHA detected. Please solve it in the browser window, "
+                    "then press Enter to continue.",
+                    ui_output=ui_output,
+                    ui_input=ui_input,
+                )
+                await asyncio.sleep(2.0)
+                continue
 
             try:
                 act = await asyncio.to_thread(
@@ -367,6 +436,7 @@ class BrowserTool:
                     dom_hints=dom_hints,
                     ask_history=list(ask_history),
                     last_error=last_error,
+                    consecutive_errors=consecutive_errors,
                 )
             except Exception as exc:
                 consecutive_errors += 1
@@ -391,14 +461,14 @@ class BrowserTool:
 
             fn = act.get("function", "error")
             arguments = act.get("arguments", {})
-            progress_summary = act.get("summary") or progress_summary
+            model_summary = act.get("summary") or ""
             last_error = ""
 
             logger.info(
                 "browser step=%d function=%s summary=%r",
                 step,
                 fn,
-                progress_summary[:80],
+                model_summary[:80],  # ← was incorrectly logging progress_summary
             )
 
             fields = arguments.get("fields")
@@ -424,15 +494,16 @@ class BrowserTool:
                 }
 
             if fn == "done":
-                save_domain = domain or _domain(page.url)
-                if save_domain:
-                    _save_session(ctx, save_domain)
-                answer = await _ask_user(
-                    "Done! Want me to close the browser, or keep it open for now?",
-                    ui_output=ui_output,
-                    ui_input=ui_input,
-                )
-                keep_open = not _parse_close_intent(answer)
+                progress_summary = model_summary or progress_summary
+                domain = _domain(page.url) or domain  # capture final domain for caller
+                keep_open = False
+                if ui_output is not None and ui_input is not None:
+                    answer = await _ask_user(
+                        "Done! Want me to close the browser, or keep it open for now?",
+                        ui_output=ui_output,
+                        ui_input=ui_input,
+                    )
+                    keep_open = not _parse_close_intent(answer)
                 return {
                     "OK": True,
                     "ACTION": "run_task",
@@ -443,22 +514,33 @@ class BrowserTool:
                 }
 
             if fn == "error":
+                progress_summary = model_summary or progress_summary
                 reason = str(arguments.get("reason", "")).strip()
                 error_msg = reason or progress_summary or "micro-planner reported error"
+                consecutive_errors += 1
+                last_error = f"micro-planner error: {error_msg}"
                 logger.warning(
-                    "browser micro-planner error at step=%d: %r act=%r",
+                    "browser micro-planner error at step=%d: %r consecutive=%d",
                     step,
                     error_msg,
-                    act,
+                    consecutive_errors,
                 )
-                return {
-                    "OK": False,
-                    "ACTION": "run_task",
-                    "ERROR": error_msg,
-                    "STEPS": step,
-                }
+                if consecutive_errors >= _MAX_RETRIES:
+                    return {
+                        "OK": False,
+                        "ACTION": "run_task",
+                        "ERROR": (
+                            f"Micro-planner failed {_MAX_RETRIES}× consecutively."
+                            f" Last: {error_msg}"
+                        ),
+                        "STEPS": step,
+                    }
+                await asyncio.sleep(random.uniform(*_ACTION_DELAY))
+                continue
 
             if fn == "fetch_memory":
+                consecutive_errors = 0  # successfully handled — reset streak
+                progress_summary = model_summary or progress_summary
                 query = str(arguments.get("query", "")).strip()
                 if query not in memory_ctx:
                     found = _search_memory(memory_manager, query)
@@ -482,12 +564,14 @@ class BrowserTool:
                             memory_str = "; ".join(
                                 f"{k}={v}" for k, v in memory_ctx.items()
                             )
-                            _store_memory(memory_manager, query, answer)
+
                             ask_history.append({"q": q_text, "a": answer})
                 await asyncio.sleep(random.uniform(*_ACTION_DELAY))
                 continue
 
             if fn == "ask_user":
+                consecutive_errors = 0  # successfully handled — reset streak
+                progress_summary = model_summary or progress_summary
                 question = (
                     str(arguments.get("question", "")).strip() or progress_summary
                 )
@@ -539,14 +623,23 @@ class BrowserTool:
                         logger.debug(
                             "browser: navigation detected → new url=%s", page.url
                         )
-            else:
+            elif not err:
                 await asyncio.sleep(random.uniform(*_ACTION_DELAY))
+
+            # Annotate progress with authoritative step+URL AFTER navigation so
+            # the model sees the real final URL (critical for watch-URL done triggers).
+            if not err:
+                progress_summary = (
+                    f"[step={step} fn={fn} url={page.url}] {model_summary}"
+                    if model_summary
+                    else f"[step={step} fn={fn} url={page.url}] {progress_summary}"
+                )
 
         return {
             "OK": False,
             "ACTION": "run_task",
-            "ERROR": f"Reached max {_MAX_ACTIONS} actions without completing task",
-            "STEPS": _MAX_ACTIONS,
+            "ERROR": f"Reached max {max_actions} actions without completing task",
+            "STEPS": max_actions,
         }
 
     # ----------------------------------------------------------
@@ -762,6 +855,16 @@ async def _headless_page(url: str):
     try:
         yield page
     finally:
+        # Save session before teardown so fill_form / screenshot_query logins persist.
+        try:
+            open_pages = [p for p in ctx.pages if not p.is_closed()]
+            final_url = open_pages[-1].url if open_pages else url
+            save_domain = _domain(final_url)
+            if save_domain and save_domain not in ("about:blank", ""):
+                await _save_session_now(ctx, save_domain)
+        except Exception as _se:
+            logger.debug("browser: headless session save error: %r", _se)
+        await _safe_close(ctx)  # close context before browser
         await _safe_close(browser)
         await _safe_close(pw)
 
@@ -803,6 +906,12 @@ async def _get_active_page(ctx: Any, current_page: Any) -> Any:
             await new_page.wait_for_load_state("domcontentloaded", timeout=8_000)
             await _wait_for_interactive(new_page)
             _register_dialog_handler(new_page)
+            # Apply stealth to tabs opened by the page itself (window.open, target=_blank)
+            if _STEALTH is not None:
+                try:
+                    await _STEALTH.apply_stealth_async(new_page)
+                except Exception:
+                    pass
             logger.info("browser: switched to new tab url=%s", new_page.url)
             return new_page
     except Exception as exc:
@@ -879,6 +988,27 @@ async def _execute_action(
             raw_ms = arguments.get("timeout_ms", _ELEMENT_TIMEOUT)
             ms = int(raw_ms) if str(raw_ms).isdigit() else _ELEMENT_TIMEOUT
             return await _do_wait(page, selector, ms)
+        if function == "press_key":
+            key = str(arguments.get("key", "")).strip()
+            if not key:
+                return "press_key: key is required (e.g. Enter, Tab, Escape)"
+            await page.keyboard.press(key)
+            return None
+        if function == "select_option":
+            return await _do_select(
+                page,
+                str(arguments.get("selector", "")),
+                value=str(arguments.get("value", "")),
+                label=str(arguments.get("label", "")),
+            )
+        if function == "hover":
+            return await _do_hover(page, str(arguments.get("selector", "")))
+        if function == "drag":
+            return await _do_drag(
+                page,
+                str(arguments.get("source", "")),
+                str(arguments.get("target", "")),
+            )
         return f"Unknown function: {function!r}"
     except Exception as exc:
         return str(exc)
@@ -908,6 +1038,10 @@ async def _do_fill(page: Any, target: str, value: str) -> Optional[str]:
             await el.wait_for(state="visible", timeout=_ELEMENT_TIMEOUT)
             await el.scroll_into_view_if_needed(timeout=2_000)
             await el.click()
+            await asyncio.sleep(0.05)
+            await page.keyboard.press("Control+a")  # select all existing content
+            await asyncio.sleep(0.05)
+            await page.keyboard.press("Delete")  # clear it before typing
             await _human_type(page, value)
             return None
         except Exception:
@@ -970,6 +1104,59 @@ async def _do_wait(page: Any, target: str, timeout_ms: int) -> Optional[str]:
         return str(exc)
 
 
+async def _do_select(
+    page: Any, target: str, value: str = "", label: str = ""
+) -> Optional[str]:
+    """Select a <select> dropdown option by value or visible label."""
+    if not target:
+        return "select_option: target is required"
+    if not value and not label:
+        return "select_option: value or label is required"
+    for loc in _locator_chain(page, target):
+        try:
+            el = loc.first
+            await el.wait_for(state="visible", timeout=_ELEMENT_TIMEOUT)
+            await el.scroll_into_view_if_needed(timeout=2_000)
+            if label:
+                await el.select_option(label=label)
+            else:
+                await el.select_option(value=value)
+            return None
+        except Exception:
+            continue
+    return f"select_option: element not found — {target!r}"
+
+
+async def _do_hover(page: Any, target: str) -> Optional[str]:
+    """Hover over an element (reveals hover-only menus, tooltips, etc.)."""
+    if not target:
+        return "hover: target is required"
+    for loc in _locator_chain(page, target):
+        try:
+            el = loc.first
+            await el.wait_for(state="visible", timeout=_ELEMENT_TIMEOUT)
+            await el.scroll_into_view_if_needed(timeout=2_000)
+            await el.hover()
+            await asyncio.sleep(random.uniform(0.3, 0.6))
+            return None
+        except Exception:
+            continue
+    return f"hover: element not found — {target!r}"
+
+
+async def _do_drag(page: Any, source: str, target: str) -> Optional[str]:
+    """Drag source element onto target element."""
+    if not source or not target:
+        return "drag: source and target selectors are required"
+    try:
+        src_loc = page.locator(source).first
+        tgt_loc = page.locator(target).first
+        await src_loc.drag_to(tgt_loc)
+        return None
+    except Exception as exc:
+        return str(exc)
+
+
 async def _submit_form(page: Any) -> Optional[str]:
     for sel in (
         "input[type='submit']",
@@ -984,9 +1171,9 @@ async def _submit_form(page: Any) -> Optional[str]:
         "button:has-text('Log in')",
     ):
         try:
-            loc = page.locator(sel).first
-            if await loc.count() > 0:
-                await loc.click()
+            loc = page.locator(sel)
+            if await loc.count() > 0:  # count() on full locator, not .first
+                await loc.first.click()
                 await asyncio.sleep(_PAGE_SETTLE)
                 return None
         except Exception:
@@ -1035,6 +1222,9 @@ async def _fill_by_coord_search(page: Any, target: str, value: str) -> Optional[
         logger.info("browser: mouse fallback fill %r → %s", hint, coords)
         await _human_click(page, *coords)
         await asyncio.sleep(_FOCUS_DELAY)
+        await page.keyboard.press("Control+a")
+        await asyncio.sleep(0.05)
+        await page.keyboard.press("Delete")
         await _human_type(page, value)
         return None
     return f"fill: element not found — {target!r}"
@@ -1238,6 +1428,19 @@ async def _wait_for_interactive(page: Any, timeout_ms: int = 8_000) -> None:
         pass
 
 
+async def _has_captcha(page: Any) -> bool:
+    """Return True if a CAPTCHA widget is visible on the current page."""
+    try:
+        count = await page.locator(
+            "iframe[src*='recaptcha'], iframe[src*='hcaptcha'], "
+            "iframe[src*='turnstile'], .g-recaptcha, .h-captcha, "
+            "[data-sitekey], #cf-turnstile"
+        ).count()
+        return count > 0
+    except Exception:
+        return False
+
+
 # ==========================================================
 # Screenshot — JPEG only (STB does not support WebP)
 # ==========================================================
@@ -1317,7 +1520,11 @@ async def _launch_browser(pw: Any, headless: bool) -> Any:
 
 async def _make_context(browser: Any, url: str) -> Any:
     domain = _domain(url)
+    root = _root_domain(domain)
+    # Try full domain first, then root domain (handles subdomain cross-loading).
     sf = _session_path(domain)
+    if not sf.exists():
+        sf = _session_path(root)
     kwargs: Dict[str, Any] = {
         "viewport": {"width": 1280, "height": 800},
         "device_scale_factor": 1,
@@ -1328,7 +1535,7 @@ async def _make_context(browser: Any, url: str) -> Any:
     }
     if sf.exists():
         kwargs["storage_state"] = str(sf)
-        logger.info("browser: loaded session for %s", domain)
+        logger.info("browser: loaded session for %s (file=%s)", domain, sf.name)
     return await browser.new_context(**kwargs)
 
 
@@ -1340,19 +1547,32 @@ async def _new_page(ctx: Any) -> Any:
 
 
 def _save_session(ctx: Any, domain: str) -> None:
-    """Fire-and-forget session save — errors are non-fatal."""
+    """Fire-and-forget session save — use _save_session_now() when you can await."""
 
     async def _save() -> None:
-        try:
-            _SESSION_DIR.mkdir(parents=True, exist_ok=True)
-            await ctx.storage_state(path=str(_session_path(domain)))
-        except Exception as exc:
-            logger.warning("browser: session save failed: %r", exc)
+        await _save_session_now(ctx, domain)
 
     try:
-        asyncio.ensure_future(_save(), loop=asyncio.get_running_loop())
+        asyncio.create_task(_save())
     except RuntimeError:
         pass
+
+
+async def _save_session_now(ctx: Any, domain: str) -> None:
+    """Awaitable session save — call this before closing ctx to avoid the race."""
+    try:
+        _SESSION_DIR.mkdir(parents=True, exist_ok=True)
+        root = _root_domain(domain)
+        path = _session_path(root)
+        await ctx.storage_state(path=str(path))
+        # Also write under the full subdomain key so both lookups hit.
+        if root != domain:
+            import shutil as _shutil
+
+            _shutil.copy2(path, _session_path(domain))
+        logger.info("browser: session saved for %s → %s", domain, path.name)
+    except Exception as exc:
+        logger.warning("browser: session save failed: %r", exc)
 
 
 # ==========================================================
@@ -1361,9 +1581,14 @@ def _save_session(ctx: Any, domain: str) -> None:
 
 
 def _normalize_url(url: str) -> str:
-    if url and "://" not in url:
-        return "https://" + url
-    return url
+    if not url:
+        return url
+    if "://" in url:
+        return url
+    # Local dev servers run plain HTTP — don't force HTTPS on them.
+    if url.startswith(("localhost", "127.0.0.1", "0.0.0.0", "::1")):
+        return "http://" + url
+    return "https://" + url
 
 
 def _domain(url: str) -> str:
@@ -1378,6 +1603,23 @@ def _session_path(domain: str) -> Path:
     return _SESSION_DIR / f"{h}.json"
 
 
+def _root_domain(domain: str) -> str:
+    """
+    Return the registrable root domain so sessions are shared across subdomains.
+    accounts.google.com  → google.com
+    www.amazon.co.uk     → amazon.co.uk  (handles two-part TLDs naively)
+    localhost            → localhost
+    """
+    parts = domain.split(".")
+    if len(parts) <= 2:
+        return domain
+    # Naive two-part TLD detection: if the last part is 2 chars (e.g. "uk"),
+    # treat the last 3 parts as the root (e.g. amazon.co.uk).
+    if len(parts[-1]) == 2 and len(parts) >= 3:
+        return ".".join(parts[-3:])
+    return ".".join(parts[-2:])
+
+
 # ==========================================================
 # Memory helpers
 # ==========================================================
@@ -1387,22 +1629,13 @@ def _search_memory(memory_manager: Any, query: str) -> Optional[str]:
     if not memory_manager or not query:
         return None
     try:
-        hits = memory_manager.search_candidates(query_text=query, top_k=_MEMORY_TOP_K)
-        if hits:
-            text = getattr(hits[0], "memory_text", None) or str(hits[0])
-            return text.strip() or None
+        return memory_manager.get_memory_context_multi(
+            query_text=[query], top_k=_MEMORY_TOP_K
+        )
+
     except Exception as exc:
         logger.warning("browser: memory search failed: %r", exc)
     return None
-
-
-def _store_memory(memory_manager: Any, key: str, value: str) -> None:
-    if not memory_manager:
-        return
-    try:
-        memory_manager.add_text(f"{key}: {value}", memory_type="flash", salience=0.6)
-    except Exception as exc:
-        logger.warning("browser: memory store failed: %r", exc)
 
 
 # ==========================================================

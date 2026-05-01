@@ -73,7 +73,9 @@ def build_retrieval_prompt(
     msg_block = (
         f"<|im_start|>user\n{current_message}\n\nNow, think which informations or"
         " memories do you need most to give best possible response or to fullfil the"
-        " user request as the closest friend.\n<|im_end|>"
+        " request or task as the closest friend.\nTry to remember what do you know"
+        " about user and related information (preferences, habits, goals, context) or"
+        " any stuff regarding the message or query or task.\n<|im_end|>"
     )
 
     parts = [sys_block]

@@ -4,16 +4,20 @@
 # Sits at the top of handle_turn(). Returns None for anything ambiguous → Brain takes over.
 #
 # Supported intent categories:
-#   Media      : play, pause, resume, toggle, next, prev, skip, play-on-app
+#   Media      : play, pause, resume, toggle, next, prev, skip, play-on-app, search-on-app
 #   Volume     : up, down, set, mute, max, min
 #   Power      : sleep, hibernate, lock, shutdown, restart, logout
 #   Display    : brightness up/down/set, dark mode, night mode/shift
 #   Network    : wifi on/off/toggle, bluetooth on/off/toggle
-#   Focus      : do not disturb on/off, focus mode
-#   Screenshot : take screenshot
+#   Focus      : do not disturb on/off, focus mode, quiet mode
+#   Screenshot : take screenshot, capture screen, print screen
 #   Quick Info : time, date, battery
 #   Folders    : open downloads / desktop / documents / home
 #   App launch : open / launch / start / restart <app>
+#   App quit   : quit / force quit / kill / exit <app>
+#   URL open   : open / go to / visit <url>
+#   Timer      : set timer for N seconds/minutes/hours
+#   Math       : what is N plus/minus/times/divided by M
 
 from __future__ import annotations
 
@@ -22,6 +26,7 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import unicodedata
 from dataclasses import dataclass, field
@@ -41,12 +46,8 @@ _IS_LIN = _PLATFORM.startswith("linux")
 
 # ══════════════════════════════════════════════════════════════════════════════
 # §1  TEXT NORMALISATION
-#     Goal: collapse every surface variation into a clean, punctuation-free,
-#     lower-case string so patterns stay short and unambiguous.
 # ══════════════════════════════════════════════════════════════════════════════
 
-# Expand common contractions before stripping punctuation so e.g.
-# "don't disturb" → "do not disturb" rather than "dont disturb".
 _CONTRACTIONS: dict[str, str] = {
     "can't": "cannot",
     "can't": "cannot",
@@ -66,10 +67,12 @@ _CONTRACTIONS: dict[str, str] = {
     "it's": "it is",
     "what's": "what is",
     "there's": "there is",
+    "whats": "what is",
+    "hows": "how is",
+    "today's": "todays",   # FIX: preserve "todays date" through punct strip
+    "today's": "todays",
 }
 
-# Filler prefixes — stripped iteratively so stacked forms work:
-#   "hey buddy can you please just open spotify" → "open spotify"
 _PREFIX_RE = re.compile(
     r"^("
     r"(hey|hi|yo|okay|ok)\s+buddy[,\s]*|"
@@ -88,24 +91,35 @@ _PREFIX_RE = re.compile(
 
 _SUFFIX_RE = re.compile(
     r"[\s,]*(for\s+me|please|thanks|thank\s+you|cheers|"
-    r"right\s+now|immediately|quickly|asap)[.!?]*$",
+    r"right\s+now|immediately|quickly|asap|now)[.!?]*$",
     re.IGNORECASE,
 )
 
-_PUNCT_RE = re.compile(r"[^\w\s]")
+# \x00 is used as a temporary placeholder for protected dots — must not be stripped.
+_PUNCT_RE = re.compile(r"[^\w\s\x00]")
+
+# Protect dots flanked by word chars (URLs, decimals) before punct stripping.
+# "youtube.com" → "youtube\x00com" → (punct strip skips \x00) → "youtube.com"
+_WORD_DOT_RE = re.compile(r"(?<=\w)\.(?=\w)")
+
+# Strip URL protocols before normalization so "https://google.com" → "google.com".
+_URL_PROTO_RE = re.compile(r"https?://", re.IGNORECASE)
+
+_APP_ARTICLE_RE = re.compile(r"^(the|my|an?)\s+", re.IGNORECASE)
 
 
 def normalize(text: str) -> str:
     """Lowercase, Unicode-fold, expand contractions, strip filler, collapse spaces."""
     t = text.strip()
-    # Unicode: café → cafe, curly quotes → straight, etc.
     t = unicodedata.normalize("NFKD", t).encode("ascii", "ignore").decode()
     t = t.lower()
-    # Expand contractions before stripping punctuation
+    t = _URL_PROTO_RE.sub("", t)  # strip https:// / http:// before dot protection
     for src, dst in _CONTRACTIONS.items():
         t = t.replace(src, dst)
+    # Protect intra-word dots (URLs, decimals) before stripping punctuation
+    t = _WORD_DOT_RE.sub("\x00", t)
     t = _PUNCT_RE.sub(" ", t)
-    # Iteratively strip stacked filler prefixes
+    t = t.replace("\x00", ".")   # restore protected dots
     prev = None
     while prev != t:
         prev = t
@@ -116,12 +130,14 @@ def normalize(text: str) -> str:
 
 # ══════════════════════════════════════════════════════════════════════════════
 # §2  AMBIGUITY DETECTION
-#     Co-referential pronouns → always fall through to Brain.
 # ══════════════════════════════════════════════════════════════════════════════
 
+# FIX: narrow coref so bare "this/that" only blocks when followed by a media noun.
+# "log out of this computer" must NOT be blocked; "play this song" must be.
 _COREF_RE = re.compile(
-    r"\b(this|that|it|these|those|"
-    r"the\s+(song|one|video|track|album|playlist|artist|file|app|thing))\b",
+    r"\b(this|that)\s+(song|one|video|track|album|playlist|artist|file|app|thing)\b"
+    r"|\b(these|those)\b"
+    r"|\bthe\s+(song|one|video|track|album|playlist|artist|file|app|thing)\b",
     re.IGNORECASE,
 )
 
@@ -132,30 +148,41 @@ _GENERIC_PLAY = re.compile(
 
 _ON_APP_RE = re.compile(r"\bon\s+\w+$", re.IGNORECASE)
 
+_AMBIGUOUS_APP_RE = re.compile(
+    r"^(my\s+browser|a\s+new\s+window|a\s+file|a\s+folder|a\s+tab|"
+    r"something|anything|an?\s+app)$",
+    re.IGNORECASE,
+)
+
+# Guard against restart_app / quit_app swallowing device-level commands
+_DEVICE_RE = re.compile(
+    r"^(my\s+|the\s+)?(computer|pc|mac|machine|laptop|device)$", re.IGNORECASE
+)
+
 
 def _play_is_ambiguous(after_play: str) -> bool:
     s = after_play.strip()
     if not s:
-        return False  # bare "play" → toggle
+        return False
     if _GENERIC_PLAY.match(s):
         return False
     if _ON_APP_RE.search(s):
-        return False  # "Blinding Lights on Spotify" — handled by play_on_app
-    return True  # specific content without app → Brain
+        return False
+    return True
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 # §3  APP ALIAS TABLE
-#     Maps casual / mistyped names → canonical app names per platform.
 # ══════════════════════════════════════════════════════════════════════════════
 
-# Platform-agnostic aliases (resolved before platform dispatch)
 _APP_ALIASES: dict[str, str] = {
     # Browsers
     "chrome": "Google Chrome",
+    "google chrome": "Google Chrome",
     "firefox": "Firefox",
     "safari": "Safari",
     "edge": "Microsoft Edge",
+    "microsoft edge": "Microsoft Edge",
     "brave": "Brave Browser",
     # Music / media
     "spotify": "Spotify",
@@ -163,6 +190,7 @@ _APP_ALIASES: dict[str, str] = {
     "youtube": "YouTube",
     "ytm": "YouTube Music",
     "youtubemusic": "YouTube Music",
+    "youtube music": "YouTube Music",
     "apple music": "Music",
     "itunes": "Music",
     "vlc": "VLC",
@@ -171,8 +199,11 @@ _APP_ALIASES: dict[str, str] = {
     "vscode": "Visual Studio Code",
     "code": "Visual Studio Code",
     "vs code": "Visual Studio Code",
+    "visual studio code": "Visual Studio Code",
     "word": "Microsoft Word",
+    "microsoft word": "Microsoft Word",
     "excel": "Microsoft Excel",
+    "microsoft excel": "Microsoft Excel",
     "powerpoint": "Microsoft PowerPoint",
     "ppt": "Microsoft PowerPoint",
     "onenote": "Microsoft OneNote",
@@ -182,9 +213,11 @@ _APP_ALIASES: dict[str, str] = {
     "slack": "Slack",
     "discord": "Discord",
     "teams": "Microsoft Teams",
+    "microsoft teams": "Microsoft Teams",
     "zoom": "Zoom",
     "mail": "Mail",
     "outlook": "Microsoft Outlook",
+    "microsoft outlook": "Microsoft Outlook",
     # System (macOS)
     "finder": "Finder",
     "terminal": "Terminal",
@@ -192,16 +225,18 @@ _APP_ALIASES: dict[str, str] = {
     "iterm2": "iTerm",
     "activity monitor": "Activity Monitor",
     "system prefs": "System Preferences",
+    "system preferences": "System Preferences",
     "system settings": "System Settings",
     # System (Windows)
     "explorer": "explorer.exe",
+    "file explorer": "explorer.exe",
     "notepad": "notepad.exe",
     "calculator": "calc.exe",
+    "calc": "calc.exe",
     "task manager": "taskmgr.exe",
 }
 
 
-# Common folder shortcuts → absolute paths resolved at runtime
 def _folder_path(name: str) -> str:
     home = os.path.expanduser("~")
     mapping = {
@@ -212,14 +247,15 @@ def _folder_path(name: str) -> str:
         "pictures": os.path.join(home, "Pictures"),
         "music": os.path.join(home, "Music"),
         "videos": os.path.join(home, "Videos"),
-        "movies": os.path.join(home, "Movies"),  # macOS alias
+        "movies": os.path.join(home, "Movies"),
     }
     return mapping.get(name.lower(), os.path.join(home, name.capitalize()))
 
 
 def _resolve_app(raw: str) -> str:
-    """Return canonical app name, falling back to title-cased raw input."""
-    return _APP_ALIASES.get(raw.strip().lower(), raw.strip())
+    """Return canonical app name, stripping leading articles then looking up alias."""
+    cleaned = _APP_ARTICLE_RE.sub("", raw.strip()).strip()
+    return _APP_ALIASES.get(cleaned.lower(), cleaned)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -236,30 +272,25 @@ class QuickAction:
 
 # ══════════════════════════════════════════════════════════════════════════════
 # §5  PATTERN TABLE
-#     Ordered list of (compiled_re, builder_fn).
-#     builder_fn(match) -> QuickAction | None
-#     Return None to fall through even on a regex hit (ambiguous content).
 #
 #     ORDERING RULES (do not break):
 #       1. Compound / more-specific patterns BEFORE their sub-patterns.
-#          e.g. "open X and play" must come before plain "open X".
-#       2. play_on_app BEFORE generic media_play.
-#       3. volume/brightness set (with number) BEFORE directional (up/down).
+#       2. Focus/DND BEFORE app-launch (prevents "start focus" → open_app).
+#       3. URL open BEFORE folder shortcuts and open_app.
+#       4. play_on_app / search_on_app BEFORE generic media_play.
+#       5. volume/brightness set (with number) BEFORE directional (up/down).
+#       6. restart_app guards against _DEVICE_RE so restart_system still fires.
 # ══════════════════════════════════════════════════════════════════════════════
 
 
 def _build_patterns() -> list[tuple]:
     P = re.compile
 
-    # ── Helpers ─────────────────────────────────────────────────────────────
-
     def _pct(m, group="n") -> int:
-        """Parse percentage group, clamped 0–100."""
         return max(0, min(100, int(m.group(group))))
 
-    # ── Builder functions ────────────────────────────────────────────────────
+    # ── Media ────────────────────────────────────────────────────────────────
 
-    # Media
     def media_toggle(m):
         return QuickAction("media_toggle")
 
@@ -278,6 +309,10 @@ def _build_patterns() -> list[tuple]:
             return None
         return QuickAction("media_play")
 
+    # FIX: dedicated builder for resume/continue — media_play builder needs "after" group
+    def media_resume(m):
+        return QuickAction("media_play")
+
     def play_on_app(m):
         song = (m.group("song") or "").strip()
         app = (m.group("app") or "").strip().lower()
@@ -285,13 +320,66 @@ def _build_patterns() -> list[tuple]:
             return None
         return QuickAction("play_on_app", {"song": song, "app": app})
 
+    def search_on_app(m):
+        query = (m.group("query") or "").strip()
+        app = (m.group("app") or "").strip().lower()
+        if not query or not app:
+            return None
+        return QuickAction("search_on_app", {"query": query, "app": app})
+
+    # ── App launch / restart / quit ──────────────────────────────────────────
+
     def restart_app(m):
         raw = (m.group("app") or "").strip()
         if not raw:
             return None
+        # FIX: guard — "restart my computer" must not steal from restart_system
+        if _DEVICE_RE.match(raw):
+            return None
         return QuickAction("restart_app", {"app": _resolve_app(raw)})
 
-    # Volume
+    def open_app(m):
+        raw = (m.group("app") or "").strip()
+        if not raw:
+            return None
+        if _AMBIGUOUS_APP_RE.match(raw):
+            return None
+        return QuickAction("open_app", {"app": _resolve_app(raw)})
+
+    def open_folder(m):
+        name = (m.group("folder") or "").strip().lower()
+        return QuickAction("open_folder", {"path": _folder_path(name), "name": name})
+
+    def open_and_play(m):
+        raw = (m.group("app") or "").strip()
+        if not raw:
+            return None
+        return QuickAction(
+            "open_app",
+            {"app": _resolve_app(raw)},
+            chain=[QuickAction("media_play")],
+        )
+
+    def open_url(m):
+        url = (m.group("url") or "").strip()
+        if not url:
+            return None
+        return QuickAction("open_url", {"url": url})
+
+    def quit_app(m):
+        raw = (m.group("app") or "").strip()
+        if not raw or _AMBIGUOUS_APP_RE.match(raw) or _DEVICE_RE.match(raw):
+            return None
+        return QuickAction("quit_app", {"app": _resolve_app(raw), "force": False})
+
+    def force_quit_app(m):
+        raw = (m.group("app") or "").strip()
+        if not raw or _AMBIGUOUS_APP_RE.match(raw) or _DEVICE_RE.match(raw):
+            return None
+        return QuickAction("quit_app", {"app": _resolve_app(raw), "force": True})
+
+    # ── Volume ───────────────────────────────────────────────────────────────
+
     def volume_up(m):
         return QuickAction("volume_step", {"delta": +10})
 
@@ -310,28 +398,8 @@ def _build_patterns() -> list[tuple]:
     def mute(m):
         return QuickAction("mute_toggle")
 
-    # App launch / folders
-    def open_app(m):
-        raw = (m.group("app") or "").strip()
-        if not raw:
-            return None
-        return QuickAction("open_app", {"app": _resolve_app(raw)})
+    # ── Power ────────────────────────────────────────────────────────────────
 
-    def open_folder(m):
-        name = (m.group("folder") or "").strip().lower()
-        return QuickAction("open_folder", {"path": _folder_path(name), "name": name})
-
-    def open_and_play(m):
-        raw = (m.group("app") or "").strip()
-        if not raw:
-            return None
-        return QuickAction(
-            "open_app",
-            {"app": _resolve_app(raw)},
-            chain=[QuickAction("media_play")],
-        )
-
-    # Power
     def lock(m):
         return QuickAction("lock_screen")
 
@@ -350,7 +418,8 @@ def _build_patterns() -> list[tuple]:
     def logout(m):
         return QuickAction("logout_system")
 
-    # Display / Brightness
+    # ── Display / Brightness ─────────────────────────────────────────────────
+
     def brightness_up(m):
         return QuickAction("brightness_step", {"delta": +10})
 
@@ -375,7 +444,8 @@ def _build_patterns() -> list[tuple]:
     def night_mode_off(m):
         return QuickAction("night_mode", {"state": "off"})
 
-    # Network
+    # ── Network ──────────────────────────────────────────────────────────────
+
     def wifi_on(m):
         return QuickAction("wifi", {"state": "on"})
 
@@ -394,18 +464,21 @@ def _build_patterns() -> list[tuple]:
     def bt_toggle(m):
         return QuickAction("bluetooth", {"state": "toggle"})
 
-    # Focus / DND
+    # ── Focus / DND ──────────────────────────────────────────────────────────
+
     def dnd_on(m):
         return QuickAction("do_not_disturb", {"state": "on"})
 
     def dnd_off(m):
         return QuickAction("do_not_disturb", {"state": "off"})
 
-    # Screenshot
+    # ── Screenshot ───────────────────────────────────────────────────────────
+
     def screenshot(m):
         return QuickAction("screenshot")
 
-    # Quick info
+    # ── Quick info ───────────────────────────────────────────────────────────
+
     def tell_time(m):
         return QuickAction("tell_time")
 
@@ -415,14 +488,51 @@ def _build_patterns() -> list[tuple]:
     def tell_battery(m):
         return QuickAction("tell_battery")
 
-    # ── Pattern table (ordered — do NOT reorder without reading §5 header) ──
+    # ── Timer (new) ──────────────────────────────────────────────────────────
+
+    def timer_builder(m):
+        return QuickAction("timer", {
+            "n": int(m.group("n")),
+            "unit": (m.group("unit") or "minutes").lower(),
+        })
+
+    # ── Math (new) ───────────────────────────────────────────────────────────
+
+    def math_calc(m):
+        a = m.group("a")
+        op = re.sub(r"\s+", " ", (m.group("op") or "").strip().lower())
+        b = m.group("b")
+        if not a or not b or not op:
+            return None
+        return QuickAction("math_calculate", {"a": a, "op": op, "b": b})
+
+    # ── Shared sub-expressions ────────────────────────────────────────────────
+
+    _WIFI = r"(wi\s*fi|wifi|wireless|wi-fi)"
+    _BT   = r"(bluetooth|bt)"
+    _MY   = r"(my\s+|the\s+)?"
+    _DEV  = r"(computer|pc|mac|machine|laptop|device)"
+
+    # ── Pattern table ─────────────────────────────────────────────────────────
 
     return [
-        # ── Compound: open X and play  [must precede plain open X] ──────────
+        # ── Compound: open X and play  [before plain open X] ─────────────────
         (P(r"^open\s+(?P<app>[\w\s]+?)\s+and\s+play$", re.I), open_and_play),
-        # ── Restart app  [must precede open/launch] ──────────────────────────
+
+        # ── Restart app  [device guard inside builder; before open/launch] ───
         (P(r"^restart\s+(?P<app>[\w\s]+)$", re.I), restart_app),
-        # ── Folder shortcuts  [must precede generic open_app] ────────────────
+
+        # ── URL open  [before folders/app; dots survive normalize] ───────────
+        (
+            P(
+                r"^(open|go\s+to|visit|navigate\s+to|browse\s+to)\s+"
+                r"(?P<url>(?:https?://)?[\w\-]+(?:\.[\w\-]+)*\.[\w\-]{2,})$",
+                re.I,
+            ),
+            open_url,
+        ),
+
+        # ── Folder shortcuts  [before generic open_app] ───────────────────────
         (
             P(
                 r"^open\s+(?:my\s+)?(?P<folder>"
@@ -432,128 +542,8 @@ def _build_patterns() -> list[tuple]:
             ),
             open_folder,
         ),
-        # ── App launch ───────────────────────────────────────────────────────
-        (P(r"^open\s+(?P<app>[\w\s]+)$", re.I), open_app),
-        (P(r"^launch\s+(?P<app>[\w\s]+)$", re.I), open_app),
-        (P(r"^start\s+(?P<app>[\w\s]+)$", re.I), open_app),
-        # ── Media: play on app  [must precede generic media_play] ────────────
-        (P(r"^play\s+(?P<song>.+?)\s+on\s+(?P<app>\w+)$", re.I), play_on_app),
-        # ── Media: play / pause / resume / toggle / next / prev ──────────────
-        (P(r"^play\s*(?P<after>.*)$", re.I), media_play),
-        (P(r"^(pause|stop\s+music|stop\s+playback)$", re.I), media_pause),
-        (P(r"^(resume|continue\s+music|continue\s+playing)$", re.I), media_play),
-        (P(r"^(play\s*pause|toggle\s+(music|playback))$", re.I), media_toggle),
-        (P(r"^next(\s+(track|song))?$", re.I), media_next),
-        (P(r"^(previous|prev)(\s+(track|song))?$", re.I), media_prev),
-        (P(r"^skip(\s+(track|song))?$", re.I), media_next),
-        # ── Volume: set (number)  [must precede directional] ─────────────────
-        (P(r"^volume\s+(?P<n>\d{1,3})(%)?$", re.I), volume_set),
-        (P(r"^set\s+volume\s+(to\s+)?(?P<n>\d{1,3})(%)?$", re.I), volume_set),
-        (P(r"^(volume|set\s+volume)\s+(to\s+)?(max|maximum|full)$", re.I), volume_max),
-        (
-            P(r"^(volume|set\s+volume)\s+(to\s+)?(min|minimum|zero|silent)$", re.I),
-            volume_min,
-        ),
-        # ── Volume: directional ───────────────────────────────────────────────
-        (P(r"^volume\s+(up|louder|increase)$", re.I), volume_up),
-        (P(r"^volume\s+(down|lower|quieter|decrease|softer)$", re.I), volume_down),
-        (P(r"^(turn\s+up|louder|increase\s+volume)$", re.I), volume_up),
-        (
-            P(
-                r"^(turn\s+(the\s+)?volume\s+down|lower\s+volume|decrease\s+volume|quieter)$",
-                re.I,
-            ),
-            volume_down,
-        ),
-        (P(r"^(mute|unmute|toggle\s+mute)$", re.I), mute),
-        # ── Power ─────────────────────────────────────────────────────────────
-        (P(r"^lock(\s+(screen|my\s+screen|the\s+screen))?$", re.I), lock),
-        (P(r"^(sleep|put\s+(the\s+)?computer\s+to\s+sleep)$", re.I), sleep_sys),
-        (P(r"^(hibernate|suspend\s+to\s+disk)$", re.I), hibernate),
-        (
-            P(
-                r"^(shut\s+down|shutdown|power\s+off|"
-                r"turn\s+off(\s+(the\s+)?(computer|pc|mac|machine))?)$",
-                re.I,
-            ),
-            shutdown,
-        ),
-        (
-            P(r"^(restart|reboot)(\s+(the\s+)?(computer|pc|mac|machine))?$", re.I),
-            restart,
-        ),
-        (
-            P(
-                r"^(log\s+out|logout|sign\s+out)(\s+(of\s+)?(this\s+)?(computer|session))?$",
-                re.I,
-            ),
-            logout,
-        ),
-        # ── Brightness: set (number)  [must precede directional] ──────────────
-        (P(r"^set\s+brightness\s+(to\s+)?(?P<n>\d{1,3})(%)?$", re.I), brightness_set),
-        (P(r"^brightness\s+(?P<n>\d{1,3})(%)?$", re.I), brightness_set),
-        # ── Brightness: directional ───────────────────────────────────────────
-        (P(r"^brightness\s+(up|increase|higher|more)$", re.I), brightness_up),
-        (P(r"^brightness\s+(down|decrease|lower|less|dim)$", re.I), brightness_down),
-        (P(r"^(increase|raise)\s+brightness$", re.I), brightness_up),
-        (
-            P(r"^(decrease|lower|dim|reduce)\s+(the\s+)?brightness$", re.I),
-            brightness_down,
-        ),
-        (
-            P(r"^(dim\s+the\s+screen|make\s+(it|screen)\s+dimmer)$", re.I),
-            brightness_down,
-        ),
-        (P(r"^(make\s+(it|screen)\s+brighter|brighter)$", re.I), brightness_up),
-        # ── Dark / Night mode ─────────────────────────────────────────────────
-        (
-            P(r"^(enable|turn\s+on|switch\s+to|activate)\s+dark\s+mode$", re.I),
-            dark_mode_on,
-        ),
-        (
-            P(r"^(disable|turn\s+off|switch\s+off|deactivate)\s+dark\s+mode$", re.I),
-            dark_mode_off,
-        ),
-        (P(r"^(toggle|switch)\s+dark\s+mode$", re.I), dark_mode_toggle),
-        (
-            P(r"^(enable|turn\s+on|switch\s+to|activate)\s+light\s+mode$", re.I),
-            dark_mode_off,
-        ),
-        (
-            P(r"^(enable|turn\s+on|activate)\s+(night\s+mode|night\s+shift)$", re.I),
-            night_mode_on,
-        ),
-        (
-            P(
-                r"^(disable|turn\s+off|deactivate)\s+(night\s+mode|night\s+shift)$",
-                re.I,
-            ),
-            night_mode_off,
-        ),
-        # ── Wi-Fi ─────────────────────────────────────────────────────────────
-        (P(r"^(turn\s+on|enable|connect)\s+(wi\s*fi|wifi|wireless)$", re.I), wifi_on),
-        (
-            P(r"^(turn\s+off|disable|disconnect)\s+(wi\s*fi|wifi|wireless)$", re.I),
-            wifi_off,
-        ),
-        (P(r"^(toggle|switch)\s+(wi\s*fi|wifi|wireless)$", re.I), wifi_toggle),
-        (
-            P(r"^(wi\s*fi|wifi)\s+(on|off|toggle)$", re.I),
-            lambda m: {"on": wifi_on, "off": wifi_off, "toggle": wifi_toggle}[
-                m.group(2).lower()
-            ](m),
-        ),
-        # ── Bluetooth ─────────────────────────────────────────────────────────
-        (P(r"^(turn\s+on|enable)\s+(bluetooth|bt)$", re.I), bt_on),
-        (P(r"^(turn\s+off|disable)\s+(bluetooth|bt)$", re.I), bt_off),
-        (P(r"^(toggle|switch)\s+(bluetooth|bt)$", re.I), bt_toggle),
-        (
-            P(r"^(bluetooth|bt)\s+(on|off|toggle)$", re.I),
-            lambda m: {"on": bt_on, "off": bt_off, "toggle": bt_toggle}[
-                m.group(2).lower()
-            ](m),
-        ),
-        # ── Focus / Do Not Disturb ────────────────────────────────────────────
+
+        # ── Focus / DND  [BEFORE app-launch — fixes "start focus" → open_app] ─
         (
             P(
                 r"^(enable|turn\s+on|activate|start)\s+"
@@ -571,39 +561,287 @@ def _build_patterns() -> list[tuple]:
             dnd_off,
         ),
         (
-            P(r"^do\s+not\s+disturb\s+(on|off)$", re.I),
-            lambda m: dnd_on(m) if m.group(1).lower() == "on" else dnd_off(m),
+            P(r"^do\s+not\s+disturb(\s+(on|off))?$", re.I),
+            lambda m: dnd_off(m) if (m.group(2) or "on").lower() == "off" else dnd_on(m),
         ),
+        (
+            P(
+                r"^(quiet\s+(mode|hours)|silence\s+(notifications|alerts)|"
+                r"turn\s+on\s+(quiet\s+(mode|hours)|silence))$",
+                re.I,
+            ),
+            dnd_on,
+        ),
+
+        # ── App launch ────────────────────────────────────────────────────────
+        (P(r"^open\s+(?P<app>[\w\s]+)$", re.I), open_app),
+        (P(r"^launch\s+(?P<app>[\w\s]+)$", re.I), open_app),
+        (P(r"^start\s+(?P<app>[\w\s]+)$", re.I), open_app),
+
+        # ── App quit / force-quit / kill ──────────────────────────────────────
+        (P(r"^quit\s+(?P<app>[\w\s]+)$", re.I), quit_app),
+        (P(r"^force\s+quit\s+(?P<app>[\w\s]+)$", re.I), force_quit_app),
+        (P(r"^kill\s+(?P<app>[\w\s]+)$", re.I), quit_app),
+        (P(r"^exit\s+(?P<app>[\w\s]+)$", re.I), quit_app),
+
+        # ── Media: search/find on app  [before play_on_app] ──────────────────
+        (
+            P(
+                r"^(search(\s+for)?|find|look\s+up)\s+(?P<query>.+?)\s+on\s+(?P<app>\w+)$",
+                re.I,
+            ),
+            search_on_app,
+        ),
+
+        # ── Media: play on app  [before generic media_play] ──────────────────
+        (P(r"^play\s+(?P<song>.+?)\s+on\s+(?P<app>\w+)$", re.I), play_on_app),
+
+        # ── Media: play / pause / resume / toggle / next / prev ──────────────
+        (P(r"^play\s*(?P<after>.*)$", re.I), media_play),
+        (
+            P(r"^(pause|stop(\s+(music|playing|playback|the\s+music))?)$", re.I),
+            media_pause,
+        ),
+        # FIX: dedicated builder — media_play builder calls m.group("after") which
+        # only exists in the ^play pattern above, not in resume/continue patterns.
+        (P(r"^(resume|continue\s+music|continue\s+playing)$", re.I), media_resume),
+        (P(r"^(play\s*pause|toggle\s+(music|playback))$", re.I), media_toggle),
+        (P(r"^(next|play\s+next)(\s+(track|song))?$", re.I), media_next),
+        (P(r"^go\s+(to\s+)?(next|forward)(\s+(track|song))?$", re.I), media_next),
+        (P(r"^(previous|prev)(\s+(track|song))?$", re.I), media_prev),
+        (P(r"^go\s+(to\s+)?(previous|prev|back)(\s+(track|song))?$", re.I), media_prev),
+        (P(r"^skip(\s+(track|song))?$", re.I), media_next),
+
+        # ── Volume: set (number)  [before directional] ────────────────────────
+        (P(r"^volume\s+(?P<n>\d{1,3})(%)?$", re.I), volume_set),
+        (P(r"^set\s+(the\s+)?volume\s+(to\s+)?(?P<n>\d{1,3})(%)?$", re.I), volume_set),
+        (
+            P(
+                r"^((volume|set\s+(the\s+)?volume)\s+(to\s+)?(max|maximum|full)"
+                r"|(max|maximum|full)\s+volume)$",
+                re.I,
+            ),
+            volume_max,
+        ),
+        (
+            P(
+                r"^((volume|set\s+(the\s+)?volume)\s+(to\s+)?(min|minimum|zero|silent)"
+                r"|(min|minimum|zero|silent)\s+volume)$",
+                re.I,
+            ),
+            volume_min,
+        ),
+
+        # ── Volume: directional ───────────────────────────────────────────────
+        (P(r"^volume\s+(up|louder|increase)$", re.I), volume_up),
+        (P(r"^volume\s+(down|lower|quieter|decrease|softer)$", re.I), volume_down),
+        (
+            P(
+                r"^(turn\s+(the\s+)?volume\s+up"
+                r"|turn\s+up(\s+the)?\s+volume"
+                r"|louder"
+                r"|increase\s+(the\s+)?volume"
+                r"|raise\s+(the\s+)?volume"
+                r"|boost\s+(the\s+)?volume)$",
+                re.I,
+            ),
+            volume_up,
+        ),
+        (
+            P(
+                r"^(turn\s+(the\s+)?volume\s+down"
+                r"|turn\s+down(\s+the)?\s+volume"
+                r"|lower\s+(the\s+)?volume"
+                r"|decrease\s+(the\s+)?volume"
+                r"|quieter)$",
+                re.I,
+            ),
+            volume_down,
+        ),
+        (P(r"^(mute|unmute|toggle\s+mute)$", re.I), mute),
+
+        # ── Power ─────────────────────────────────────────────────────────────
+        (P(r"^lock(\s+(screen|my\s+screen|the\s+screen))?$", re.I), lock),
+        (
+            P(
+                rf"^(sleep(\s+mode)?"
+                rf"|put\s+{_MY}{_DEV}\s+to\s+sleep"
+                rf"|send\s+{_MY}{_DEV}\s+to\s+sleep)$",
+                re.I,
+            ),
+            sleep_sys,
+        ),
+        (P(r"^(hibernate|suspend\s+to\s+disk)$", re.I), hibernate),
+        (
+            P(
+                rf"^(shut\s+down|shutdown|power\s+off"
+                rf"|turn\s+off(\s+{_MY}{_DEV})?"
+                rf"|shut\s+{_MY}{_DEV}\s+off"
+                rf"|{_MY}{_DEV}\s+off)$",
+                re.I,
+            ),
+            shutdown,
+        ),
+        (P(rf"^(restart|reboot)(\s+{_MY}{_DEV})?$", re.I), restart),
+        (
+            P(
+                r"^(log\s+out|logout|sign\s+out)(\s+(of\s+)?(this\s+)?(computer|session))?$",
+                re.I,
+            ),
+            logout,
+        ),
+
+        # ── Brightness: set (number)  [before directional] ────────────────────
+        (
+            P(r"^set\s+(the\s+)?(screen\s+)?brightness\s+(to\s+)?(?P<n>\d{1,3})(%)?$", re.I),
+            brightness_set,
+        ),
+        (P(r"^brightness\s+(?P<n>\d{1,3})(%)?$", re.I), brightness_set),
+        (P(r"^(screen\s+)?brightness\s+(to\s+)?(?P<n>\d{1,3})(%)?$", re.I), brightness_set),
+
+        # ── Brightness: directional ───────────────────────────────────────────
+        (
+            P(
+                r"^("
+                r"(screen\s+)?brightness\s+(up|increase|higher|more|boost)"
+                r"|(increase|raise|boost|bump\s+up)\s+(the\s+)?(screen\s+)?brightness"
+                r"|turn\s+(the\s+)?(screen\s+)?brightness\s+up"
+                r"|turn\s+up\s+(the\s+)?(screen\s+)?brightness"
+                r"|make\s+(the\s+)?screen\s+brighter"
+                r"|make\s+it\s+brighter"
+                r"|brighter"
+                r")$",
+                re.I,
+            ),
+            brightness_up,
+        ),
+        (
+            P(
+                r"^("
+                r"(screen\s+)?brightness\s+(down|decrease|lower|less|dim)"
+                r"|(decrease|lower|dim|reduce)\s+(the\s+)?(screen\s+)?brightness"
+                r"|turn\s+(the\s+)?(screen\s+)?brightness\s+down"
+                r"|turn\s+down\s+(the\s+)?(screen\s+)?brightness"
+                r"|make\s+(the\s+)?screen\s+dimmer"
+                r"|make\s+it\s+dimmer"
+                r"|dim\s+the\s+screen"
+                r")$",
+                re.I,
+            ),
+            brightness_down,
+        ),
+
+        # ── Dark / Night mode ─────────────────────────────────────────────────
+        (P(r"^(enable|turn\s+on|switch\s+to|activate)\s+dark\s+mode$", re.I), dark_mode_on),
+        (P(r"^(disable|turn\s+off|switch\s+off|deactivate)\s+dark\s+mode$", re.I), dark_mode_off),
+        (P(r"^(toggle|switch)\s+dark\s+mode$", re.I), dark_mode_toggle),
+        (P(r"^(enable|turn\s+on|activate)\s+light\s+mode$", re.I), dark_mode_off),
+        (P(r"^(enable|turn\s+on|activate)\s+(night\s+mode|night\s+shift)$", re.I), night_mode_on),
+        (P(r"^(disable|turn\s+off|deactivate)\s+(night\s+mode|night\s+shift)$", re.I), night_mode_off),
+
+        # ── Wi-Fi ─────────────────────────────────────────────────────────────
+        (P(rf"^(turn\s+on|enable|connect(\s+to)?)\s+{_MY}{_WIFI}$", re.I), wifi_on),
+        (P(rf"^(turn\s+off|disable|disconnect(\s+from)?)\s+{_MY}{_WIFI}$", re.I), wifi_off),
+        (P(rf"^(toggle|switch)\s+{_MY}{_WIFI}$", re.I), wifi_toggle),
+        # FIX: "wifi on/off/toggle" — use correct group index (group 2, not 4)
+        (
+            P(rf"^{_WIFI}\s+(on|off|toggle)$", re.I),
+            lambda m: {"on": wifi_on, "off": wifi_off, "toggle": wifi_toggle}[
+                m.group(2).lower()
+            ](m),
+        ),
+        # FIX: "turn my wifi on/off" — use correct group index (group 3, not 4)
+        (
+            P(rf"^turn\s+{_MY}{_WIFI}\s+(on|off)$", re.I),
+            lambda m: wifi_on(m) if m.group(3).lower() == "on" else wifi_off(m),
+        ),
+
+        # ── Bluetooth ─────────────────────────────────────────────────────────
+        (P(rf"^(turn\s+on|enable)\s+{_MY}{_BT}$", re.I), bt_on),
+        (P(rf"^(turn\s+off|disable|disconnect)\s+{_MY}{_BT}$", re.I), bt_off),
+        (P(rf"^(toggle|switch)\s+{_MY}{_BT}$", re.I), bt_toggle),
+        # FIX: "bluetooth on/off/toggle" — use correct group index (group 2, not 3)
+        (
+            P(rf"^{_BT}\s+(on|off|toggle)$", re.I),
+            lambda m: {"on": bt_on, "off": bt_off, "toggle": bt_toggle}[
+                m.group(2).lower()
+            ](m),
+        ),
+        (
+            P(rf"^turn\s+{_MY}{_BT}\s+(on|off)$", re.I),
+            lambda m: bt_on(m) if m.group(3).lower() == "on" else bt_off(m),
+        ),
+
         # ── Screenshot ────────────────────────────────────────────────────────
         (
             P(
-                r"^(take\s+(a\s+)?|grab\s+(a\s+)?)?screenshot(\s+(now|the\s+screen))?$",
+                r"^(take\s+(a\s+)?|grab\s+(a\s+)?|snap\s+(a\s+)?)?"
+                r"screenshot(\s+(now|the\s+screen))?$",
                 re.I,
             ),
             screenshot,
         ),
-        (P(r"^screenshot(\s+the\s+screen)?$", re.I), screenshot),
+        (
+            P(
+                r"^(capture\s+(the\s+)?screen"
+                r"|screen\s+capture"
+                r"|print\s+screen"
+                r"|screengrab"
+                r"|screen\s+shot)$",
+                re.I,
+            ),
+            screenshot,
+        ),
+
         # ── Quick info ────────────────────────────────────────────────────────
         (
             P(
-                r"^(what(\s+is|'s)\s+(the\s+)?time|what\s+time\s+is\s+it|current\s+time)$",
+                r"^(what\s+(is\s+)?(the\s+)?time"
+                r"|what\s+time\s+is\s+it"
+                r"|current\s+time"
+                r"|tell\s+me\s+(the\s+)?time)$",
                 re.I,
             ),
             tell_time,
         ),
         (
             P(
-                r"^(what(\s+is|'s)\s+(today|the\s+date)|what\s+day\s+is\s+it|today'?s\s+date)$",
+                r"^(what(\s+is)?\s+(today|the\s+date)|what\s+day\s+is\s+it|todays\s+date)$",
                 re.I,
             ),
             tell_date,
         ),
         (
             P(
-                r"^(battery(\s+level)?|how\s+much\s+battery(\s+(is\s+left|do\s+i\s+have))?)$",
+                r"^(battery(\s+(level|status|percentage|life|charge))?"
+                r"|check\s+battery(\s+(level|status))?"
+                r"|how\s+much\s+battery(\s+(is\s+left|do\s+i\s+have))?"
+                r"|what\s+is\s+(my\s+)?battery(\s+percentage)?)$",
                 re.I,
             ),
             tell_battery,
+        ),
+
+        # ── Timer ─────────────────────────────────────────────────────────────
+        (
+            P(
+                r"^(set\s+)?(a\s+|an\s+)?timer\s+(for\s+)?(?P<n>\d+)\s+"
+                r"(?P<unit>seconds?|minutes?|hours?)$",
+                re.I,
+            ),
+            timer_builder,
+        ),
+
+        # ── Simple math ───────────────────────────────────────────────────────
+        (
+            P(
+                r"^(what\s+is\s+|calculate\s+|calc\s+)?"
+                r"(?P<a>\d+(?:\.\d+)?)\s+"
+                r"(?P<op>plus|minus|times|divided\s+by|multiplied\s+by|modulo|mod)\s+"
+                r"(?P<b>\d+(?:\.\d+)?)$",
+                re.I,
+            ),
+            math_calc,
         ),
     ]
 
@@ -617,7 +855,6 @@ _PATTERNS = _build_patterns()
 
 
 def _run(cmd: str, timeout: int = 5) -> tuple[int, str]:
-    """Run a shell command; return (returncode, combined_output)."""
     try:
         r = subprocess.run(
             cmd, shell=True, capture_output=True, text=True, timeout=timeout
@@ -630,7 +867,6 @@ def _run(cmd: str, timeout: int = 5) -> tuple[int, str]:
 
 
 def _win_sendkey(vk: int) -> None:
-    """Send a virtual key via PowerShell + WScript.Shell."""
     _run(
         f"powershell -NoProfile -Command "
         f'"(New-Object -ComObject WScript.Shell).SendKeys([char]{vk})"'
@@ -643,45 +879,27 @@ def _linux_playerctl(cmd: str) -> tuple[int, str]:
     return _run(f"playerctl {cmd}")
 
 
-# macOS media app registry (app_name → cmd_map)
 _MAC_MEDIA_APPS: dict[str, dict[str, str]] = {
     "Spotify": {
-        "play": "play",
-        "pause": "pause",
-        "toggle": "playpause",
-        "next": "next track",
-        "prev": "previous track",
+        "play": "play", "pause": "pause", "toggle": "playpause",
+        "next": "next track", "prev": "previous track",
     },
     "Music": {
-        "play": "play",
-        "pause": "pause",
-        "toggle": "playpause",
-        "next": "next track",
-        "prev": "previous track",
+        "play": "play", "pause": "pause", "toggle": "playpause",
+        "next": "next track", "prev": "previous track",
     },
     "TV": {
-        "play": "play",
-        "pause": "pause",
-        "toggle": "play",
-        "next": "next chapter",
-        "prev": "previous chapter",
+        "play": "play", "pause": "pause", "toggle": "play",
+        "next": "next chapter", "prev": "previous chapter",
     },
     "Plex Media Player": {
-        "play": "play",
-        "pause": "pause",
-        "toggle": "play",
-        "next": "next chapter",
-        "prev": "previous chapter",
+        "play": "play", "pause": "pause", "toggle": "play",
+        "next": "next chapter", "prev": "previous chapter",
     },
 }
 
-# key codes: play=100, toggle=100, next=101, prev=98
 _MAC_MEDIA_KEY: dict[str, int] = {
-    "play": 100,
-    "pause": 100,
-    "toggle": 100,
-    "next": 101,
-    "prev": 98,
+    "play": 100, "pause": 100, "toggle": 100, "next": 101, "prev": 98,
 }
 
 
@@ -704,7 +922,6 @@ def _mac_media(cmd: str) -> None:
 
 
 def _wait_for_app(app_name: str, timeout: float = 5.0, interval: float = 0.3) -> bool:
-    """Poll until app_name is running or timeout elapses. macOS only."""
     if not _IS_MAC:
         time.sleep(1.5)
         return True
@@ -727,20 +944,15 @@ def _yt_resolve(song: str) -> str | None:
 
 # ══════════════════════════════════════════════════════════════════════════════
 # §7  ACTION REGISTRY
-#     Each handler: (params: dict) -> str
-#     Registered with @_action("name").  _exec_action dispatches via dict.
 # ══════════════════════════════════════════════════════════════════════════════
 
 _ACTION_REGISTRY: dict[str, Callable[[dict], str]] = {}
 
 
 def _action(name: str):
-    """Decorator: register a function as the handler for action `name`."""
-
     def decorator(fn: Callable[[dict], str]):
         _ACTION_REGISTRY[name] = fn
         return fn
-
     return decorator
 
 
@@ -791,7 +1003,7 @@ def _media_next(p):
     if _IS_MAC:
         _mac_media("next")
     elif _IS_WIN:
-        _win_sendkey(176)  # VK_MEDIA_NEXT_TRACK
+        _win_sendkey(176)
     else:
         code, err = _linux_playerctl("next")
         if code != 0:
@@ -804,7 +1016,7 @@ def _media_prev(p):
     if _IS_MAC:
         _mac_media("prev")
     elif _IS_WIN:
-        _win_sendkey(177)  # VK_MEDIA_PREV_TRACK
+        _win_sendkey(177)
     else:
         code, err = _linux_playerctl("previous")
         if code != 0:
@@ -853,6 +1065,35 @@ def _play_on_app(p):
     return f'Playing "{song}" on {app.title()}.'
 
 
+@_action("search_on_app")
+def _search_on_app(p):
+    query = p.get("query", "")
+    app = p.get("app", "").lower()
+    encoded = quote_plus(query)
+    search_urls = {
+        "youtube": f"https://www.youtube.com/results?search_query={encoded}",
+        "yt": f"https://www.youtube.com/results?search_query={encoded}",
+        "spotify": f"https://open.spotify.com/search/{encoded}",
+        "google": f"https://www.google.com/search?q={encoded}",
+        "amazon": f"https://www.amazon.com/s?k={encoded}",
+        "netflix": f"https://www.netflix.com/search?q={encoded}",
+        "reddit": f"https://www.reddit.com/search/?q={encoded}",
+        "twitter": f"https://twitter.com/search?q={encoded}",
+        "x": f"https://twitter.com/search?q={encoded}",
+        "github": f"https://github.com/search?q={encoded}",
+    }
+    url = search_urls.get(app)
+    if url:
+        if _IS_MAC:
+            _run(f'open "{url}"')
+        elif _IS_WIN:
+            _run(f'start "" "{url}"')
+        else:
+            _run(f'xdg-open "{url}"')
+        return f"Searching for '{query}' on {app.title()}."
+    return f"Opened {app.title()} — please search for '{query}' manually."
+
+
 # ── Volume ────────────────────────────────────────────────────────────────────
 
 
@@ -866,7 +1107,7 @@ def _volume_step(p):
         for _ in range(steps):
             _run(f"osascript -e 'tell application \"System Events\" to key code {key}'")
     elif _IS_WIN:
-        vk = 175 if up else 174  # VK_VOLUME_UP / VK_VOLUME_DOWN
+        vk = 175 if up else 174
         steps = max(1, abs(delta) // 2)
         for _ in range(steps):
             _win_sendkey(vk)
@@ -899,17 +1140,16 @@ def _volume_set(p):
 def _mute_toggle(p):
     if _IS_MAC:
         _run(
-            'osascript -e "set volume output muted not (output muted of (get volume'
-            ' settings))"'
+            'osascript -e "set volume output muted not (output muted of (get volume settings))"'
         )
     elif _IS_WIN:
-        _win_sendkey(173)  # VK_VOLUME_MUTE
+        _win_sendkey(173)
     else:
         _run("pactl set-sink-mute @DEFAULT_SINK@ toggle")
     return "Mute toggled."
 
 
-# ── App launch / restart / folders ───────────────────────────────────────────
+# ── App launch / restart / quit / folders ─────────────────────────────────────
 
 
 @_action("open_app")
@@ -926,7 +1166,7 @@ def _open_app(p):
     if code != 0:
         logger.warning("open_app failed app=%r out=%r", app, out)
         raise RuntimeError(f"App not found: {app!r}")
-    return f"Opening {app.title()}."
+    return f"Opening {app}."
 
 
 @_action("restart_app")
@@ -943,11 +1183,30 @@ def _restart_app(p):
         time.sleep(0.5)
         _run(f"powershell -NoProfile -Command \"Start-Process '{app}'\"")
     else:
-        # Try playerctl stop then xdg-open as best-effort
         _run(f'pkill -f "{app}"')
         time.sleep(0.5)
         _run(f'xdg-open "{app}"')
-    return f"Restarting {app.title()}."
+    return f"Restarting {app}."
+
+
+@_action("quit_app")
+def _quit_app(p):
+    app = p.get("app", "")
+    force = bool(p.get("force", False))
+    if _IS_MAC:
+        _run(f"osascript -e 'tell application \"{app}\" to quit'")
+        if force:
+            time.sleep(0.5)
+            _run(f'pkill -9 -f "{app}"')
+    elif _IS_WIN:
+        exe = app if app.endswith(".exe") else f"{app}.exe"
+        flag = "/F" if force else ""
+        _run(f'taskkill /IM "{exe}" {flag}'.strip())
+    else:
+        signal_flag = "-9" if force else "-15"
+        _run(f'pkill {signal_flag} -f "{app}"')
+    label = "Force quit" if force else "Quit"
+    return f"{label} {app}."
 
 
 @_action("open_folder")
@@ -965,6 +1224,20 @@ def _open_folder(p):
     return f"Opening {name}."
 
 
+@_action("open_url")
+def _open_url(p):
+    url = p.get("url", "")
+    if not url.startswith(("http://", "https://")):
+        url = "https://" + url
+    if _IS_MAC:
+        _run(f'open "{url}"')
+    elif _IS_WIN:
+        _run(f'start "" "{url}"')
+    else:
+        _run(f'xdg-open "{url}"')
+    return f"Opening {url}."
+
+
 # ── Power ─────────────────────────────────────────────────────────────────────
 
 
@@ -972,8 +1245,8 @@ def _open_folder(p):
 def _lock_screen(p):
     if _IS_MAC:
         _run(
-            'osascript -e \'tell application "System Events" to keystroke "q" using'
-            " {command down, control down}'"
+            "osascript -e 'tell application \"System Events\" to keystroke \"q\""
+            " using {command down, control down}'"
         )
     elif _IS_WIN:
         _run("rundll32.exe user32.dll,LockWorkStation")
@@ -996,7 +1269,6 @@ def _sleep_system(p):
 @_action("hibernate_system")
 def _hibernate_system(p):
     if _IS_MAC:
-        # macOS doesn't have true hibernate; use Safe Sleep mode 25 (hibernation)
         _run("pmset -a hibernatemode 25 && pmset sleepnow")
     elif _IS_WIN:
         _run("shutdown /h")
@@ -1034,10 +1306,7 @@ def _logout_system(p):
     elif _IS_WIN:
         _run("shutdown /l")
     else:
-        _run(
-            "loginctl terminate-user $USER 2>/dev/null || gnome-session-quit"
-            " --no-prompt"
-        )
+        _run("loginctl terminate-user $USER 2>/dev/null || gnome-session-quit --no-prompt")
     return "Logging out."
 
 
@@ -1049,25 +1318,21 @@ def _brightness_step(p):
     delta = int(p.get("delta", 10))
     up = delta > 0
     if _IS_MAC:
-        key = "144" if up else "145"  # F2 up / F1 down (key codes)
+        key = "144" if up else "145"
         steps = max(1, abs(delta) // 10)
         for _ in range(steps):
             _run(f"osascript -e 'tell application \"System Events\" to key code {key}'")
     elif _IS_WIN:
-        # Requires NirCmd: nircmd.exe changebrightness +10 / -10
         sign = "+" if up else "-"
         code, _ = _run(f"nircmd.exe changebrightness {sign}{abs(delta)}")
         if code != 0:
-            # Fallback: PowerShell WMI (slower but no deps)
             _run(
                 'powershell -NoProfile -Command "'
-                "$b=(Get-WmiObject -Namespace root/wmi -Class"
-                " WmiMonitorBrightness).CurrentBrightness;"
-                "(Get-WmiObject -Namespace root/wmi -Class"
-                f' WmiMonitorBrightnessMethods).WmiSetBrightness(1,[Math]::Min(100,[Math]::Max(0,$b{("+" if up else "-")}{abs(delta)})))"'
+                "$b=(Get-WmiObject -Namespace root/wmi -Class WmiMonitorBrightness).CurrentBrightness;"
+                "(Get-WmiObject -Namespace root/wmi -Class WmiMonitorBrightnessMethods)"
+                f'.WmiSetBrightness(1,[Math]::Min(100,[Math]::Max(0,$b{("+" if up else "-")}{abs(delta)})))"'
             )
     else:
-        # Requires brightnessctl (preferred) or xrandr fallback
         if shutil.which("brightnessctl"):
             sign = "+" if up else "-"
             _run(f"brightnessctl set {abs(delta)}%{sign}")
@@ -1075,9 +1340,7 @@ def _brightness_step(p):
             code, out = _run("xrandr --verbose | awk '/Brightness/{print $2; exit}'")
             current = float(out) if code == 0 and out else 1.0
             new_val = max(0.0, min(1.0, current + (delta / 100.0)))
-            display_name_code, display_name = _run(
-                "xrandr | awk '/ connected/{print $1; exit}'"
-            )
+            _, display_name = _run("xrandr | awk '/ connected/{print $1; exit}'")
             if display_name:
                 _run(f"xrandr --output {display_name} --brightness {new_val:.2f}")
     return f"Brightness {'up' if up else 'down'}."
@@ -1087,20 +1350,16 @@ def _brightness_step(p):
 def _brightness_set(p):
     level = max(0, min(100, int(p.get("level", 50))))
     if _IS_MAC:
-        # AppleScript brightness: 0.0–1.0
         val = level / 100.0
         _run(
-            "osascript -e 'tell application \"System Preferences\" to quit'"
-            ' 2>/dev/null; osascript -e \'tell application "System Events" to set'
-            f" brightness of screen 1 to {val}' 2>/dev/null || osascript -e 'do shell"
-            f' script "brightness {val:.2f}"\''
+            f"osascript -e 'do shell script \"brightness {val:.2f}\"' 2>/dev/null || "
+            f"osascript -e 'tell application \"System Events\" to set brightness of screen 1 to {val}'"
         )
     elif _IS_WIN:
-        win_val = round(65535 * level / 100)
         code, _ = _run(f"nircmd.exe setbrightness {level}")
         if code != 0:
             _run(
-                'powershell -NoProfile -Command "(Get-WmiObject -Namespace root/wmi'
+                f'powershell -NoProfile -Command "(Get-WmiObject -Namespace root/wmi'
                 f' -Class WmiMonitorBrightnessMethods).WmiSetBrightness(1,{level})"'
             )
     else:
@@ -1108,7 +1367,7 @@ def _brightness_set(p):
             _run(f"brightnessctl set {level}%")
         else:
             val = level / 100.0
-            code, display_name = _run("xrandr | awk '/ connected/{print $1; exit}'")
+            _, display_name = _run("xrandr | awk '/ connected/{print $1; exit}'")
             if display_name:
                 _run(f"xrandr --output {display_name} --brightness {val:.2f}")
     return f"Brightness set to {level}%."
@@ -1120,37 +1379,33 @@ def _dark_mode(p):
     if _IS_MAC:
         if state == "toggle":
             _run(
-                'osascript -e \'tell application "System Events" to '
+                "osascript -e 'tell application \"System Events\" to "
                 "tell appearance preferences to set dark mode to not dark mode'"
             )
             return "Dark mode toggled."
         val = "true" if state == "on" else "false"
         _run(
-            f'osascript -e \'tell application "System Events" to '
+            f"osascript -e 'tell application \"System Events\" to "
             f"tell appearance preferences to set dark mode to {val}'"
         )
     elif _IS_WIN:
-        reg_val = "0" if state == "on" else "1"  # 0=dark, 1=light in registry
+        reg_val = "0" if state == "on" else "1"
         if state == "toggle":
             code, out = _run(
-                "reg query"
-                ' "HKCU\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize"'
-                " /v AppsUseLightTheme"
+                'reg query "HKCU\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion'
+                '\\Themes\\Personalize" /v AppsUseLightTheme'
             )
             current = "1" in (out or "")
             reg_val = "0" if current else "1"
         _run(
-            "reg add"
-            ' "HKCU\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize"'
-            f" /v AppsUseLightTheme /t REG_DWORD /d {reg_val} /f"
+            'reg add "HKCU\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion'
+            f'\\Themes\\Personalize" /v AppsUseLightTheme /t REG_DWORD /d {reg_val} /f'
         )
     else:
-        # GNOME / KDE best-effort
         if state in ("on", "toggle"):
             _run(
                 "gsettings set org.gnome.desktop.interface color-scheme 'prefer-dark'"
-                " 2>/dev/null || lookandfeeltool -a org.kde.breezedark.desktop"
-                " 2>/dev/null"
+                " 2>/dev/null || lookandfeeltool -a org.kde.breezedark.desktop 2>/dev/null"
             )
         else:
             _run(
@@ -1168,28 +1423,23 @@ def _night_mode(p):
     if _IS_MAC:
         val = "true" if on else "false"
         _run(
-            f'osascript -e \'tell application "System Events" to '
-            f"tell appearance preferences to set night shift enabled to {val}'"
-            " 2>/dev/null"
+            f"osascript -e 'tell application \"System Events\" to "
+            f"tell appearance preferences to set night shift enabled to {val}' 2>/dev/null"
         )
     elif _IS_WIN:
-        # Night light via registry (requires sign-out to fully apply on some builds)
-        # Best available without third-party tools: toggle via PowerShell
-        action = "Enable" if on else "Disable"
         _run(
-            f'powershell -NoProfile -Command "'
-            f"$p='HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\CloudStore\\Store\\"
-            f"DefaultAccount\\Current\\default$windows.data.bluelightreduction.bluelightreductionstate\\"
-            f"windows.data.bluelightreduction.bluelightreductionstate';"
-            f'if(Test-Path $p){{Remove-Item $p -Force}}"'
+            'powershell -NoProfile -Command "'
+            "$p='HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\CloudStore\\Store\\"
+            "DefaultAccount\\Current\\default$windows.data.bluelightreduction.bluelightreductionstate\\"
+            "windows.data.bluelightreduction.bluelightreductionstate';"
+            'if(Test-Path $p){Remove-Item $p -Force}"'
         )
     else:
         if on:
             _run("redshift -O 4500 2>/dev/null || gammastep -O 4500 2>/dev/null")
         else:
             _run("redshift -x 2>/dev/null || gammastep -x 2>/dev/null")
-    label = "enabled" if on else "disabled"
-    return f"Night mode {label}."
+    return f"Night mode {'enabled' if on else 'disabled'}."
 
 
 # ── Network ───────────────────────────────────────────────────────────────────
@@ -1203,8 +1453,7 @@ def _wifi(p):
             code, out = _run("networksetup -getairportpower en0")
             current_on = "on" in out.lower()
             state = "off" if current_on else "on"
-        val = "on" if state == "on" else "off"
-        _run(f"networksetup -setairportpower en0 {val}")
+        _run(f"networksetup -setairportpower en0 {state}")
     elif _IS_WIN:
         if state == "toggle":
             code, out = _run('netsh interface show interface | findstr /i "wi-fi"')
@@ -1226,28 +1475,17 @@ def _wifi(p):
 def _bluetooth(p):
     state = p.get("state", "toggle")
     if _IS_MAC:
-        # Requires blueutil: brew install blueutil
-        if shutil.which("blueutil"):
-            if state == "toggle":
-                _run("blueutil --toggle")
-            else:
-                _run(f"blueutil --{'power 1' if state == 'on' else 'power 0'}")
+        if not shutil.which("blueutil"):
+            raise RuntimeError("blueutil not found. Install with: brew install blueutil")
+        if state == "toggle":
+            _run("blueutil --toggle")
         else:
-            logger.warning("bluetooth: blueutil not installed (brew install blueutil)")
-            raise RuntimeError(
-                "blueutil not found. Install with: brew install blueutil"
-            )
+            _run(f"blueutil --{'power 1' if state == 'on' else 'power 0'}")
     elif _IS_WIN:
-        action = "1" if state in ("on", "toggle") else "0"
+        action = "Enable" if state in ("on", "toggle") else "Disable"
         _run(
-            f'powershell -NoProfile -Command "'
-            f'$bt=[Windows.Devices.Radios.Radio,Windows.System.Devices,ContentType=WindowsRuntime];"'
-        )
-        # Simpler: use DevCon or bttoggle
-        _run(
-            'powershell -NoProfile -Command "'
-            "Get-PnpDevice -Class Bluetooth | "
-            f'{"Enable" if state == "on" else "Disable"}-PnpDevice -Confirm:$false"'
+            f'powershell -NoProfile -Command "Get-PnpDevice -Class Bluetooth | '
+            f'{action}-PnpDevice -Confirm:$false"'
         )
     else:
         if shutil.which("bluetoothctl"):
@@ -1268,29 +1506,23 @@ def _bluetooth(p):
 def _do_not_disturb(p):
     on = p.get("state", "on") == "on"
     if _IS_MAC:
-        # macOS 12+: use Focus via shortcuts / AppleScript (limited API)
-        # Best available: toggle via defaults + killall
         val = "true" if on else "false"
         _run(
-            "defaults -currentHost write com.apple.notificationcenterui doNotDisturb"
-            f" -bool {val} && "
-            f"killall NotificationCenter 2>/dev/null; "
-            f'osascript -e \'tell application "System Events" to '
-            f"set doNotDisturb of appearance preferences to {val}' 2>/dev/null"
+            f"defaults -currentHost write com.apple.notificationcenterui doNotDisturb"
+            f" -bool {val} && killall NotificationCenter 2>/dev/null;"
+            f" osascript -e 'tell application \"System Events\" to"
+            f" set doNotDisturb of appearance preferences to {val}' 2>/dev/null"
         )
     elif _IS_WIN:
-        # Windows Focus Assist via registry
         reg_val = "1" if on else "0"
         _run(
-            "reg add"
-            ' "HKCU\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\CloudStore\\Store\\DefaultAccount\\Current\\default$windows.data.notifications.quiethours\\"windows.data.notifications.quiethours"'
-            f" /v Data /t REG_BINARY /d {reg_val} /f 2>nul"
+            'reg add "HKCU\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\CloudStore\\'
+            'Store\\DefaultAccount\\Current\\default$windows.data.notifications.quiethours\\'
+            f'windows.data.notifications.quiethours" /v Data /t REG_BINARY /d {reg_val} /f 2>nul'
         )
     else:
-        # GNOME: toggle via dconf
-        val = "true" if on else "false"
         _run(
-            "gsettings set org.gnome.desktop.notifications show-banners"
+            f"gsettings set org.gnome.desktop.notifications show-banners"
             f" {('false' if on else 'true')} 2>/dev/null"
         )
     return f"Do Not Disturb {'enabled' if on else 'disabled'}."
@@ -1308,7 +1540,6 @@ def _screenshot(p):
         if code != 0:
             raise RuntimeError(f"screencapture failed: {out}")
     elif _IS_WIN:
-        # Use PowerShell + .NET (no external deps)
         code, out = _run(
             f'powershell -NoProfile -Command "'
             f"Add-Type -AssemblyName System.Windows.Forms;"
@@ -1325,12 +1556,10 @@ def _screenshot(p):
             code, out = _run(f'scrot "{dest}"')
         elif shutil.which("gnome-screenshot"):
             code, out = _run(f'gnome-screenshot -f "{dest}"')
-        elif shutil.which("import"):  # ImageMagick
+        elif shutil.which("import"):
             code, out = _run(f'import -window root "{dest}"')
         else:
-            raise RuntimeError(
-                "No screenshot tool found (install scrot or gnome-screenshot)"
-            )
+            raise RuntimeError("No screenshot tool found (install scrot or gnome-screenshot)")
         if code != 0:
             raise RuntimeError(f"Screenshot failed: {out}")
     return f"Screenshot saved to Desktop as screenshot_{ts}.png."
@@ -1353,47 +1582,99 @@ def _tell_date(p):
 def _tell_battery(p):
     if _IS_MAC:
         code, out = _run("pmset -g batt")
-        # e.g. "Now drawing from 'AC Power'\n -InternalBattery-0 (id=...) 87%; charging; ..."
         m = re.search(r"(\d+)%", out)
         if m:
             pct = int(m.group(1))
             charging = "charging" in out.lower() or "ac power" in out.lower()
-            status = "charging" if charging else "discharging"
-            return f"Battery is at {pct}% ({status})."
+            return f"Battery is at {pct}% ({'charging' if charging else 'discharging'})."
         raise RuntimeError("Could not read battery level.")
     elif _IS_WIN:
         code, out = _run(
-            "powershell -NoProfile -Command"
-            ' "$b=[Windows.System.Power.PowerManager,Windows.System,ContentType=WindowsRuntime];echo'
-            ' $b::RemainingChargePercent"'
-        )
-        if code == 0 and out.strip().isdigit():
-            return f"Battery is at {out.strip()}%."
-        # Fallback: WMIC
-        code2, out2 = _run(
             "wmic path Win32_Battery get EstimatedChargeRemaining /value"
         )
-        m = re.search(r"=(\d+)", out2)
+        m = re.search(r"=(\d+)", out)
         if m:
             return f"Battery is at {m.group(1)}%."
         raise RuntimeError("Could not read battery level.")
     else:
-        # /sys/class/power_supply — works on most Linux distros
-        bat_paths = [
-            "/sys/class/power_supply/BAT0/capacity",
-            "/sys/class/power_supply/BAT1/capacity",
-        ]
-        for path in bat_paths:
+        for path in ("/sys/class/power_supply/BAT0/capacity",
+                     "/sys/class/power_supply/BAT1/capacity"):
             if os.path.exists(path):
                 with open(path) as f:
                     return f"Battery is at {f.read().strip()}%."
-        # Fallback: upower
         if shutil.which("upower"):
             code, out = _run("upower -i $(upower -e | grep BAT) | grep percentage")
             m = re.search(r"(\d+)%", out)
             if m:
                 return f"Battery is at {m.group(1)}%."
         raise RuntimeError("Could not read battery level.")
+
+
+# ── Timer ─────────────────────────────────────────────────────────────────────
+
+
+@_action("timer")
+def _timer(p):
+    n = int(p.get("n", 1))
+    unit = str(p.get("unit", "minutes")).lower()
+    seconds_map = {
+        "second": 1, "seconds": 1,
+        "minute": 60, "minutes": 60,
+        "hour": 3600, "hours": 3600,
+    }
+    total_seconds = n * seconds_map.get(unit, 60)
+
+    def _fire():
+        time.sleep(total_seconds)
+        msg = f"Timer done: {n} {unit}."
+        if _IS_MAC:
+            _run(f'osascript -e \'display notification "{msg}" with title "Buddy"\'')
+        elif _IS_WIN:
+            _run(
+                f'powershell -NoProfile -Command "'
+                f'[System.Windows.MessageBox]::Show(\'{msg}\', \'Buddy\')"'
+            )
+        else:
+            _run(f'notify-send "Buddy" "{msg}" 2>/dev/null')
+        logger.info("timer fired: %s", msg)
+
+    threading.Thread(target=_fire, daemon=True).start()
+    return f"Timer set for {n} {unit}."
+
+
+# ── Simple math ───────────────────────────────────────────────────────────────
+
+
+@_action("math_calculate")
+def _math_calculate(p):
+    try:
+        a = float(p["a"])
+        b = float(p["b"])
+        op = str(p["op"]).strip().lower()
+    except (KeyError, ValueError):
+        return "Could not parse the calculation."
+
+    if op == "plus":
+        result = a + b
+    elif op == "minus":
+        result = a - b
+    elif op in ("times", "multiplied by"):
+        result = a * b
+    elif op == "divided by":
+        if b == 0:
+            return "Cannot divide by zero."
+        result = a / b
+    elif op in ("modulo", "mod"):
+        if b == 0:
+            return "Cannot modulo by zero."
+        result = a % b
+    else:
+        return f"Unknown operator: {op!r}"
+
+    def _fmt(n: float) -> str:
+        return str(int(n)) if n == int(n) else f"{n:.6g}"
+
+    return f"{_fmt(a)} {op} {_fmt(b)} = {_fmt(result)}."
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1425,11 +1706,6 @@ class IntentInterceptor:
     """
 
     def match(self, normalized: str) -> Optional[QuickAction]:
-        """
-        Match a normalized command string against the pattern table.
-        Returns None if no match OR if the match is flagged ambiguous.
-        Co-referential pronouns always fall through regardless of pattern.
-        """
         if not normalized:
             return None
         if _COREF_RE.search(normalized):
@@ -1451,11 +1727,6 @@ class IntentInterceptor:
         return None
 
     def execute(self, action: QuickAction) -> tuple[str, bool]:
-        """
-        Execute action (+ any chained actions).
-        Returns (reply, success).  On failure returns (error_msg, False)
-        so the caller can fall through to the full LLM pipeline.
-        """
         try:
             reply = _exec_action(action)
             for chained in action.chain:

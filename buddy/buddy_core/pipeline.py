@@ -164,8 +164,13 @@ def _compute_encoding_arousal(text: str) -> float:
 
 
 _WEEKDAY_NAMES = (
-    "monday", "tuesday", "wednesday", "thursday",
-    "friday", "saturday", "sunday",
+    "monday",
+    "tuesday",
+    "wednesday",
+    "thursday",
+    "friday",
+    "saturday",
+    "sunday",
 )
 
 
@@ -193,22 +198,31 @@ def _resolve_relative_dates(text: str, now: _dt) -> str:
 
     # Multi-word phrases must come before single-word to avoid partial matches
     multi = [
-        (r"\bthis morning\b",   f"morning of {iso(today)}"),
+        (r"\bthis morning\b", f"morning of {iso(today)}"),
         (r"\bthis afternoon\b", f"afternoon of {iso(today)}"),
-        (r"\bthis evening\b",   f"evening of {iso(today)}"),
-        (r"\blast night\b",     f"night of {iso(today - timedelta(days=1))}"),
-        (r"\bthis week\b",      f"week of {iso(today - timedelta(days=today.weekday()))}"),
-        (r"\blast week\b",      f"week of {iso(today - timedelta(days=today.weekday() + 7))}"),
-        (r"\bnext week\b",      f"week of {iso(today + timedelta(days=7 - today.weekday()))}"),
-        (r"\bthis month\b",     mon_year(today)),
-        (r"\blast month\b",     mon_year(today.replace(day=1) - timedelta(days=1))),
-        (r"\bnext month\b",     mon_year((today.replace(day=28) + timedelta(days=4)).replace(day=1))),
-        (r"\bthis year\b",      str(today.year)),
-        (r"\blast year\b",      str(today.year - 1)),
-        (r"\bnext year\b",      str(today.year + 1)),
-        (r"\ba week ago\b",     iso(today - timedelta(weeks=1))),
-        (r"\ba month ago\b",    iso(today - timedelta(days=30))),
-        (r"\ba year ago\b",     iso(_shift_year(today, -1))),
+        (r"\bthis evening\b", f"evening of {iso(today)}"),
+        (r"\blast night\b", f"night of {iso(today - timedelta(days=1))}"),
+        (r"\bthis week\b", f"week of {iso(today - timedelta(days=today.weekday()))}"),
+        (
+            r"\blast week\b",
+            f"week of {iso(today - timedelta(days=today.weekday() + 7))}",
+        ),
+        (
+            r"\bnext week\b",
+            f"week of {iso(today + timedelta(days=7 - today.weekday()))}",
+        ),
+        (r"\bthis month\b", mon_year(today)),
+        (r"\blast month\b", mon_year(today.replace(day=1) - timedelta(days=1))),
+        (
+            r"\bnext month\b",
+            mon_year((today.replace(day=28) + timedelta(days=4)).replace(day=1)),
+        ),
+        (r"\bthis year\b", str(today.year)),
+        (r"\blast year\b", str(today.year - 1)),
+        (r"\bnext year\b", str(today.year + 1)),
+        (r"\ba week ago\b", iso(today - timedelta(weeks=1))),
+        (r"\ba month ago\b", iso(today - timedelta(days=30))),
+        (r"\ba year ago\b", iso(_shift_year(today, -1))),
     ]
     result = text
     for pat, repl in multi:
@@ -217,49 +231,58 @@ def _resolve_relative_dates(text: str, now: _dt) -> str:
     # "last/next Monday" etc.
     for idx, day_name in enumerate(_WEEKDAY_NAMES):
         back = (today.weekday() - idx) % 7 or 7
-        fwd  = (idx - today.weekday()) % 7 or 7
+        fwd = (idx - today.weekday()) % 7 or 7
         result = re.sub(
-            rf"\blast {day_name}\b", iso(today - timedelta(days=back)),
-            result, flags=re.IGNORECASE,
+            rf"\blast {day_name}\b",
+            iso(today - timedelta(days=back)),
+            result,
+            flags=re.IGNORECASE,
         )
         result = re.sub(
-            rf"\bnext {day_name}\b", iso(today + timedelta(days=fwd)),
-            result, flags=re.IGNORECASE,
+            rf"\bnext {day_name}\b",
+            iso(today + timedelta(days=fwd)),
+            result,
+            flags=re.IGNORECASE,
         )
 
     # "N days/weeks ago", "in N days/weeks", "N days from now"
     result = re.sub(
         r"\b(\d+)\s+days?\s+ago\b",
         lambda m: iso(today - timedelta(days=int(m.group(1)))),
-        result, flags=re.IGNORECASE,
+        result,
+        flags=re.IGNORECASE,
     )
     result = re.sub(
         r"\bin\s+(\d+)\s+days?\b",
         lambda m: iso(today + timedelta(days=int(m.group(1)))),
-        result, flags=re.IGNORECASE,
+        result,
+        flags=re.IGNORECASE,
     )
     result = re.sub(
         r"\b(\d+)\s+days?\s+from\s+now\b",
         lambda m: iso(today + timedelta(days=int(m.group(1)))),
-        result, flags=re.IGNORECASE,
+        result,
+        flags=re.IGNORECASE,
     )
     result = re.sub(
         r"\b(\d+)\s+weeks?\s+ago\b",
         lambda m: iso(today - timedelta(weeks=int(m.group(1)))),
-        result, flags=re.IGNORECASE,
+        result,
+        flags=re.IGNORECASE,
     )
     result = re.sub(
         r"\bin\s+(\d+)\s+weeks?\b",
         lambda m: iso(today + timedelta(weeks=int(m.group(1)))),
-        result, flags=re.IGNORECASE,
+        result,
+        flags=re.IGNORECASE,
     )
 
     # Single words last (after multi-word patterns to avoid partial stomping)
     single = [
-        (r"\btonight\b",   f"evening of {iso(today)}"),
-        (r"\btoday\b",     iso(today)),
+        (r"\btonight\b", f"evening of {iso(today)}"),
+        (r"\btoday\b", iso(today)),
         (r"\byesterday\b", iso(today - timedelta(days=1))),
-        (r"\btomorrow\b",  iso(today + timedelta(days=1))),
+        (r"\btomorrow\b", iso(today + timedelta(days=1))),
     ]
     for pat, repl in single:
         result = re.sub(pat, repl, result, flags=re.IGNORECASE)
@@ -272,106 +295,6 @@ def _preview(s: str, n: int = 120) -> str:
     if len(t) <= n:
         return t
     return t[:n].rstrip() + "…"
-
-
-# ==========================================================
-# Memory retrieval -> compact LLM context
-# ==========================================================
-
-
-def _get_memory_context_multi(
-    mm: Any,
-    queries: List[str],
-    *,
-    top_k: int,
-    include_deleted: bool = False,
-) -> Tuple[List[Any], str]:
-    """
-    Run one search per query, merge results by memory_id keeping highest score,
-    sort descending, return top_k total.
-
-    Returns:
-      (retrieved_list, compact_text_for_llm)
-    """
-    if mm is None:
-        return [], "None"
-
-    queries = [q.strip() for q in (queries or []) if str(q).strip()]
-    if not queries:
-        return [], "None"
-
-    t0 = time.perf_counter()
-
-    # Collect results from all queries — deduplicate by memory_id, keep max score
-    seen: dict = {}  # memory_id → candidate with highest composite_score
-    for query in queries:
-        try:
-            hits = (
-                mm.search_candidates(
-                    query_text=query,
-                    top_k=int(top_k),
-                    mode="auto",
-                    rerank_mode="auto",
-                    include_deleted=include_deleted,
-                )
-                or []
-            )
-        except Exception as e:
-            logger.debug("mem_search failed for query=%r err=%r", query, e)
-            continue
-
-        for candidate in hits:
-            mid = getattr(candidate, "memory_id", None)
-            if mid is None:
-                continue
-            # composite_score is the authoritative ranking signal;
-            # fall back to semantic_score for any older code paths.
-            score = float(
-                getattr(candidate, "composite_score", None)
-                or getattr(candidate, "semantic_score", 0.0)
-            )
-            existing = seen.get(mid)
-            if existing is None:
-                seen[mid] = candidate
-            else:
-                existing_score = float(
-                    getattr(existing, "composite_score", None)
-                    or getattr(existing, "semantic_score", 0.0)
-                )
-                if score > existing_score:
-                    seen[mid] = candidate
-
-    if not seen:
-        logger.info("mem_search_multi | dt=%.3fs retrieved=0", time.perf_counter() - t0)
-        return [], "None"
-
-    # Sort by composite_score descending, trim to top_k
-    merged = sorted(
-        seen.values(),
-        key=lambda c: float(
-            getattr(c, "composite_score", None) or getattr(c, "semantic_score", 0.0)
-        ),
-        reverse=True,
-    )[:top_k]
-
-    lines: List[str] = []
-    for x in merged:
-        memory_text = str(getattr(x, "content", "") or "").strip()
-        created = str(getattr(x, "created_at_iso", "") or "").strip()
-        tier = str(getattr(x, "memory_type", "flash") or "flash")
-        if created:
-            lines.append(f"[{tier} | {created}] {memory_text}")
-        else:
-            lines.append(f"[{tier}] {memory_text}")
-
-    text = "\n".join(lines).strip()
-    logger.info(
-        "mem_search_multi | dt=%.3fs queries=%d retrieved=%d",
-        time.perf_counter() - t0,
-        len(queries),
-        len(merged),
-    )
-    return merged, text
 
 
 # ==========================================================
@@ -574,11 +497,10 @@ async def handle_turn(
     # 3) Memory retrieval (multi-query, merged by max score)
     # ------------------------------------------------------
     t0 = time.perf_counter()
-    if search_queries:
+    if mm and search_queries:
         try:
             retrieved, mem_text = await asyncio.to_thread(
-                _get_memory_context_multi,
-                mm,
+                mm.get_memory_context_multi,
                 search_queries,
                 top_k=_top_k * 2 if deep_recall else _top_k,
                 include_deleted=deep_recall,
@@ -714,7 +636,9 @@ async def handle_turn(
         _enc_arousal = _compute_encoding_arousal(user_message)
         for _m in memories_list:
             if isinstance(_m.get("memory_text"), str):
-                _m["memory_text"] = _resolve_relative_dates(_m["memory_text"], _turn_now)
+                _m["memory_text"] = _resolve_relative_dates(
+                    _m["memory_text"], _turn_now
+                )
 
         def _ingest(
             _mm=mm,
@@ -777,7 +701,19 @@ async def handle_turn(
         await ui_output(response)
         if afterthought:
             await ui_output(afterthought)
-    elif mode == "ACTION":
+    elif mode not in ("CHAT", "ACTION"):
+        # Brain returned an invalid or missing mode — guard against silent failure.
+        fallback = "I got a bit confused there. Could you try again?"
+        logger.warning(
+            "handle_turn | invalid mode=%r sid=%s tid=%s turn=%d — sending fallback",
+            mode,
+            session_id,
+            turn_id,
+            turn_index,
+        )
+        conversations.add_buddy(text=fallback)
+        await ui_output(fallback)
+    if mode == "ACTION":
         await ui_output(response)
         action_router = ActionRouter(
             brain=brain,
@@ -817,9 +753,9 @@ async def handle_turn(
             ),
             stream=True,
         )
-        parsed_respond = payload.get("parsed")
-        response = parsed_respond.get("response")
-        memory_candidates = parsed_respond.get("memory_candidates", [])
+        parsed_respond = (payload.get("parsed") or {}) if payload else {}
+        response = parsed_respond.get("response") or ""
+        memory_candidates = parsed_respond.get("memory_candidates") or []
         if response:
             conversations.add_buddy(text=response)
             await ui_output(response)
@@ -828,7 +764,9 @@ async def handle_turn(
             _action_arousal = _compute_encoding_arousal(user_message)
             for _m in memory_candidates:
                 if isinstance(_m.get("memory_text"), str):
-                    _m["memory_text"] = _resolve_relative_dates(_m["memory_text"], _turn_now)
+                    _m["memory_text"] = _resolve_relative_dates(
+                        _m["memory_text"], _turn_now
+                    )
 
             for mem in memory_candidates:
                 try:

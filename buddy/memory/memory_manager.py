@@ -127,11 +127,11 @@ class MemoryCandidateLite:
 # recency/frequency are now folded into consolidation_strength (computed
 # by the sleep engine) rather than carried as separate signals here.
 
-W_SEMANTIC  = 0.40
-W_STRENGTH  = 0.25  # consolidation_strength written by sleep engine (P14)
-W_RERANK    = 0.15  # only when reranker is active
-W_TIER      = 0.10
-W_AROUSAL   = 0.10  # encoding_arousal from raw user message (P1/Phase 2)
+W_SEMANTIC = 0.40
+W_STRENGTH = 0.25  # consolidation_strength written by sleep engine (P14)
+W_RERANK = 0.15  # only when reranker is active
+W_TIER = 0.10
+W_AROUSAL = 0.10  # encoding_arousal from raw user message (P1/Phase 2)
 
 _TIER_BOOST = {"long": 1.0, "short": 0.5, "flash": 0.0}
 
@@ -145,11 +145,11 @@ def _composite_score(
 ) -> float:
     tier_boost = _TIER_BOOST.get(str(tier).lower(), 0.0)
     return (
-        semantic               * W_SEMANTIC
+        semantic * W_SEMANTIC
         + consolidation_strength * W_STRENGTH
-        + rerank               * W_RERANK
-        + tier_boost           * W_TIER
-        + encoding_arousal     * W_AROUSAL
+        + rerank * W_RERANK
+        + tier_boost * W_TIER
+        + encoding_arousal * W_AROUSAL
     )
 
 
@@ -324,7 +324,7 @@ class ConsolidationController:
                 dry_run=dry_run,
                 cancel_event=cancel_event,
             )
-            was_cancelled = any("cancelled" in e for e in (report.errors or []))
+            was_cancelled = any("cancelled" in e for e in report.errors or [])
             logger.info(
                 "consolidation.thread: done cancelled=%s summarized=%d "
                 "tier_updates=%d hard_deleted=%d errors=%d",
@@ -522,9 +522,7 @@ class MemoryManager:
         # ── memory path ───────────────────────────────────────────────
         if memory is not None:
             mem_type = (
-                str(memory.get("memory_type", "discard") or "discard")
-                .strip()
-                .lower()
+                str(memory.get("memory_type", "discard") or "discard").strip().lower()
             )
             mem_text = str(memory.get("memory_text", "") or "").strip()
             if not mem_text or mem_type == "discard":
@@ -536,7 +534,9 @@ class MemoryManager:
                 md.setdefault("source", str(source))
 
             # P3 (Phase 2): capture protection_tier from Brain ingestion output
-            pt = str(memory.get("protection_tier", "normal") or "normal").strip().lower()
+            pt = (
+                str(memory.get("protection_tier", "normal") or "normal").strip().lower()
+            )
             if pt not in ("normal", "critical", "immortal"):
                 pt = "normal"
             if pt != "normal":
@@ -667,7 +667,9 @@ class MemoryManager:
         """X5: If encoding_arousal >= 0.7, boost semantic neighbors' consolidation_strength."""
         if self.vector is None or self.embedder is None:
             return
-        arousal = float((getattr(entry, "metadata", {}) or {}).get("encoding_arousal", 0.0) or 0.0)
+        arousal = float(
+            (getattr(entry, "metadata", {}) or {}).get("encoding_arousal", 0.0) or 0.0
+        )
         if arousal < 0.7:
             return
         emb = getattr(entry, "embedding", None)
@@ -698,7 +700,8 @@ class MemoryManager:
                 self.sqlite.batch_update_consolidation_strength(updates)
                 self._dbg(
                     "novelty_burst | arousal=%.2f boosted=%d neighbors",
-                    arousal, len(updates),
+                    arousal,
+                    len(updates),
                 )
             except Exception:
                 pass
@@ -860,7 +863,7 @@ class MemoryManager:
                     source=source,
                     created_at_iso=_iso(getattr(e, "created_at", None)),
                     memory_type=str(getattr(e, "memory_type", "flash") or "flash"),
-                )
+                ),
             ))
 
         # Re-sort by composite score
@@ -889,3 +892,101 @@ class MemoryManager:
             )
 
         return out
+
+    # ==========================================================
+    # Memory retrieval -> compact LLM context
+    # ==========================================================
+
+    def get_memory_context_multi(
+        self,
+        queries: List[str],
+        *,
+        top_k: int,
+        include_deleted: bool = False,
+    ) -> Tuple[List[Any], str]:
+        """
+        Run one search per query, merge results by memory_id keeping highest score,
+        sort descending, return top_k total.
+
+        Returns:
+        (retrieved_list, compact_text_for_llm)
+        """
+
+        queries = [q.strip() for q in queries or [] if str(q).strip()]
+        if not queries:
+            return [], "None"
+
+        t0 = time.perf_counter()
+
+        # Collect results from all queries — deduplicate by memory_id, keep max score
+        seen: dict = {}  # memory_id → candidate with highest composite_score
+        for query in queries:
+            try:
+                hits = (
+                    self.search_candidates(
+                        query_text=query,
+                        top_k=int(top_k),
+                        mode="auto",
+                        rerank_mode="auto",
+                        include_deleted=include_deleted,
+                    )
+                    or []
+                )
+            except Exception as e:
+                logger.debug("mem_search failed for query=%r err=%r", query, e)
+                continue
+
+            for candidate in hits:
+                mid = getattr(candidate, "memory_id", None)
+                if mid is None:
+                    continue
+                # composite_score is the authoritative ranking signal;
+                # fall back to semantic_score for any older code paths.
+                score = float(
+                    getattr(candidate, "composite_score", None)
+                    or getattr(candidate, "semantic_score", 0.0)
+                )
+                existing = seen.get(mid)
+                if existing is None:
+                    seen[mid] = candidate
+                else:
+                    existing_score = float(
+                        getattr(existing, "composite_score", None)
+                        or getattr(existing, "semantic_score", 0.0)
+                    )
+                    if score > existing_score:
+                        seen[mid] = candidate
+
+        if not seen:
+            logger.info(
+                "mem_search_multi | dt=%.3fs retrieved=0", time.perf_counter() - t0
+            )
+            return [], "None"
+
+        # Sort by composite_score descending, trim to top_k
+        merged = sorted(
+            seen.values(),
+            key=lambda c: float(
+                getattr(c, "composite_score", None) or getattr(c, "semantic_score", 0.0)
+            ),
+            reverse=True,
+        )[:top_k]
+
+        lines: List[str] = []
+        for x in merged:
+            memory_text = str(getattr(x, "content", "") or "").strip()
+            created = str(getattr(x, "created_at_iso", "") or "").strip()
+            tier = str(getattr(x, "memory_type", "flash") or "flash")
+            if created:
+                lines.append(f"[{tier} | {created}] {memory_text}")
+            else:
+                lines.append(f"[{tier}] {memory_text}")
+
+        text = "\n".join(lines).strip()
+        logger.info(
+            "mem_search_multi | dt=%.3fs queries=%d retrieved=%d",
+            time.perf_counter() - t0,
+            len(queries),
+            len(merged),
+        )
+        return merged, text

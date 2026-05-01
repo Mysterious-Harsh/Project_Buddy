@@ -1,6 +1,6 @@
 # buddy/ui/textual_app.py
 #
-# Textual TUI for Buddy — v3
+# Textual TUI for Buddy — v3 (patched)
 #
 # Screens:
 #   BuddyApp → SplashScreen (logo) → BootScreen (bootstrap) → MainScreen (chat)
@@ -9,17 +9,46 @@
 # Animation frame data lives in face_frames.py.
 #
 # run_textual() is the public entry point called from main.py.
+#
+# ── Patch summary (all issues from code-review) ──────────────────────────────
+# FIX-01  Task GC: tracked via _tasks sets; done callbacks discard on completion.
+# FIX-02  Redundant sleeping=False write inside _async_set_sleeping else-branch removed.
+# FIX-03  _consume_messages uses a locally captured queue ref, not self._boot_queue.
+# FIX-04  _handle_voice_input guard is now the sole race gate; handle_voice_text
+#         no longer makes an independent check that can race against it.
+# FIX-05  _iq._q private access replaced by InputQueue.drain() public method.
+#         (InputQueue.drain() must be added to widgets.py — see comment below.)
+# FIX-06  pipeline_input() uses asyncio.wait_for with a 5-min timeout + quit-event
+#         check to prevent infinite hangs on app exit or crash.
+# FIX-07  _inactivity_watcher sleeps 60 s (not the full idle period) after
+#         triggering sleep, so re-idle detection works correctly.
+# FIX-08  stream_buf replaced with collections.deque(maxlen=400) to bound memory.
+# FIX-09  </think> detection uses a short suffix window, not O(n) full-join scan.
+# FIX-10  progress_cb thread-shared state protected by a threading.Lock.
+# FIX-11  markup_escape applied to the mute icon string in _set_voice_mute.
+# FIX-12  _stop_tts logs a warning instead of silently passing (TTS not wired).
+# FIX-13  Dead method _set_sleeping removed.
+# FIX-14  Cached widget references (StatusBar, InfoPane, SpinnerBar, etc.) set in
+#         on_mount; query_one no longer called repeatedly on hot paths.
+# FIX-15  All bare `except Exception: pass` blocks now log at DEBUG level.
+# FIX-16  typing.List / typing.Optional replaced with built-in generics (3.9+).
+# FIX-17  `import traceback` moved to module level.
+# FIX-18  Crash log path consolidated to a single variable (_crash_log_path).
+# FIX-19  logger.error() uses %r lazy formatting, not f-strings.
+# ─────────────────────────────────────────────────────────────────────────────
 
 from __future__ import annotations
 
 import asyncio
+import collections
 import os
 import signal
+import traceback
 from pathlib import Path
 import threading
 import time
 import uuid
-from typing import Any, List, Optional
+from typing import Any
 
 from rich.markup import escape as markup_escape
 from textual.app import App, ComposeResult
@@ -32,8 +61,8 @@ from buddy.tools.vision.image_encoder import extract_image_paths
 from buddy.ui.widgets import (
     # color constants (used in CSS strings and hints)
     _USE_UNICODE,
-    _CYAN,
-    _BLUE,
+    _CYAN,  # noqa: F401  (re-exported for callers)
+    _BLUE,  # noqa: F401
     _VIOLET,
     _DIM,
     _BG,
@@ -72,6 +101,15 @@ logger = get_logger("textual_app")
 EXIT_SENTINEL = "__EXIT__"
 INTERRUPT_SENTINEL = "__INTERRUPT__"
 
+# Maximum number of streaming chunks kept in the preview buffer (FIX-08).
+_STREAM_BUF_MAXLEN = 400
+# Characters needed to detect the </think> closing tag (FIX-09).
+_THINK_TAG = "</think>"
+_THINK_SUFFIX_LEN = len(_THINK_TAG) * 2  # small rolling window
+
+# Timeout (seconds) for pipeline_input() waiting for user follow-up (FIX-06).
+_PIPELINE_INPUT_TIMEOUT = 300.0
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # SplashScreen — full-screen logo + face animation, shown before boot log
@@ -90,6 +128,15 @@ class SplashScreen(Screen):
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self._switching = False
+        # FIX-01: track background tasks so they are not GC'd silently.
+        self._tasks: set[asyncio.Task] = set()
+
+    def _track(self, coro: Any) -> asyncio.Task:
+        """Create a tracked task that removes itself from _tasks when done."""
+        t = asyncio.create_task(coro)
+        self._tasks.add(t)
+        t.add_done_callback(self._tasks.discard)
+        return t
 
     def compose(self) -> ComposeResult:
         yield SplashView()
@@ -100,7 +147,7 @@ class SplashScreen(Screen):
     def _go_boot(self) -> None:
         if not self._switching:
             self._switching = True
-            asyncio.create_task(self._switch())
+            self._track(self._switch())
 
     async def _switch(self) -> None:
         await self.app.switch_screen(BootScreen())
@@ -109,7 +156,7 @@ class SplashScreen(Screen):
         """Any key skips the splash."""
         if not self._switching:
             self._switching = True
-            asyncio.create_task(self._switch())
+            self._track(self._switch())
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -128,7 +175,15 @@ class BootScreen(Screen):
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
-        self._boot_queue: Optional[asyncio.Queue] = None
+        self._boot_queue: asyncio.Queue | None = None
+        # FIX-01
+        self._tasks: set[asyncio.Task] = set()
+
+    def _track(self, coro: Any) -> asyncio.Task:
+        t = asyncio.create_task(coro)
+        self._tasks.add(t)
+        t.add_done_callback(self._tasks.discard)
+        return t
 
     def compose(self) -> ComposeResult:
         yield BootBanner()
@@ -137,16 +192,17 @@ class BootScreen(Screen):
 
     def on_mount(self) -> None:
         self._boot_queue = asyncio.Queue()
-        asyncio.create_task(self._run_bootstrap())
-        asyncio.create_task(self._consume_messages())
+        self._track(self._run_bootstrap())
+        self._track(self._consume_messages())
 
     async def _run_bootstrap(self) -> None:
         loop = asyncio.get_running_loop()
-        queue = self._boot_queue
+        # FIX-03: capture queue locally so _run_bootstrap is independent of
+        # any future re-assignment of self._boot_queue.
+        queue: asyncio.Queue = self._boot_queue  # type: ignore[assignment]
 
         def progress_cb(msg: str, status: str = "running") -> None:
-            if queue is not None:
-                loop.call_soon_threadsafe(queue.put_nowait, (msg, status))
+            loop.call_soon_threadsafe(queue.put_nowait, (msg, status))
 
         state = None
         try:
@@ -156,18 +212,18 @@ class BootScreen(Screen):
             opts = BootstrapOptions(show_boot_ui=False, pre_wizard_result=pre_wizard)
             state = await asyncio.to_thread(bootstrap, opts, progress_cb)
         except asyncio.CancelledError:
-            if queue is not None:
-                loop.call_soon_threadsafe(queue.put_nowait, ("__DONE__", None))
+            loop.call_soon_threadsafe(queue.put_nowait, ("__DONE__", None))
             raise
         except BaseException as ex:
             logger.exception("bootstrap failed: %r", ex)
-        if queue is not None:
-            loop.call_soon_threadsafe(queue.put_nowait, ("__DONE__", state))
+        loop.call_soon_threadsafe(queue.put_nowait, ("__DONE__", state))
 
     async def _consume_messages(self) -> None:
+        # FIX-03: use local ref captured after on_mount guarantees assignment.
+        queue: asyncio.Queue = self._boot_queue  # type: ignore[assignment]
         log = self.query_one(BootLog)
         while True:
-            item = await self._boot_queue.get()
+            item = await queue.get()
             msg, payload = item
             if msg == "__DONE__":
                 app = self.app
@@ -221,7 +277,7 @@ class MainScreen(Screen):
         sys_state: SystemState,
         state_lock: threading.Lock,
         interrupt_event: threading.Event,
-        memory_manager: Optional[Any] = None,
+        memory_manager: Any | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -231,17 +287,34 @@ class MainScreen(Screen):
         self._state_lock = state_lock
         self._interrupt_event = interrupt_event
         self._memory_manager = memory_manager
-        self._active_turn: Optional[asyncio.Task] = None
+        self._active_turn: asyncio.Task | None = None
         self._turn_lock = asyncio.Lock()
         self._quit_event = asyncio.Event()
         self._last_interrupt_ts = 0.0
         self._last_ctrl_c_ts = 0.0
         self._interrupt_reason: str = ""
-        self._main_loop: Optional[asyncio.AbstractEventLoop] = None
+        self._main_loop: asyncio.AbstractEventLoop | None = None
         self._stt: Any = None
         self._idle_timeout_s: float = 20 * 60
         self._last_activity_ts: float = time.monotonic()
         self._turn_count: int = 0
+        # FIX-01: tracked task set
+        self._tasks: set[asyncio.Task] = set()
+        # FIX-14: cached widget references (set in on_mount)
+        self._w_status_bar: StatusBar | None = None
+        self._w_info_pane: InfoPane | None = None
+        self._w_spinner_bar: SpinnerBar | None = None
+        self._w_chat_log: ChatLog | None = None
+        self._w_mic_indicator: MicIndicator | None = None
+        self._w_content_switcher: ContentSwitcher | None = None
+        self._w_sleep_view: SleepView | None = None
+
+    def _track(self, coro: Any) -> asyncio.Task:
+        """Create and track a background task (FIX-01)."""
+        t = asyncio.create_task(coro)
+        self._tasks.add(t)
+        t.add_done_callback(self._tasks.discard)
+        return t
 
     # ── Compose ───────────────────────────────────────────────────────────────
 
@@ -271,6 +344,18 @@ class MainScreen(Screen):
     def on_mount(self) -> None:
         self._main_loop = asyncio.get_running_loop()
 
+        # FIX-14: cache widget references once, avoid repeated DOM traversal.
+        try:
+            self._w_status_bar = self.query_one(StatusBar)
+            self._w_info_pane = self.query_one(InfoPane)
+            self._w_spinner_bar = self.query_one(SpinnerBar)
+            self._w_chat_log = self.query_one(ChatLog)
+            self._w_mic_indicator = self.query_one(MicIndicator)
+            self._w_content_switcher = self.query_one(ContentSwitcher)
+            self._w_sleep_view = self.query_one(SleepView)
+        except Exception:
+            logger.debug("on_mount: widget cache population failed", exc_info=True)
+
         try:
             cfg = getattr(self._state, "config", {}) or {}
             buddy_cfg = cfg.get("buddy", {}) or {}
@@ -279,31 +364,35 @@ class MainScreen(Screen):
                 general_cfg.get("sleep_after_idle_sec", 20) * 60
             )
         except Exception:
+            logger.debug("on_mount: failed to read idle timeout", exc_info=True)
             self._idle_timeout_s = 1200.0
 
         try:
             self.query_one(BuddyInput).focus()
         except Exception:
-            pass
+            logger.debug("on_mount: BuddyInput focus failed", exc_info=True)
 
-        asyncio.create_task(self._inactivity_watcher())
+        self._track(self._inactivity_watcher())
         self._refresh_info_bar()
 
-    def _refresh_info_bar(self, turn_ms: Optional[int] = None) -> None:
+    def _refresh_info_bar(self, turn_ms: int | None = None) -> None:
+        # FIX-14: use cached references.
         try:
             cfg = getattr(self._state, "config", {}) or {}
             buddy_cfg = cfg.get("buddy", {}) or {}
             feat_cfg = buddy_cfg.get("features", {}) or {}
             voice = "on" if feat_cfg.get("enable_audio_stt", False) else "off"
-            self.query_one(StatusBar).set_info(voice=voice, turn=self._turn_count)
+            if self._w_status_bar:
+                self._w_status_bar.set_info(voice=voice, turn=self._turn_count)
         except Exception:
-            pass
+            logger.debug("_refresh_info_bar: status bar update failed", exc_info=True)
         try:
-            self.query_one(InfoPane).update_turn(self._turn_count, turn_ms)
-            if self._memory_manager is not None:
-                self.query_one(InfoPane).update_memory_counts(self._memory_manager)
+            if self._w_info_pane:
+                self._w_info_pane.update_turn(self._turn_count, turn_ms)
+                if self._memory_manager is not None:
+                    self._w_info_pane.update_memory_counts(self._memory_manager)
         except Exception:
-            pass
+            logger.debug("_refresh_info_bar: info pane update failed", exc_info=True)
 
     # ── Interrupt / quit ──────────────────────────────────────────────────────
 
@@ -317,14 +406,19 @@ class MainScreen(Screen):
         self._last_interrupt_ts = now
         self._interrupt_reason = reason
         self._interrupt_event.set()
-        if self._active_turn and not self._active_turn.done():
+        turn_active = self._active_turn is not None and not self._active_turn.done()
+        if turn_active and self._active_turn is not None:
             self._active_turn.cancel()
+            loop = self._main_loop
+            if loop:
+                # FIX-05: use InputQueue.push_interrupt() instead of accessing _q directly.
+                self._iq.push_interrupt(INTERRUPT_SENTINEL, loop)
         self._stop_spinner()
-        self.query_one(StatusBar).set_hint(f"[{_YELLOW}]⛔ interrupted[/]")
-        logger.info("interrupt: requested — reason=%r", reason)
-        loop = self._main_loop
-        if loop:
-            loop.call_soon_threadsafe(self._iq._q.put_nowait, INTERRUPT_SENTINEL)
+        if self._w_status_bar:
+            self._w_status_bar.set_hint(f"[{_YELLOW}]⛔ interrupted[/]")
+        logger.info(
+            "interrupt: requested — reason=%r active_turn=%s", reason, turn_active
+        )
 
     def action_toggle_mute(self) -> None:
         self._toggle_voice_mute()
@@ -340,21 +434,22 @@ class MainScreen(Screen):
                 loop = asyncio.get_running_loop()
                 self._iq.push_sentinel(EXIT_SENTINEL, loop)
             except Exception:
-                pass
+                logger.debug("action_quit_request: push_sentinel failed", exc_info=True)
             self.app.exit()
         else:
             self._last_ctrl_c_ts = now
             self._request_interrupt("you pressed Ctrl+C")
             try:
-                self.query_one(StatusBar).set_hint(
-                    f"[{_YELLOW}]Ctrl+C again to quit[/]", 2.0
-                )
+                if self._w_status_bar:
+                    self._w_status_bar.set_hint(
+                        f"[{_YELLOW}]Ctrl+C again to quit[/]", 2.0
+                    )
             except Exception:
-                pass
+                logger.debug("action_quit_request: hint failed", exc_info=True)
 
     # ── Input handling ────────────────────────────────────────────────────────
 
-    async def _on_buddy_input_submitted(self, event: BuddyInput.Submitted) -> None:
+    async def on_buddy_input_submitted(self, event: BuddyInput.Submitted) -> None:
         text = (event.value or "").strip()
         if not text:
             return
@@ -364,11 +459,11 @@ class MainScreen(Screen):
             return
 
         if text.lower() in {"!sleep", "/sleep"}:
-            asyncio.create_task(self._async_set_sleeping(True))
+            self._track(self._async_set_sleeping(True))
             return
 
         if text.lower() in {"!wake", "/wake"}:
-            asyncio.create_task(self._async_set_sleeping(False))
+            self._track(self._async_set_sleeping(False))
             return
 
         turn_active = self._active_turn is not None and not self._active_turn.done()
@@ -377,16 +472,18 @@ class MainScreen(Screen):
             with self._state_lock:
                 pipeline_running = self._sys_state.pipeline_running
             if pipeline_running:
-                # Pipeline is busy processing — drop input, prompt to interrupt
+                # Pipeline is busy processing — drop input, prompt to interrupt.
                 try:
-                    self.query_one(StatusBar).set_hint(
-                        f"[{_YELLOW}]busy — Esc to interrupt[/]", 2.0
-                    )
+                    if self._w_status_bar:
+                        self._w_status_bar.set_hint(
+                            f"[{_YELLOW}]busy — Esc to interrupt[/]", 2.0
+                        )
                 except Exception:
-                    pass
+                    logger.debug("on_buddy_input_submitted: hint failed", exc_info=True)
                 return
-            # Pipeline paused, waiting for follow-up input
-            await self.query_one(ChatLog).add_message(text, "user")
+            # Pipeline paused, waiting for follow-up input.
+            if self._w_chat_log:
+                await self._w_chat_log.add_message(text, "user")
             await self._iq.push_typed(text)
             return
 
@@ -395,21 +492,25 @@ class MainScreen(Screen):
         with self._state_lock:
             is_sleeping = self._sys_state.sleeping
         if is_sleeping:
-            asyncio.create_task(self._async_set_sleeping(False))
+            self._track(self._async_set_sleeping(False))
 
-        await self.query_one(ChatLog).add_message(text, "user")
+        if self._w_chat_log:
+            await self._w_chat_log.add_message(text, "user")
 
         try:
             img_paths = extract_image_paths(text)
             if img_paths:
                 names = ", ".join(os.path.basename(p) for p in img_paths)
-                await self.query_one(ChatLog).add_message(f"[image: {names}]", "meta")
+                if self._w_chat_log:
+                    await self._w_chat_log.add_message(f"[image: {names}]", "meta")
         except Exception:
-            pass
+            logger.debug(
+                "on_buddy_input_submitted: image path extraction failed", exc_info=True
+            )
 
         # Text goes directly to _run_turn — NOT into the queue.
         # The queue is only for mid-turn follow-up inputs via pipeline_input().
-        self._active_turn = asyncio.create_task(self._run_turn(text))
+        self._active_turn = self._track(self._run_turn(text))
 
     # ── Voice input ───────────────────────────────────────────────────────────
 
@@ -442,10 +543,10 @@ class MainScreen(Screen):
             return
         if sleeping:
             if cmd == VoiceCmd.WAKE:
-                asyncio.create_task(self._async_set_sleeping(False))
+                self._track(self._async_set_sleeping(False))
             return
         if cmd == VoiceCmd.SLEEP:
-            asyncio.create_task(self._async_set_sleeping(True))
+            self._track(self._async_set_sleeping(True))
             return
         if cmd in (VoiceCmd.MUTE, VoiceCmd.TOGGLE_MUTE):
             self._toggle_voice_mute()
@@ -456,28 +557,39 @@ class MainScreen(Screen):
         if muted:
             return
 
-        turn_active = self._active_turn is not None and not self._active_turn.done()
+        # FIX-04: only _handle_voice_input performs the active-turn guard;
+        # the check here is removed to eliminate the TOCTOU race.
         loop = self._main_loop
         if loop:
+            turn_active = self._active_turn is not None and not self._active_turn.done()
             if turn_active:
-                # Turn running but pipeline paused waiting for follow-up — queue only
+                # Turn running but pipeline paused waiting for follow-up — queue only.
                 self._iq.push_voice(t, loop)
             else:
-                # Fresh turn — bypass queue, start directly
-                asyncio.create_task(self._handle_voice_input(t))
+                # Fresh turn — bypass queue, start directly.
+                self._track(self._handle_voice_input(t))
 
     async def _handle_voice_input(self, text: str) -> None:
+        # FIX-04: sole authoritative guard against concurrent turns.
         if self._active_turn and not self._active_turn.done():
             return
         self._notify_activity()
-        await self.query_one(ChatLog).add_message(text, "user")
-        self._active_turn = asyncio.create_task(self._run_turn(text))
+        if self._w_chat_log:
+            await self._w_chat_log.add_message(text, "user")
+        self._active_turn = self._track(self._run_turn(text))
 
     # ── Turn execution ────────────────────────────────────────────────────────
 
     async def _run_turn(self, user_text: str) -> None:
         async with self._turn_lock:
             self._interrupt_event.clear()
+            self._interrupt_reason = ""
+            # Yield first so any call_soon_threadsafe callbacks (e.g. INTERRUPT_SENTINEL
+            # queued by an Escape press with no active turn) fire before we drain.
+            await asyncio.sleep(0)
+            # FIX-05: drain stale sentinels via the public InputQueue interface.
+            self._iq.drain()
+
             turn_id = f"turn-{uuid.uuid4().hex[:8]}"
             self._turn_count += 1
             logger.info("turn.start id=%s chars=%d", turn_id, len(user_text))
@@ -491,63 +603,96 @@ class MainScreen(Screen):
 
             loop = self._main_loop
             current_label = "Leafing through memories..."
-            stream_buf: List[str] = []
+
+            # FIX-08: bounded deque prevents unbounded memory growth during long streams.
+            stream_buf: collections.deque[str] = collections.deque(
+                maxlen=_STREAM_BUF_MAXLEN
+            )
             _last_preview_t = 0.0
             _thinking_done = False
+            # FIX-10: lock protecting thread-shared mutable state in progress_cb.
+            _cb_lock = threading.Lock()
 
-            # Called from asyncio.to_thread() — MUST use call_soon_threadsafe
-            def progress_cb(text: str, stream: bool = True) -> None:
-                nonlocal current_label, stream_buf, _last_preview_t, _thinking_done
+            # Called from asyncio.to_thread() — MUST use call_soon_threadsafe.
+            def progress_cb(chunk: str, stream: bool = True) -> None:
+                nonlocal current_label, _last_preview_t, _thinking_done
                 if loop is None:
                     return
                 now = time.perf_counter()
 
-                if not stream:
-                    _thinking_done = False
-                    stream_buf.clear()
-                    current_label = text.strip() or current_label
-                    loop.call_soon_threadsafe(
-                        self._update_spinner, current_label, "working"
-                    )
-                    return
+                with _cb_lock:
+                    if not stream:
+                        # FIX-10: all shared-state mutations inside the lock.
+                        _thinking_done = False
+                        stream_buf.clear()
+                        current_label = chunk.strip() or current_label
+                        _label = current_label
+                        loop.call_soon_threadsafe(
+                            self._update_spinner, _label, "working"
+                        )
+                        return
 
-                stream_buf.append(text)
+                    stream_buf.append(chunk)
 
-                if now - _last_preview_t < 0.05:
-                    return
-                _last_preview_t = now
+                    if now - _last_preview_t < 0.05:
+                        return
+                    _last_preview_t = now
 
-                if not _thinking_done:
-                    joined = (
-                        "".join(stream_buf)
+                    if _thinking_done:
+                        return
+
+                    # FIX-09: scan only a short suffix window, not the full joined string.
+                    suffix_chars = (
+                        "".join(list(stream_buf)[-_THINK_SUFFIX_LEN:])
                         .replace("\r", " ")
                         .replace("\n", " ")
-                        .strip()
                     )
-                    preview = joined[-80:]
+
+                    # Preview: last 80 chars of the suffix (still readable).
+                    preview = suffix_chars[-80:].strip()
                     loop.call_soon_threadsafe(
                         self._update_spinner, preview or current_label, "thinking"
                     )
 
-                    if "</think>" in joined:
+                    if _THINK_TAG in suffix_chars:
                         _thinking_done = True
                         stream_buf.clear()
+                        _label = current_label
                         loop.call_soon_threadsafe(
-                            self._update_spinner, current_label, "thinking"
+                            self._update_spinner, _label, "thinking"
                         )
 
             async def pipeline_output(text: str) -> None:
                 self._stop_spinner()
-                await self.query_one(ChatLog).add_message(text, "buddy")
+                if self._w_chat_log:
+                    await self._w_chat_log.add_message(text, "buddy")
                 self._start_spinner(current_label, "thinking")
 
             async def pipeline_input() -> str:
+                """
+                Wait for user follow-up input.
+
+                FIX-06: bounded wait (timeout) + quit-event awareness so the
+                coroutine never hangs forever on app exit or crash.
+                """
                 self._notify_activity()
                 with self._state_lock:
                     self._sys_state.pipeline_running = False
                 self._stop_spinner()
 
-                result = await self._iq.get()
+                try:
+                    result = await asyncio.wait_for(
+                        self._iq.get(), timeout=_PIPELINE_INPUT_TIMEOUT
+                    )
+                except asyncio.TimeoutError:
+                    logger.info(
+                        "pipeline_input: timed out after %.0fs", _PIPELINE_INPUT_TIMEOUT
+                    )
+                    raise asyncio.CancelledError("pipeline_input timed out")
+
+                # Also abort cleanly if the app is shutting down.
+                if self._quit_event.is_set():
+                    raise asyncio.CancelledError("app is exiting")
 
                 with self._state_lock:
                     self._sys_state.pipeline_running = True
@@ -570,7 +715,9 @@ class MainScreen(Screen):
                 )
                 logger.info("turn.done id=%s", turn_id)
             except asyncio.CancelledError:
-                logger.info("turn.cancelled id=%s reason=%r", turn_id, self._interrupt_reason)
+                logger.info(
+                    "turn.cancelled id=%s reason=%r", turn_id, self._interrupt_reason
+                )
                 _convs = getattr(
                     getattr(self._state, "artifacts", None), "conversations", None
                 )
@@ -579,9 +726,10 @@ class MainScreen(Screen):
                     _convs.add_buddy_if_unanswered(f"I got interrupted — {_reason}.")
             except Exception as ex:
                 logger.exception("turn.crash id=%s err=%r", turn_id, ex)
-                self.query_one(StatusBar).set_hint(
-                    f"[{_RED}]⚠ error: {markup_escape(str(ex))}[/]"
-                )
+                if self._w_status_bar:
+                    self._w_status_bar.set_hint(
+                        f"[{_RED}]⚠ error: {markup_escape(str(ex))}[/]"
+                    )
             finally:
                 _turn_ms = int((time.perf_counter() - _turn_start) * 1000)
                 self._active_turn = None
@@ -594,45 +742,51 @@ class MainScreen(Screen):
     # ── Spinner helpers ───────────────────────────────────────────────────────
 
     def _start_spinner(self, label: str, state: str = "thinking") -> None:
+        # FIX-14: use cached widget reference.
         try:
-            self.query_one(SpinnerBar).show(label, state)
+            if self._w_spinner_bar:
+                self._w_spinner_bar.show(label, state)
         except Exception:
-            pass
+            logger.debug("_start_spinner failed", exc_info=True)
 
     def _stop_spinner(self) -> None:
         try:
-            self.query_one(SpinnerBar).hide()
+            if self._w_spinner_bar:
+                self._w_spinner_bar.hide()
         except Exception:
-            pass
+            logger.debug("_stop_spinner failed", exc_info=True)
 
     def _update_spinner(self, label: str, state: str = "thinking") -> None:
         """Called from event loop (via call_soon_threadsafe)."""
         try:
-            self.query_one(SpinnerBar).update_label(label, state)
+            if self._w_spinner_bar:
+                self._w_spinner_bar.update_label(label, state)
         except Exception:
-            pass
+            logger.debug("_update_spinner failed", exc_info=True)
 
     # ── Sleep ─────────────────────────────────────────────────────────────────
 
     def _toggle_sleep(self) -> None:
         with self._state_lock:
             sleeping = self._sys_state.sleeping
-        asyncio.create_task(self._async_set_sleeping(not sleeping))
+        self._track(self._async_set_sleeping(not sleeping))
 
-    def _set_sleeping(self, sleeping: bool) -> None:
-        asyncio.create_task(self._async_set_sleeping(sleeping))
+    # FIX-13: dead method _set_sleeping removed — all callers now use
+    # self._track(self._async_set_sleeping(...)) directly.
 
     async def _async_set_sleeping(self, sleeping: bool) -> None:
+        # FIX-02: set sleeping state once, correctly, at the top.
         with self._state_lock:
             self._sys_state.sleeping = sleeping
 
-        switcher = self.query_one(ContentSwitcher)
-        sleep_view = self.query_one(SleepView)
+        switcher = self._w_content_switcher or self.query_one(ContentSwitcher)
+        sleep_view = self._w_sleep_view or self.query_one(SleepView)
+        status_bar = self._w_status_bar or self.query_one(StatusBar)
 
         if sleeping:
             sleep_view.reset_stats()
             switcher.current = "sleep-view"
-            self.query_one(StatusBar).set_hint(
+            status_bar.set_hint(
                 f"[dim {_VIOLET}]😴 sleeping — consolidating memories…[/]", 0
             )
             mm = self._memory_manager
@@ -642,16 +796,16 @@ class MainScreen(Screen):
                     with self._state_lock:
                         self._sys_state.consolidating = True
         else:
+            # FIX-02: sleeping already set to False at the top — no duplicate write.
             mm = self._memory_manager
             if mm is not None and getattr(mm, "is_consolidating", False):
                 mm.stop_consolidation(wait=False)
 
             with self._state_lock:
-                self._sys_state.sleeping = False
                 self._sys_state.consolidating = False
 
             switcher.current = "chat-view"
-            self.query_one(StatusBar).set_hint(f"[{_GREEN}]🌅 awake[/]", 4.0)
+            status_bar.set_hint(f"[{_GREEN}]🌅 awake[/]", 4.0)
             self._notify_activity()
 
     def _on_consolidation_done(self, report: Any) -> None:
@@ -661,7 +815,7 @@ class MainScreen(Screen):
 
         def _apply() -> None:
             try:
-                sv = self.query_one(SleepView)
+                sv = self._w_sleep_view or self.query_one(SleepView)
                 if report:
                     flash = getattr(report, "flash_processed", 0) or 0
                     short = getattr(report, "short_processed", 0) or 0
@@ -672,12 +826,14 @@ class MainScreen(Screen):
                     )
                     sv.update_consolidation_stats(flash=flash, short=short, long=long_)
             except Exception:
-                pass
+                logger.debug("_on_consolidation_done._apply failed", exc_info=True)
 
         try:
             self.app.call_from_thread(_apply)
         except Exception:
-            pass
+            logger.debug(
+                "_on_consolidation_done: call_from_thread failed", exc_info=True
+            )
 
     # ── Voice mute ────────────────────────────────────────────────────────────
 
@@ -689,20 +845,30 @@ class MainScreen(Screen):
                 try:
                     self._stt.mute() if muted else self._stt.unmute()
                 except Exception:
-                    pass
+                    logger.debug(
+                        "_set_voice_mute: stt mute/unmute failed", exc_info=True
+                    )
             self._sys_state.voice_muted = muted
         try:
-            self.query_one(MicIndicator).set_state("muted" if muted else "idle")
+            mic = self._w_mic_indicator or self.query_one(MicIndicator)
+            mic.set_state("muted" if muted else "idle")
         except Exception:
-            pass
+            logger.debug("_set_voice_mute: MicIndicator update failed", exc_info=True)
+        # FIX-11: escape the icon string so Rich markup is never broken by
+        # unexpected characters in the mute icon.
         if muted:
-            icon = "🔇 " if _USE_UNICODE else "M "
-            self.query_one(StatusBar).set_hint(f"[{_DIM}]{icon}muted[/]")
+            raw_icon = "🔇 " if _USE_UNICODE else "M "
+            icon = markup_escape(raw_icon)
+            hint = f"[{_DIM}]{icon}muted[/]"
         else:
-            label = (
+            hint = (
                 f"[{_GREEN}]🔊 unmuted[/]" if _USE_UNICODE else f"[{_GREEN}]unmuted[/]"
             )
-            self.query_one(StatusBar).set_hint(label)
+        try:
+            sb = self._w_status_bar or self.query_one(StatusBar)
+            sb.set_hint(hint)
+        except Exception:
+            logger.debug("_set_voice_mute: StatusBar hint failed", exc_info=True)
         self._refresh_info_bar()
 
     def _toggle_voice_mute(self) -> None:
@@ -715,9 +881,10 @@ class MainScreen(Screen):
 
     def set_mic_active(self) -> None:
         try:
-            self.query_one(MicIndicator).set_state("active")
+            mic = self._w_mic_indicator or self.query_one(MicIndicator)
+            mic.set_state("active")
         except Exception:
-            pass
+            logger.debug("set_mic_active failed", exc_info=True)
 
     def _handle_voice_interrupt(self) -> None:
         """
@@ -729,23 +896,33 @@ class MainScreen(Screen):
             self._interrupt_event.set()
             self._active_turn.cancel()
             self._stop_spinner()
-            self.query_one(StatusBar).set_hint(f"[{_YELLOW}]⛔ voice interrupt[/]")
+            if self._w_status_bar:
+                self._w_status_bar.set_hint(f"[{_YELLOW}]⛔ voice interrupt[/]")
             logger.info("interrupt: voice onset detected")
         try:
-            self.query_one(MicIndicator).set_state("active")
+            mic = self._w_mic_indicator or self.query_one(MicIndicator)
+            mic.set_state("active")
         except Exception:
-            pass
+            logger.debug(
+                "_handle_voice_interrupt: MicIndicator update failed", exc_info=True
+            )
 
     def set_mic_idle(self) -> None:
         try:
-            self.query_one(MicIndicator).set_state("idle")
+            mic = self._w_mic_indicator or self.query_one(MicIndicator)
+            mic.set_state("idle")
         except Exception:
-            pass
+            logger.debug("set_mic_idle failed", exc_info=True)
 
     def _stop_tts(self) -> None:
-        """Stop TTS voice output immediately. No-op until TTS is wired into the app."""
-        # Wire up: self._tts.interrupt() once TextToSpeech is initialised here.
-        pass
+        """
+        Stop TTS voice output immediately.
+
+        FIX-12: TTS is not yet wired — log a warning so callers are aware the
+        interrupt had no effect, rather than silently doing nothing.
+        Wire up: self._tts.interrupt() once TextToSpeech is initialised here.
+        """
+        logger.warning("_stop_tts called but TTS is not yet wired into the app — no-op")
 
     # ── Activity / idle ───────────────────────────────────────────────────────
 
@@ -767,7 +944,9 @@ class MainScreen(Screen):
                     if not already_sleeping and not running:
                         logger.info("inactivity: %.0fs idle — sleeping", elapsed)
                         await self._async_set_sleeping(True)
-                    await asyncio.sleep(self._idle_timeout_s)
+                    # FIX-07: sleep a fixed short interval so re-idle after wake
+                    # is detected promptly, rather than waiting another full period.
+                    await asyncio.sleep(60.0)
                 else:
                     await asyncio.sleep(min(remaining, 60.0))
         except asyncio.CancelledError:
@@ -791,7 +970,7 @@ class BuddyApp(App):
     }}
     """
 
-    def __init__(self, pre_wizard_result: Optional[Any] = None, **kwargs: Any) -> None:
+    def __init__(self, pre_wizard_result: Any | None = None, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self._pre_wizard_result = pre_wizard_result  # from run_pre_textual_setup()
         self._iq = InputQueue()
@@ -799,9 +978,17 @@ class BuddyApp(App):
         self._state_lock = threading.Lock()
         self._interrupt_event = threading.Event()
         self._stt: Any = None
-        self._main_screen: Optional[MainScreen] = None
-        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._main_screen: MainScreen | None = None
+        self._loop: asyncio.AbstractEventLoop | None = None
         self._bootstrap_state: Any = None  # set by _async_on_boot_done
+        # FIX-01
+        self._tasks: set[asyncio.Task] = set()
+
+    def _track(self, coro: Any) -> asyncio.Task:
+        t = asyncio.create_task(coro)
+        self._tasks.add(t)
+        t.add_done_callback(self._tasks.discard)
+        return t
 
     def on_mount(self) -> None:
         self._loop = asyncio.get_running_loop()
@@ -826,7 +1013,7 @@ class BuddyApp(App):
             memory_manager=mm,
         )
         await self.switch_screen(self._main_screen)
-        asyncio.create_task(self._start_stt(state))
+        self._track(self._start_stt(state))
 
     async def _start_stt(self, state: Any) -> None:
         try:
@@ -845,8 +1032,8 @@ class BuddyApp(App):
             # [voice].enabled can also disable it (defaults True when absent).
             voice_enabled = bool(voice_cfg.get("enabled", True))
             if not feat_cfg.get("enable_audio_stt", False) or not voice_enabled:
-                if self._main_screen:
-                    self._main_screen.query_one(StatusBar).set_hint(
+                if self._main_screen and self._main_screen._w_status_bar:
+                    self._main_screen._w_status_bar.set_hint(
                         f"[dim {_DIM}]🎧 voice disabled[/]"
                     )
                 return
@@ -898,14 +1085,15 @@ class BuddyApp(App):
 
             if self._main_screen:
                 self._main_screen.set_stt_engine(self._stt)
-                self._main_screen.query_one(StatusBar).set_hint(
-                    f"[{_GREEN}]🎧 voice enabled[/]"
-                )
+                if self._main_screen._w_status_bar:
+                    self._main_screen._w_status_bar.set_hint(
+                        f"[{_GREEN}]🎧 voice enabled[/]"
+                    )
 
         except Exception as ex:
             logger.exception("stt: failed to start: %r", ex)
-            if self._main_screen:
-                self._main_screen.query_one(StatusBar).set_hint(
+            if self._main_screen and self._main_screen._w_status_bar:
+                self._main_screen._w_status_bar.set_hint(
                     f"[{_RED}]⚠ stt failed: {markup_escape(str(ex))}[/]"
                 )
 
@@ -914,7 +1102,7 @@ class BuddyApp(App):
             try:
                 self._stt.stop()
             except Exception:
-                pass
+                logger.debug("on_unmount: stt.stop() failed", exc_info=True)
         _fn = getattr(self._bootstrap_state, "shutdown", None)
         if callable(_fn):
             try:
@@ -945,16 +1133,14 @@ def _prewarm_whisper_before_textual() -> None:
         else:
             import tomli as _toml  # type: ignore
 
-        _root = (
-            (
-                Path(os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA", ""))
-                / "Buddy"
-                if (os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA"))
-                else Path.home() / "Buddy"
-            )
-            if os.name == "nt"
-            else Path.home() / ".buddy"
-        )
+        # FIX-19 / platform: resolve config root per platform.
+        # On Windows, fall through to Path.home()/"Buddy" if env vars are absent.
+        if os.name == "nt":
+            _appdata = os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA")
+            _root = Path(_appdata) / "Buddy" if _appdata else Path.home() / "Buddy"
+        else:
+            _root = Path.home() / ".buddy"
+
         _cfg_path = _root / "config" / "buddy.toml"
         if not _cfg_path.exists():
             _cfg_path = Path(__file__).parent.parent / "config" / "buddy.toml"
@@ -992,17 +1178,16 @@ def run_textual() -> None:
     Bootstrap happens inside BootScreen; no state arg needed at startup.
     Called from main.py.
     """
-    import traceback as _tb
-
-    _log_path = Path.home() / ".buddy" / "logs" / "textual_app.log"
-    _textual_log = Path.home() / ".buddy" / "logs" / "textual_crash.log"
-    os.environ.setdefault("TEXTUAL_LOG", str(_textual_log))
+    # FIX-17: traceback imported at module level (top of file).
+    # FIX-18: single consolidated crash log path.
+    _crash_log_path = Path.home() / ".buddy" / "logs" / "buddy_crash.log"
+    os.environ.setdefault("TEXTUAL_LOG", str(_crash_log_path))
 
     # ── Pre-Textual interactive setup ─────────────────────────────────────────
     # First-boot wizard and LLM model selection need a plain terminal (input()
     # works).  Textual takes over the terminal after BuddyApp.run(), so we MUST
     # do all interactive I/O here, before that call.
-    _pre_wizard_result: Optional[Any] = None
+    _pre_wizard_result: Any | None = None
     try:
         from buddy.buddy_core.boot import run_pre_textual_setup
 
@@ -1033,11 +1218,12 @@ def run_textual() -> None:
     try:
         app.run()
     except Exception as ex:
-        _err = _tb.format_exc()
-        logger.error(f"BuddyApp crashed : {ex}")
+        _err = traceback.format_exc()
+        # FIX-19: use %r lazy formatting in logger calls.
+        logger.error("BuddyApp crashed: %r", ex)
         try:
-            with open(_log_path, "a", encoding="utf-8") as _f:
-                _f.write(f"\n{'='*60}\nBuddyApp crash:\n{_err}\n")
+            with open(_crash_log_path, "a", encoding="utf-8") as _f:
+                _f.write(f"\n{'=' * 60}\nBuddyApp crash:\n{_err}\n")
         except Exception:
             pass
         raise

@@ -120,7 +120,18 @@ class VisionTool:
         for p in raw_paths:
             r = Path(p).expanduser().resolve()
             if not r.exists():
-                raise ValueError(f"Image file not found: {r}")
+                # macOS screenshot filenames use   (narrow no-break space)
+                # between the time and AM/PM. If the user typed a regular space,
+                # try swapping space variants to find the real file.
+                _found = False
+                for _a, _b in [(" ", " "), (" ", " "), (" ", " "), (" ", " ")]:
+                    _alt = Path(str(r).replace(_a, _b))
+                    if _alt.exists():
+                        r = _alt
+                        _found = True
+                        break
+                if not _found:
+                    raise ValueError(f"Image file not found: {r}")
             if not r.is_file():
                 raise ValueError(f"Path is not a file: {r}")
             if not is_image_path(str(r)):

@@ -15,7 +15,7 @@ from pathlib import Path
 import random
 import threading
 import time
-from typing import Any, Callable, List, Optional
+from typing import Any, Callable, List
 
 from rich.align import Align
 from rich.cells import cell_len
@@ -100,7 +100,7 @@ _RED = "#ff5555"
 # ──────────────────────────────────────────────────────────────────────────────
 
 # Aurora gradient hex values — match boot_ui AURORA logo_r0..r5 exactly
-_LOGO_ROW_HEX: List[str] = [
+_LOGO_ROW_HEX: list[str] = [
     "#00ffff",  # logo_r0  \033[38;5;51m   bright cyan (aurora peak)
     "#00d7ff",  # logo_r1  \033[38;5;45m   light cyan
     "#5fafff",  # logo_r2  \033[38;5;75m   cyan-blue
@@ -146,8 +146,8 @@ class SystemState:
 
 class VoiceCmd(Enum):
     NONE = "none"
-    STOP = "stop"           # cancel the pipeline turn
-    QUIET = "quiet"         # stop TTS voice output only (pipeline keeps running)
+    STOP = "stop"  # cancel the pipeline turn
+    QUIET = "quiet"  # stop TTS voice output only (pipeline keeps running)
     SLEEP = "sleep"
     WAKE = "wake"
     MUTE = "mute"
@@ -159,11 +159,27 @@ def _match_voice_command(text: str) -> VoiceCmd:
     t = text.strip().lower()
     if not t:
         return VoiceCmd.NONE
-    if t in {"stop", "buddy stop", "stop buddy", "cancel", "buddy cancel",
-             "cancel buddy", "interrupt", "buddy interrupt", "enough", "buddy enough"}:
+    if t in {
+        "stop",
+        "buddy stop",
+        "stop buddy",
+        "cancel",
+        "buddy cancel",
+        "cancel buddy",
+        "interrupt",
+        "buddy interrupt",
+        "enough",
+        "buddy enough",
+    }:
         return VoiceCmd.STOP
-    if t in {"shut up", "be quiet", "stop talking", "buddy stop talking",
-             "stop speaking", "quiet"}:
+    if t in {
+        "shut up",
+        "be quiet",
+        "stop talking",
+        "buddy stop talking",
+        "stop speaking",
+        "quiet",
+    }:
         return VoiceCmd.QUIET
     if t in {"sleep", "buddy sleep", "go to sleep"}:
         return VoiceCmd.SLEEP
@@ -230,6 +246,24 @@ class InputQueue:
     def push_sentinel(self, sentinel: str, loop: asyncio.AbstractEventLoop) -> None:
         loop.call_soon_threadsafe(self._q.put_nowait, sentinel)
 
+    def push_interrupt(self, sentinel: str, loop: asyncio.AbstractEventLoop) -> None:
+        """
+        Push an interrupt sentinel from the event loop thread.
+        Replaces direct _q access in textual_app.py (FIX-05).
+        """
+        loop.call_soon_threadsafe(self._q.put_nowait, sentinel)
+
+    def drain(self) -> None:
+        """
+        Discard all currently queued items (stale sentinels, etc.).
+        Must only be called from the event loop thread (FIX-05).
+        """
+        while not self._q.empty():
+            try:
+                self._q.get_nowait()
+            except Exception:
+                break
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # SplashView — full-screen logo + face animation (used by SplashScreen)
@@ -266,7 +300,9 @@ class SplashView(Static):
         face = _SPLASH_FACE_FRAMES[self._frame]
         face_line = f"[{_CYAN}]{face}[/]"
         hint = f"[dim {_DIM}]starting up…[/]"
-        self.update("\n".join([self._cached_logo, "", tagline, "", face_line, "", hint]))
+        self.update(
+            "\n".join([self._cached_logo, "", tagline, "", face_line, "", hint])
+        )
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -379,7 +415,7 @@ class BootLog(ScrollableContainer):
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
-        self._pending: Optional[BootLogLine] = None
+        self._pending: BootLogLine | None = None
 
     async def add_message(self, msg: str, status: str = "running") -> None:
         if status == "running":
@@ -481,7 +517,7 @@ class InfoPane(Static):
         self._state_lock = state_lock
         self._session_start = time.monotonic()
         self._turn = 0
-        self._last_turn_ms: Optional[int] = None
+        self._last_turn_ms: int | None = None
         self._mem_flash = 0
         self._mem_short = 0
         self._mem_long = 0
@@ -516,7 +552,9 @@ class InfoPane(Static):
                 with open(op_path, "r", encoding="utf-8") as _f:
                     op = _json.load(_f)
                 hw = op.get("hardware") or {}
-                self._user_name = (op.get("identity") or {}).get("preferred_name") or "—"
+                self._user_name = (op.get("identity") or {}).get(
+                    "preferred_name"
+                ) or "—"
                 ram_gb = (hw.get("ram") or {}).get("total_gb", "?")
                 cores = (hw.get("cpu") or {}).get("logical_cores", "?")
                 gpu = hw.get("gpu") or {}
@@ -723,7 +761,7 @@ class InfoPane(Static):
         ]
         return "\n".join(lines)
 
-    def update_turn(self, n: int, turn_ms: Optional[int] = None) -> None:
+    def update_turn(self, n: int, turn_ms: int | None = None) -> None:
         self._turn = n
         if turn_ms is not None:
             self._last_turn_ms = turn_ms
@@ -778,13 +816,20 @@ class StatusBar(Static):
     _hint: reactive[str] = reactive("")
 
     def render(self) -> Text:
-        src = self._hint if self._hint else (
-            f"{self._info or f'[dim {_DIM}]Voice: —  ·  Turn: 0[/]'}    {self._SHORTCUTS}"
+        src = (
+            self._hint
+            if self._hint
+            else (
+                f"{self._info or f'[dim {_DIM}]Voice: —  ·  Turn: 0[/]'}   "
+                f" {self._SHORTCUTS}"
+            )
         )
         try:
             return Text.from_markup(src)
         except Exception:
-            logger.error("StatusBar.render: bad markup, falling back to plain | raw=%r", src)
+            logger.error(
+                "StatusBar.render: bad markup, falling back to plain | raw=%r", src
+            )
             return Text(src)
 
     def set_info(self, *, voice: str = "", turn: int = 0) -> None:
@@ -870,7 +915,26 @@ class SpinnerBar(Static):
 
 
 class ChatBubble(Static):
-    """A single chat message rendered as a rounded bubble."""
+    """
+    A single chat message rendered as a rounded bubble.
+
+    Bubble widths are fully dynamic:
+      • Buddy bubbles fill the available widget width so large responses
+        never leave empty space in the middle of the chat area.
+      • User bubbles size to their content but are capped at 60 % of the
+        available width so they stay compact and visually distinct.
+      • on_resize() re-renders every existing bubble when the window is
+        resized, so layout stays correct at any terminal size.
+    """
+
+    # Fraction of available width used by buddy bubbles (0.0–1.0).
+    _BUDDY_WIDTH_FRAC = 0.60
+    # Maximum fraction of available width for user bubbles.
+    _USER_MAX_FRAC = 0.60
+    # Minimum bubble width regardless of window size.
+    _MIN_WIDTH = 32
+    # Characters reserved for scrollbar + container padding on each side.
+    _GUTTER = 4
 
     DEFAULT_CSS = f"""
     ChatBubble {{
@@ -895,8 +959,41 @@ class ChatBubble(Static):
         self._kind = kind
         self.add_class(kind)
 
+    # ── helpers ───────────────────────────────────────────────────────────────
+
+    def _available_width(self) -> int:
+        """
+        Return the usable pixel/cell width for this bubble.
+
+        Priority:
+          1. self.size.width  — accurate after the widget is laid out.
+          2. self.app.size.width — terminal width, used before first layout.
+          3. 80 — safe fallback if neither is accessible yet.
+        """
+        try:
+            w = self.size.width
+            if w > 0:
+                return max(self._MIN_WIDTH, w - self._GUTTER)
+        except Exception:
+            pass
+        try:
+            w = self.app.size.width
+            if w > 0:
+                return max(self._MIN_WIDTH, w - self._GUTTER)
+        except Exception:
+            pass
+        return 80
+
+    # ── lifecycle ─────────────────────────────────────────────────────────────
+
     def on_mount(self) -> None:
         self._render_bubble_content(self._text)
+
+    def on_resize(self, _: Any) -> None:
+        """Re-render when the terminal or panel is resized."""
+        self._render_bubble_content(self._text)
+
+    # ── rendering ─────────────────────────────────────────────────────────────
 
     def _render_bubble_content(self, text: str, cursor: bool = False) -> None:
         if self._kind == "meta":
@@ -905,11 +1002,15 @@ class ChatBubble(Static):
 
         try:
             display = text + ("▋" if cursor else "")
-            lines = (text or " ").splitlines() or [" "]
-            _longest = max(cell_len(line) for line in lines)
-            _w = min(72, max(32, _longest + 8))
+            available = self._available_width()
 
             if self._kind == "user":
+                # Size to content, capped at _USER_MAX_FRAC of available width.
+                lines = (text or " ").splitlines() or [" "]
+                _longest = max(cell_len(line) for line in lines)
+                _content_w = _longest + 8  # +8 for border + padding
+                _max_w = max(self._MIN_WIDTH, int(available * self._USER_MAX_FRAC))
+                _w = min(_max_w, max(self._MIN_WIDTH, _content_w))
                 panel = Panel(
                     Text(display, style=_WHITE),
                     title=f"[{_CYAN}]▌ You[/]",
@@ -920,6 +1021,8 @@ class ChatBubble(Static):
                 )
                 self.update(Align(panel, align="right"))
             else:
+                # Buddy bubbles fill the full available width.
+                _w = max(self._MIN_WIDTH, int(available * self._BUDDY_WIDTH_FRAC))
                 panel = Panel(
                     Text(display, style=_WHITE),
                     title=f"[{_VIOLET}]◈ Buddy[/]",
@@ -1070,16 +1173,28 @@ class SleepView(Widget):
 
         stats = [
             sep_line,
-            f"  flash  {self._make_bar(self.stats_flash, total, bar_w)}  {self.stats_flash}",
-            f"  short  {self._make_bar(self.stats_short, total, bar_w)}  {self.stats_short}",
-            f"  long   {self._make_bar(self.stats_long,  total, bar_w)}  {self.stats_long}",
+            (
+                f"  flash  {self._make_bar(self.stats_flash, total, bar_w)} "
+                f" {self.stats_flash}"
+            ),
+            (
+                f"  short  {self._make_bar(self.stats_short, total, bar_w)} "
+                f" {self.stats_short}"
+            ),
+            (
+                f"  long   {self._make_bar(self.stats_long,  total, bar_w)} "
+                f" {self.stats_long}"
+            ),
             f"  sleeping {em:02d}:{es:02d}",
             f"  [ F3 to wake  ·  or say 'wake up' ]",
         ]
 
         star_block = "\n".join(star_lines)
         stats_block = "\n".join(stats)
-        return f"[{_CYAN}]{markup_escape(star_block)}[/]\n[dim {_DIM}]{markup_escape(stats_block)}[/]"
+        return (
+            f"[{_CYAN}]{markup_escape(star_block)}[/]\n[dim"
+            f" {_DIM}]{markup_escape(stats_block)}[/]"
+        )
 
     def reset_stats(self) -> None:
         self.stats_flash = 0
@@ -1150,6 +1265,7 @@ class BuddyInput(TextArea):
 
     class Submitted(Message):
         """Posted when the user presses Enter to submit."""
+
         def __init__(self, value: str) -> None:
             super().__init__()
             self.value = value
