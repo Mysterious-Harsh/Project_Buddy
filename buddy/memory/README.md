@@ -82,20 +82,21 @@ recall:     W_STRENGTH=0.25 weight in composite score
 ## 3. Memory Tiers
 
 ```
-FLASH ──(M≥0.62 OR I_dyn≥0.70, age>3h)──▶ SHORT ──(M≥0.72 AND cycles≥2)──▶ LONG
+FLASH ──(M≥0.62 OR I_dyn≥0.70, age>3h)──▶ SHORT ──(M≥0.72 AND dup_count==0 AND cycles≥2 AND I_dyn≥0.30)──▶ LONG
   ◀──(M≤0.28 AND days>14)──────────────             ◀──(M≤0.25 AND days>60 AND I_dyn≤0.45)──
 
                                               SHORT→LONG routing:
-                                              dup_count == 0  →  direct promotion
-                                              dup_count >= 2  →  cluster-summary route
+                                              dup_count == 0  →  direct promotion (all 4 gates must pass)
+                                              dup_count >= 2  →  cluster-summary route (_apply_summary_cluster)
 ```
 
 Flash promotion requires age > **3h** (raised from 1h). Long demotion blocked if `I_dyn > 0.70`.
 
-**v5 changes vs v4.1:**
+**Current tier thresholds:**
 - `flash_to_short_strength`: 0.55 → **0.62** (reduces noise in short tier)
 - `min_flash_age_sec`: 3600 → **10800** (1h → 3h gate)
 - `short_to_long_max_sim ≤ 0.60` gate **removed** — replaced with `dup_count` routing (the old gate blocked promotion for memories that shared common vocabulary but were otherwise unique)
+- Short→long direct promotion now also requires `I_dyn ≥ 0.30` — ensures memories that have fully decayed in dynamic importance don't get promoted even if strength is high
 
 ---
 
@@ -236,7 +237,7 @@ Clusters are built using a full BFS traversal of the undirected similarity graph
 # → each connected component is one cluster
 ```
 
-**v4.1 problem:** 1-hop expansion was seed-dependent. Node A seeded → {B,C,D} in cluster. Node C seeded → different membership. Same corpus, different clusters on different runs.
+**Previous approach (seed-dependent):** 1-hop expansion produced different cluster membership depending on which node was processed first. Same corpus could produce different clusters on different runs.
 
 ### 6.2 Temporal Coherence (v5)
 
@@ -327,7 +328,7 @@ if encoding_arousal >= 0.7:
 
 ```
 Rule A: importance ≥ 0.80 AND consolidated_into_id is None
-Rule B: importance ≥ 0.70 AND dup_count == 0    ← broadened from "imp≥0.80" in v4.1
+Rule B: importance ≥ 0.70 AND dup_count == 0    ← isolated high-importance memory is irreplaceable
 Rule C: metadata.protection_tier in ("critical", "immortal")
 ```
 
@@ -354,7 +355,7 @@ AND I_dyn≤0.25  AND acc≤2  AND age≥30d  AND strength≤0.30
 
 ## 9. SleepBudget — Parameters
 
-Changes from v4.1 marked with **▲**.
+Current parameter values (changes from previous version marked with **▲**).
 
 | Parameter                    | Default   |     | Parameter                   | Default         |
 | ---------------------------- | --------- | --- | --------------------------- | --------------- |
@@ -384,7 +385,7 @@ Changes from v4.1 marked with **▲**.
 
 ## 11. Phenomena Test Suite
 
-`python test_human_memory.py` — 12 phenomena · 46 assertions · zero external dependencies
+`PYTHONPATH=. python buddy/tests/buddy_memory_tests.py` — 12 phenomena · 46 assertions · zero external dependencies
 
 ![Dashboard](../../assets/memory_test_graphs/dashboard.png)
 
@@ -401,7 +402,7 @@ Changes from v4.1 marked with **▲**.
 | 9   | Serial position effect        | [P8]  | Recency effect confirmed                            |
 | 10  | CLS cycle gate                | [P3]  | cycles<2 blocks long promotion                      |
 | 11  | Cluster summarisation         | —     | 4/4 related memories clustered; unrelated excluded  |
-| 12  | 500-memory stress test        | —     | Emotional 177% > routine; runtime <0.05s            |
+| 12  | 500-memory stress test        | —     | Emotional 180% > routine (0.207 vs 0.074); runtime <0.05s |
 
 ![Spaced repetition](../../assets/memory_test_graphs/spaced_repetition.png)
 ![Serial position](../../assets/memory_test_graphs/serial_position.png)
@@ -417,7 +418,7 @@ Changes from v4.1 marked with **▲**.
 
 Tests every mechanism at 8 age bands simultaneously — 1 Year down to 1 Hour.
 
-`python test_time_range.py`
+`python buddy/tests/test_time_range.py`
 
 ### Age Bands
 
@@ -556,13 +557,16 @@ I_dyn gap (T15−T1):  1yr=+0.044  6mo=+0.031  3mo=+0.020  1mo=+0.007  1d/6h/1h�
 ![Time-range dashboard](../../assets/time_range_graphs/09_dashboard.png)
 
 ```
-┌──────────────────────────────────────────────┐
-│  TIME-RANGE SUITE     146 / 146 PASS         │
-│  PHENOMENA SUITE       46 /  46 PASS         │
-│  COMBINED             192 / 192 PASS         │
-│  8 bands · 10 sections · 18 graphs · <0.15s  │
-└──────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│  TIME-RANGE SUITE          146 / 146 PASS                    │
+│  PHENOMENA SUITE            46 /  46 PASS                    │
+│  SOLID MECHANISM SUITE      85 /  85 PASS  (pytest)          │
+│  COMBINED                  277 / 277 PASS                    │
+│  8 bands · 10 sections · 18 graphs · <0.15s                  │
+└──────────────────────────────────────────────────────────────┘
 ```
+
+The solid mechanism suite (`pytest buddy/tests/test_consolidation_v4_solid.py`) covers all 16 individual mechanisms — BLA, dynamic importance, temporal gradient fix, arousal + negation-awareness, sleep-phase weighting, proactive interference, spreading activation, catastrophic forgetting guard, summary centroid fix, spacing-weighted touch, tier gates, redundancy pruning, source-turn gradient, and consolidation depth gate — plus 6 integration tests.
 
 ---
 

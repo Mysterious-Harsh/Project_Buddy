@@ -32,10 +32,10 @@
 ```
   ▶  INITIALIZING COGNITIVE PIPELINE...
   ▶  BOOT ORCHESTRATOR: llama-server auto-starting...
-  ▶  MODEL SELECTOR: Qwen3-14B-Q4_K_M detected  ·  hardware-matched
+  ▶  MODEL SELECTOR: Qwen3.5 detected  ·  hardware-matched
   ▶  MEMORY SUBSYSTEM ONLINE  ·  SQLite + Qdrant
   ▶  EMBEDDINGS READY  ·  Qwen3-Embedding-0.6B  ·  1024-dim L2-norm
-  ▶  CONSOLIDATION ENGINE v4.1 READY  ·  background thread
+  ▶  CONSOLIDATION ENGINE READY  ·  background thread
   ▶  SEARXNG ONLINE  ·  local web search
   ▶  INTENT INTERCEPTOR ARMED  ·  zero-LLM fast path
   ▶  ACTION MODE ARMED  ·  terminal · filesystem · clipboard · system control
@@ -198,11 +198,11 @@ Every memory carries: an importance score, a `consolidation_strength` that sleep
 
 ## `$ consolidation --show-sleep-cycle`
 
-When Buddy is idle, the **Consolidation Engine v4.1** runs automatically in a background thread — the same way the human brain consolidates memories during sleep. (v5 with the closed recall loop is the next major upgrade, queued after the browser tool ships.)
+When Buddy is idle, the **Consolidation Engine** runs automatically in a background thread — the same way the human brain consolidates memories during sleep.
 
 ```
 ┌──────────────────────────────────────────────────────────┐
-│          SLEEP  CONSOLIDATION  CYCLE  v4.1-patched        │
+│             SLEEP  CONSOLIDATION  CYCLE                    │
 ├──────────────────────────────────────────────────────────┤
 │                                                          │
 │  SCAN       →  Load flash + short-term memories          │
@@ -411,8 +411,8 @@ Buddy detects your hardware at boot and adapts to it — not the other way aroun
 ```
 boot  →  probe GPU VRAM / system RAM / CPU cores
       →  select model from Qwen catalog (Qwen2.5 / Qwen3 / Qwen3.5)
-      →  preferred: Qwen3-14B-Q4_K_M (default for ≥16GB)
-      →  falls back: Qwen2.5-7B / smaller quants on constrained hardware
+      →  preferred: Qwen3.5-9B (default, scales to largest model that fits)
+      →  falls back: smaller Qwen3.5 quants (2B minimum) on constrained hardware
       →  injects selected model path into llama-server args
 ```
 
@@ -608,7 +608,7 @@ Buddy's interface is a **Textual TUI** styled with the Aurora palette — a term
 |     | Feature                       | Description                                                              |
 | --- | ----------------------------- | ------------------------------------------------------------------------ |
 | 🧠  | **Multi-tier memory**         | Flash → Short → Long, persisted across sessions                          |
-| 🌙  | **Sleep consolidation v4.1**  | BFS clustering, temporal coherence, depth cap, audit log                 |
+| 🌙  | **Sleep consolidation**       | BFS clustering, temporal coherence, depth cap, audit log                 |
 | 📈  | **Consolidation strength**    | Sleep cycle scores flow into retrieval — memory improves over time       |
 | 🌊  | **Spreading activation**      | Top recalled memories activate their semantic neighbors                  |
 | 🔥  | **Encoding arousal**          | Emotional intensity captured at encoding; English + Hindi keywords       |
@@ -658,7 +658,7 @@ buddy/
 │   ├── memory_manager.py        # MemoryManager — add/search/touch/consolidate
 │   ├── sqlite_store.py          # SQLiteStore — source of truth
 │   ├── vector_store.py          # VectorStore — Qdrant/local hybrid search + reranking
-│   └── consolidation_engine.py  # Sleep consolidation (v4.1-patched)
+│   └── consolidation_engine.py  # Sleep consolidation engine
 ├── context/
 │   └── conversations.py         # RAM conversation buffer with crash-safe snapshotting
 ├── logger/
@@ -731,7 +731,7 @@ pip install -r requirements.txt
 python -m buddy.main
 ```
 
-> **Requirements:** Python 3.11+, a GGUF model file, ~8GB RAM minimum (16GB recommended for Qwen3-14B-Q4_K_M)
+> **Requirements:** Python 3.11+, a GGUF model file, ~8GB RAM minimum (16GB recommended for Qwen3.5-9B)
 
 On first boot, Buddy's orchestrator downloads the llama.cpp binary for your platform, sets up SearXNG, selects the best model for your hardware, and loads the embedding model. Subsequent boots are silent and automatic — no configuration required.
 
@@ -772,7 +772,6 @@ LLM endpoint: `http://127.0.0.1:8080` (auto-started by `boot.py`).
 
 [shipped]      Web fetch — full page extraction + binary file download
 
-[queued]       Consolidation Engine v5 — closed recall loop, improved clustering
 
 [planned]      Deeper memory introspection (Buddy explains what it remembers and why)
 [planned]      Emotional memory weighting (affect-aware importance scoring)

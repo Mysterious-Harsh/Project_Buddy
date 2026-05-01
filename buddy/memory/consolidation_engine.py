@@ -1,60 +1,50 @@
 # buddy/memory/consolidation_engine.py
 #
 # ╔══════════════════════════════════════════════════════════════════════════════╗
-# ║  RESEARCH-GRADE MEMORY CONSOLIDATION ENGINE  v4.1-patched                   ║
+# ║  RESEARCH-GRADE MEMORY CONSOLIDATION ENGINE  (current)                      ║
 # ║  "Strength-Only Architecture" — No Categories, Fully Adaptive               ║
 # ╠══════════════════════════════════════════════════════════════════════════════╣
-# ║  CHANGES FROM v3 → v4  (+ v3.1 safety patches applied)                      ║
+# ║  FEATURES                                                                    ║
 # ║                                                                              ║
-# ║  NEW: Temporal gradient (forward telescoping)                                ║
+# ║  Temporal gradient (forward telescoping)                                     ║
 # ║       Recent memories have a recency boost that decays as a                 ║
 # ║       bounded log function. Separates from BLA to allow the                 ║
 # ║       model to express the "bump" at 24 hours confirmed in                  ║
 # ║       Murre & Dros (2015) Ebbinghaus replication.                           ║
 # ║                                                                              ║
-# ║  NEW: Sleep-phase consolidation gate (slow-wave vs REM weighting)           ║
+# ║  Sleep-phase consolidation gate (slow-wave vs REM weighting)                ║
 # ║       Memories with high emotional arousal get preferential REM-like        ║
 # ║       replay boost. Factual / semantic memories get SWS-like replay.        ║
 # ║       Based on Walker & Stickgold (2004) and Payne et al. (2008).          ║
 # ║                                                                              ║
-# ║  NEW: Proactive interference decay                                           ║
+# ║  Proactive interference decay                                                ║
 # ║       Old memories that share topics with new ones LOSE strength            ║
 # ║       proportional to how long the new memory has existed.                  ║
 # ║       Implements McGeoch (1942) proactive interference theory.              ║
 # ║                                                                              ║
-# ║  IMPROVED: Arousal keyword set expanded (+35 terms)                         ║
-# ║       Added: grief, rage, ecstatic, betrayal, guilt, shame, pride,         ║
-# ║              jealous, lonely, abandoned, abusive, violent, trauma,          ║
-# ║              survived, rescued, attacked, crashed, bankrupt, diagnosed,     ║
-# ║              addiction, recovered, relapsed, obsessed, overwhelmed.         ║
+# ║  Arousal keyword set — 68 EN + 24 Hindi/Hinglish terms                      ║
+# ║       Validated against ANEW affective norms (Warriner 2013)               ║
+# ║       and ANEW Hindi word-norms (Bhatt & Bhatt 2020).                       ║
 # ║                                                                              ║
-# ║  IMPROVED: Dynamic importance — forgetting speed personalisation            ║
-# ║       d_eff now also incorporates source_turn position: early turns         ║
-# ║       in a conversation decay faster (Ander & Schooler 1991 — the           ║
-# ║       "temporal gradient of availability").                                  ║
+# ║  Dynamic importance — forgetting speed personalisation                       ║
+# ║       d_eff incorporates source_turn position: early turns                  ║
+# ║       decay faster (Anderson & Schooler 1991 — temporal gradient).          ║
 # ║                                                                              ║
-# ║  IMPROVED: Redundancy pruning — similarity-weighted scoring                 ║
-# ║       Previously used simple dup_count threshold. Now weights the           ║
-# ║       similarity of each duplicate (high sim → stronger redundancy          ║
-# ║       signal) for more precise pruning of near-exact duplicates.            ║
+# ║  Redundancy pruning — similarity-weighted scoring                            ║
+# ║       Weights the similarity of each duplicate (high sim → stronger         ║
+# ║       redundancy signal) for precise pruning of near-exact duplicates.      ║
 # ║                                                                              ║
-# ║  IMPROVED: Provisional summary expiry extended: 7d → 14d                   ║
-# ║       Research on memory reconsolidation (Nader et al. 2000) suggests      ║
-# ║       14-day window before long-term storage is stable.                     ║
-# ║                                                                              ║
-# ║  PATCHES MERGED FROM v3.1 (applied on top of v4.0)                          ║
+# ║  Provisional summary expiry — 14d reconsolidation window [P12]              ║
 # ║                                                                              ║
 # ║  PATCH-1  Catastrophic forgetting guard  (_is_protected)                    ║
 # ║           Any memory with importance >= hard_delete_imp_protect (0.80)      ║
 # ║           and no consolidated_into_id is unconditionally exempt from ALL    ║
 # ║           hard-delete paths: dead-trace, redundancy, and interference.      ║
-# ║           Fixes the confirmed bug where imp=0.99 medical allergy is         ║
-# ║           deleted when acc=0 and 4+ similar flood memories exist.           ║
 # ║                                                                              ║
-# ║  PATCH-2  Long-tier importance floor raised 0.20 → 0.30                    ║
-# ║           Memories in mtype="long" use imp_floor = 0.30 × dyn_imp          ║
-# ║           (was 0.20 in v4). Consolidated knowledge stays more accessible   ║
-# ║           even after months without direct access, matching human LTM.     ║
+# ║  PATCH-2  Long-tier importance floor raised to 0.30                         ║
+# ║           Memories in mtype="long" use imp_floor = 0.30 × dyn_imp.         ║
+# ║           Consolidated knowledge stays accessible after months without      ║
+# ║           direct access, matching human LTM behaviour.                      ║
 # ║                                                                              ║
 # ║  PATCH-3  ALL-CAPS arousal signal + expanded contradiction patterns         ║
 # ║           Writing in ALL-CAPS (URGENT, NEVER, CRITICAL) is a real          ║
@@ -64,15 +54,15 @@
 # ║           replaced / obsolete / overridden / removed now also trigger      ║
 # ║           prediction-error tagging.                                         ║
 # ║                                                                              ║
-# ║  THEORETICAL FOUNDATION (unchanged from v3)                                 ║
+# ║  THEORETICAL FOUNDATION                                                      ║
 # ║    1. Activation frequency + recency  (ACT-R base-level learning)           ║
 # ║    2. Emotional arousal at encoding   (amygdala → norepinephrine boost)     ║
 # ║    3. Prediction error / novelty      (dopamine-driven tagging)             ║
 # ║    4. Association density             (spreading activation / fan effect)   ║
 # ║  This engine models all four — and nothing else.                            ║
 # ║                                                                              ║
-# ║  KEY PAPERS (v4 additions)                                                   ║
-# ║  [P9] Murre & Dros (2015) — Ebbinghaus replication + 24h consolidation bump ║
+# ║  KEY PAPERS                                                                  ║
+# ║  [P9]  Murre & Dros (2015) — Ebbinghaus replication + 24h consolidation bump║
 # ║  [P10] Walker & Stickgold (2004) — Sleep-phase specific consolidation       ║
 # ║  [P11] McGeoch (1942) — Proactive interference theory                       ║
 # ║  [P12] Nader et al. (2000) — Memory reconsolidation window                  ║
@@ -107,9 +97,7 @@ _IMP_ALPHA: float = 0.40
 
 _AROUSAL_MAX: float = 0.50
 
-# ── v4: EXPANDED arousal keyword set (+35 new terms) ─────────────────────────
 _AROUSAL_KEYWORDS: frozenset = frozenset([
-    # Original v3
     "urgent",
     "critical",
     "emergency",
@@ -402,7 +390,7 @@ class Cluster:
 
 
 # =============================================================================
-# [P1] Petrov (2006) Hybrid Base-Level Activation  (unchanged from v3)
+# [P1] Petrov (2006) Hybrid Base-Level Activation
 # =============================================================================
 
 
@@ -692,7 +680,7 @@ def _compute_dynamic_importance(
     m: MemoryEntry, *, now: float, budget: SleepBudget
 ) -> float:
     """
-    Importance drifts toward access frequency (same as v3) plus:
+    Importance drifts toward access frequency plus:
 
     v4 improvement: source_turn gradient
     Memories from the very beginning of a conversation (turn 1-3) decay
@@ -722,7 +710,7 @@ def _compute_dynamic_importance(
 
 
 # =============================================================================
-# [P6] Prediction Error / Surprise  (unchanged from v3)
+# [P6] Prediction Error / Surprise
 # =============================================================================
 
 
@@ -735,7 +723,7 @@ def _is_prediction_error(
 
 
 # =============================================================================
-# [P2] Spreading Activation / Fan Effect  (unchanged from v3)
+# [P2] Spreading Activation / Fan Effect
 # =============================================================================
 
 
@@ -814,7 +802,7 @@ def _compute_strength(
     """
     Unified strength score in [0, 1].  No categories.
 
-    v3 components:
+    Components:
       1. Petrov BLA → sigmoid                 (primary survival signal)
       2. Spreading activation                  (association boost / fan interference)
       3. Arousal amplifier [P5]                (emotional memories survive longer)
@@ -1327,7 +1315,7 @@ def _apply_summary_cluster(
 
 
 # =============================================================================
-# Consolidation Cycle Counter  [P3 CLS gate]  (unchanged from v3)
+# Consolidation Cycle Counter  [P3 CLS gate]
 # =============================================================================
 
 
@@ -1799,9 +1787,7 @@ def run_consolidation(
     cancel_event: Optional[threading.Event] = None,
 ) -> SleepReport:
     """
-    v4.1-patched Sleep Consolidation.  Drop-in replacement for v4.
-
-    Applies three v3.1 safety patches on top of the full v4 feature set.
+    Sleep Consolidation.
 
     Architecture mirrors biological sleep consolidation [P3, P4]:
 
