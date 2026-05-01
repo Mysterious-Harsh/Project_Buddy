@@ -33,6 +33,7 @@ Beep
   Disable with enable_beep=False.  Plays through the output device;
   completely independent from the microphone input stream.
 """
+
 from __future__ import annotations
 
 import functools
@@ -78,18 +79,21 @@ except ImportError:
 
 # Common Whisper hallucinations on short/silent clips — strip these from output.
 # Lowercase; matched against the lowercased, stripped transcription result.
-_HALLUCINATIONS: frozenset = frozenset({
+_HALLUCINATIONS = frozenset({
     "thank you.",
+    "thank you",
     "thanks.",
+    "thanks",
     "thank you for watching.",
     "thank you for watching",
     "thanks for watching.",
     "thanks for watching",
     "goodbye.",
+    "goodbye",
     "bye.",
+    "bye",
     "you.",
     "you",
-    ".",
     "...",
     "[ silence ]",
     "[silence]",
@@ -350,6 +354,9 @@ BEEP_FADE_MS = 16
 # ⚠ DO NOT lower below 5 ms — shorter fades produce audible clicks.
 # RAISE (20) → smoother fade; slightly softer attack.
 
+# ─── Add dual-alpha EMA constants for faster noise recovery ─────────────
+NOISE_ALPHA_FAST = 0.15  # Attack: adapts quickly to noise spikes
+NOISE_ALPHA_SLOW = 0.02  # Decay: slowly stabilizes baseline
 # =============================================================================
 # Module-level helpers  (lru_cache'd — zero cost after first call)
 # =============================================================================
@@ -544,7 +551,10 @@ def _load_whisper(
                 except TypeError:
                     # Older faster-whisper doesn't accept num_workers / cpu_threads
                     wm = WhisperModel(
-                        size, device="auto", compute_type=ct, download_root=download_root
+                        size,
+                        device="auto",
+                        compute_type=ct,
+                        download_root=download_root,
                     )
 
                 with _MODEL_CACHE_LOCK:
@@ -691,7 +701,9 @@ class SpeechToText:
         "_cbw",
         "enable_beep",
         "_beep_pcm",
-        "on_segment_end",   # called after every segment (transcribed or rejected)
+        "_beep_q",
+        "_beep_thread",
+        "on_segment_end",  # called after every segment (transcribed or rejected)
     )
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -758,7 +770,9 @@ class SpeechToText:
         )
 
         # ── transcription worker ─────────────────────────────────────────────
-        self._tx_q: "queue.Queue[Optional[Tuple[np.ndarray, int]]]" = queue.Queue(maxsize=8)
+        self._tx_q: "queue.Queue[Optional[Tuple[np.ndarray, int]]]" = queue.Queue(
+            maxsize=8
+        )
         self._tx_stop: threading.Event = threading.Event()
         self._tx_thread: Optional[threading.Thread] = None
 
@@ -777,9 +791,12 @@ class SpeechToText:
         self._cbw = _CallbackWorker()
 
         # ── Beep — synthesised once; zero allocation at trigger time ────
-        self._beep_pcm: Optional[np.ndarray] = (
-            _make_beep_pcm() if self.enable_beep else None
+        self._beep_pcm = _make_beep_pcm() if enable_beep else None
+        self._beep_q: "queue.Queue[np.ndarray]" = queue.Queue(maxsize=4)
+        self._beep_thread = threading.Thread(
+            target=self._beep_worker, daemon=True, name="stt-beep"
         )
+        self._beep_thread.start()
 
         # ── Whisper model ─────────────────────────────────────────────────────
         self._whisper: Optional[WhisperModel] = None
@@ -939,32 +956,23 @@ class SpeechToText:
         return self._muted
 
     def mute(self) -> None:
-        """
-        • Release the microphone to the OS immediately.
-        • Offload the Whisper model → free RAM and VRAM.
-        • Park stt-listen and stt-tx threads → zero CPU / GPU usage.
-
-        Thread-safe.  No-op if already muted or not started.
-        """
         if not self._running or self._muted:
             return
 
         self._muted = True
-        self._unmute_event.clear()  # park both worker threads
+        self._unmute_event.clear()
 
-        # Unblock VAD queue.get so the loop sees _muted immediately
         try:
             self._audio_q.put_nowait(b"")
         except queue.Full:
             pass
 
-        # Drain the audio queue so stale frames don't pollute the next session
         self._drain_audio_q()
-
-        # Offload model — frees RAM / VRAM
+        self._tx_queue_drain()  # 🔥 FIX: Discard pending transcriptions from pre-mute audio
         self._offload_whisper_model()
-
-        logger.info("[STT] Muted — mic released, model offloaded.")
+        logger.info(
+            "[STT] Muted — mic released, model offloaded, stale audio discarded."
+        )
 
     def unmute(self) -> None:
         """
@@ -989,6 +997,17 @@ class SpeechToText:
     # Beep
     # =========================================================================
 
+    def _beep_worker(self) -> None:
+        """Single thread drains beep requests sequentially. Prevents thread explosion."""
+        while True:
+            pcm = self._beep_q.get()
+            if pcm is None:  # Poison pill for shutdown
+                break
+            try:
+                sd.play(pcm, DEFAULT_SAMPLE_RATE, blocking=False)
+            except Exception:
+                pass
+
     def _play_beep(self) -> None:
         """
         Play the pre-synthesised confirmation tone through the output device.
@@ -998,14 +1017,10 @@ class SpeechToText:
         """
         if self._beep_pcm is None:
             return
-
-        def _play() -> None:
-            try:
-                sd.play(self._beep_pcm, DEFAULT_SAMPLE_RATE, blocking=False)
-            except Exception:
-                pass  # never crash the VAD thread over a cosmetic beep
-
-        threading.Thread(target=_play, daemon=True, name="stt-beep").start()
+        try:
+            self._beep_q.put_nowait(self._beep_pcm)
+        except queue.Full:
+            pass  # Drop beep if output driver is busy; never block VAD
 
     def _on_speech_detected(self) -> None:
         """
@@ -1207,8 +1222,8 @@ class SpeechToText:
             logger.exception(
                 "[STT] Silero failed to load — falling back to Custom VAD."
             )
-            self._custom_loop()
-            return
+            self.use_silero_vad = False  # Prevents infinite fallback recursion
+            return  # _run_vad() will dispatch correctly on next call
 
         # ── Calibration ───────────────────────────────────────────────────────
         blocking_calib = self.calibration_sec > 0.0
@@ -1242,22 +1257,22 @@ class SpeechToText:
         speech_start: Optional[float] = None
         last_voiced: Optional[float] = None
         audio_buf: List[np.ndarray] = []
-        onset_chunks = 0  # consecutive voiced chunks (replaces above_for timer)
+        onset_chunks = 0
         below_for = 0.0
         cooldown_until = 0.0
         speech_prob = 0.0
+        recent_probs: Deque[float] = deque(maxlen=3)  # Smoothing buffer
         voiced = False
         dbg_last = 0.0
 
         if blocking_calib:
             logger.info(
-                "[STT/Silero] Calibrating for %.2fs — stay quiet", self.calibration_sec
+                "[STT/Silero] Calibrating for %.2fs — stay quiet ", self.calibration_sec
             )
         else:
-            logger.info("[STT/Silero] Starting (background calibration)…")
+            logger.info("[STT/Silero] Starting (background calibration)… ")
 
         while self._running and not self._muted:
-            # ── 1. Fetch one audio frame ──────────────────────────────────────
             try:
                 data = self._audio_q.get(timeout=AUDIO_QUEUE_TIMEOUT)
             except queue.Empty:
@@ -1282,29 +1297,29 @@ class SpeechToText:
             # ── 3. Calibration ────────────────────────────────────────────────
             if not calibrated:
                 calib_energies.append(e)
-                baseline = baseline * (1.0 - NOISE_ALPHA) + e * NOISE_ALPHA
+                baseline = baseline * (1.0 - NOISE_ALPHA_FAST) + e * NOISE_ALPHA_FAST
                 calib_frames += 1
                 if blocking_calib:
                     if now >= calib_end:
                         baseline = self._finalize_baseline(baseline, calib_energies)
                         calibrated = True
-                        logger.info("[STT/Silero] Calibrated. baseline=%.6f", baseline)
-                    continue  # block VAD triggers for the full calibration window
+                        logger.info("[STT/Silero] Calibrated. baseline=%.6f ", baseline)
+                    continue
                 else:
                     if calib_frames >= CALIB_FRAMES:
                         baseline = self._finalize_baseline(baseline, calib_energies)
                         calibrated = True
-                        logger.info("[STT/Silero] Calibrated. baseline=%.6f", baseline)
+                        logger.info("[STT/Silero] Calibrated. baseline=%.6f ", baseline)
                     if calib_frames < CALIB_GATE:
                         continue
 
             # ── 4. Baseline adaptation (idle + quiet only) ────────────────────
             if not recording and e < baseline * CEILING_MULT:
-                baseline = baseline * (1.0 - NOISE_ALPHA) + e * NOISE_ALPHA
+                alpha = NOISE_ALPHA_FAST if e > baseline else NOISE_ALPHA_SLOW
+                baseline = baseline * (1.0 - alpha) + e * alpha
 
             adaptive_floor = max(ABS_FLOOR_ENERGY, baseline * FLOOR_MULT)
             start_thr = max(adaptive_floor, baseline * self.speech_trigger_mult)
-
             in_cooldown = now < cooldown_until
 
             # ── 5. Stage audio — ALWAYS, even during cooldown ─────────────────
@@ -1312,13 +1327,11 @@ class SpeechToText:
             # state temporally coherent.  We run inference but ignore the result.
             stage.append(pcm)
             stage_len += pcm.size
-
             ran_inference = False
-            any_voiced = False   # True if ANY chunk in this outer frame was voiced
-            chunks_run = 0       # count of non-cooldown Silero inferences this frame
+            any_voiced = False
+            chunks_run = 0
+
             while stage_len >= silero_raw_chunk:
-                # Fast path: avoid np.concatenate when stage is already a single array.
-                # At 16kHz this is always the case (1 outer frame = 1 Silero chunk).
                 if len(stage) == 1:
                     arr = stage[0]
                 else:
@@ -1328,16 +1341,12 @@ class SpeechToText:
                 stage = [leftover] if leftover.size else []
                 stage_len = leftover.size
 
-                # Resample to 16kHz for Silero (no-op if already 16kHz)
                 chunk_f32 = _resample_to_16k(chunk_i16, vad_sr)
-                # Pad or trim to exactly SILERO_CHUNK samples
                 if len(chunk_f32) < SILERO_CHUNK:
                     chunk_f32 = np.pad(chunk_f32, (0, SILERO_CHUNK - len(chunk_f32)))
                 else:
                     chunk_f32 = chunk_f32[:SILERO_CHUNK]
 
-                # Energy pre-gate: very low (5 % of start_thr) so soft voices
-                # always reach the model.  Only truly silent frames are skipped.
                 if e >= start_thr * 0.05:
                     try:
                         speech_prob = float(
@@ -1346,18 +1355,19 @@ class SpeechToText:
                     except Exception:
                         speech_prob = 0.0
                 else:
-                    # Near-silent: still call the model to keep RNN state warm,
-                    # but the probability is forced to 0 — don't update voiced.
                     try:
                         vad(torch.from_numpy(chunk_f32), DEFAULT_SAMPLE_RATE)
                     except Exception:
                         pass
                     speech_prob = 0.0
 
+                recent_probs.append(speech_prob)
+                smooth_prob = sum(recent_probs) / len(recent_probs)  # 3-chunk smoothing
+
                 if not in_cooldown:
                     thr = SILERO_THRESH_END if recording else SILERO_THRESH_START
-                    if speech_prob >= thr:
-                        any_voiced = True   # accumulate across all chunks this frame
+                    if smooth_prob >= thr:
+                        any_voiced = True
                     ran_inference = True
                     chunks_run += 1
                 # During cooldown: inference ran (state updated) but result ignored
@@ -1394,9 +1404,6 @@ class SpeechToText:
                     if voiced:
                         onset_chunks += 1
                     else:
-                        # Decay rather than hard-reset: allow one non-voiced chunk
-                        # without wiping out the onset count.  This prevents a single
-                        # dropped frame from killing the trigger at utterance start.
                         onset_chunks = max(0, onset_chunks - 1)
 
                 if onset_chunks >= SILERO_ONSET_CHUNKS:
@@ -1411,33 +1418,24 @@ class SpeechToText:
                     self._on_speech_detected()
                     if self.debug:
                         logger.info(
-                            "[STT/Silero] RECORD start | e=%.6f prob=%.3f",
+                            "[STT/Silero] RECORD start | e=%.6f prob=%.3f ",
                             e,
-                            speech_prob,
+                            smooth_prob,
                         )
                 continue
 
             # ── 9. RECORDING ──────────────────────────────────────────────────
             audio_buf.append(pcm.copy())
-
             if ran_inference:
                 if voiced:
                     last_voiced = now
                     below_for = 0.0
                 else:
-                    # Accumulate silence in Silero-chunk units (always 32 ms each),
-                    # not in outer-frame units. At 48kHz the outer frame is 10.67ms
-                    # but represents 32ms of audio per Silero chunk — using frame_sec
-                    # would undercount by 3×, weakening the STOP_SUSTAIN_SEC guard.
                     below_for += chunks_run * (SILERO_CHUNK / DEFAULT_SAMPLE_RATE)
-            # Non-inference frames: hold below_for steady (neither add nor reset)
 
             time_rec = now - speech_start if speech_start else 0.0
             time_silent = now - last_voiced if last_voiced else 0.0
 
-            # End segment when silence has persisted for silence_timeout.
-            # below_for >= STOP_SUSTAIN_SEC guards against a single quiet frame
-            # triggering the stop; time_silent is the primary wall-clock gate.
             if (
                 time_silent >= self.silence_timeout and below_for >= STOP_SUSTAIN_SEC
             ) or time_rec >= MAX_RECORD_SEC:
@@ -1448,12 +1446,11 @@ class SpeechToText:
                     self._cbw.submit(self.on_segment_end)
                 if self.debug:
                     logger.info(
-                        "[STT/Silero] RECORD end | dur=%.2fs prob=%.3f → %s",
+                        "[STT/Silero] RECORD end | dur=%.2fs prob=%.3f → %s ",
                         time_rec,
-                        speech_prob,
-                        "transcribe" if do_tx else "discard (too short)",
+                        smooth_prob,
+                        "transcribe" if do_tx else "discard",
                     )
-                # Clean reset: clear both RNN state and staging buffer
                 try:
                     vad.reset_states()
                 except Exception:
@@ -1591,7 +1588,8 @@ class SpeechToText:
             # ── 7. Calibration ────────────────────────────────────────────────
             if not calibrated:
                 calib_energies.append(e)
-                baseline = baseline * (1.0 - NOISE_ALPHA) + e * NOISE_ALPHA
+                alpha = NOISE_ALPHA_FAST if e > baseline else NOISE_ALPHA_SLOW
+                baseline = baseline * (1.0 - alpha) + e * alpha
                 calib_frames += 1
                 if blocking_calib:
                     if now >= calib_end:
@@ -1613,12 +1611,14 @@ class SpeechToText:
             # ── 8. Cooldown gate ──────────────────────────────────────────────
             if now < cooldown_until:
                 if e < baseline * CEILING_MULT:
-                    baseline = baseline * (1.0 - NOISE_ALPHA) + e * NOISE_ALPHA
+                    alpha = NOISE_ALPHA_FAST if e > baseline else NOISE_ALPHA_SLOW
+                    baseline = baseline * (1.0 - alpha) + e * alpha
                 continue
 
             # ── 9. Baseline adaptation (idle + quiet) ─────────────────────────
             if not recording and e < baseline * CEILING_MULT:
-                baseline = baseline * (1.0 - NOISE_ALPHA) + e * NOISE_ALPHA
+                alpha = NOISE_ALPHA_FAST if e > baseline else NOISE_ALPHA_SLOW
+                baseline = baseline * (1.0 - alpha) + e * alpha
 
             adaptive_floor = max(ABS_FLOOR_ENERGY, baseline * FLOOR_MULT)
             start_thr = max(adaptive_floor, baseline * self.speech_trigger_mult)
@@ -1699,7 +1699,14 @@ class SpeechToText:
                     e_max = max(onset_e_win)
                     e_min = min(onset_e_win)
                     ratio = e_max / (e_min + 1e-12)
-                    flat_ok = ratio >= ONSET_FLATNESS_MAX
+                    # Fallback: allow high-energy monotone speech if significantly above baseline
+                    if (
+                        ratio < ONSET_FLATNESS_MAX
+                        and e > baseline * self.speech_trigger_mult * 1.5
+                    ):
+                        flat_ok = True
+                    else:
+                        flat_ok = ratio >= ONSET_FLATNESS_MAX
 
                 if above_for >= START_SUSTAIN_SEC and flat_ok:
                     recording = True
@@ -1862,9 +1869,8 @@ class SpeechToText:
         VAD loop start), NOT self.sample_rate which may have changed on reconnect."""
         if self._whisper is None:
             return ""
-        # faster-whisper always expects 16kHz. Resample if stream opened at dev_sr.
+
         audio = _resample_to_16k(clip_i16, sr)
-        # _resample_to_16k returns float32 in [-1, 1] — no further conversion needed
         try:
             segs, _ = self._whisper.transcribe(
                 audio,
@@ -1873,7 +1879,12 @@ class SpeechToText:
                 vad_filter=self.whisper_vad_filter,
             )
             text = " ".join(s.text.strip() for s in segs if s.text.strip())
-            if text.lower() in _HALLUCINATIONS:
+            if not text:
+                return ""
+
+            # Fixed: normalize both sides to guarantee match
+            text_clean = text.strip().lower().rstrip(". ")
+            if text_clean in _HALLUCINATIONS:
                 logger.debug("[STT] Hallucination filtered: %r", text)
                 return ""
             return text

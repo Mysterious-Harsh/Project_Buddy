@@ -84,7 +84,7 @@ speech_trigger_mult = 3.0
 whisper_vad_filter = true
 use_silero_vad = true
 enable_beep = true
-beam_size = 2
+beam_size = 4
 
 # -----------------------------------------
 # Memory

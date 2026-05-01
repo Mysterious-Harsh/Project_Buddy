@@ -4,26 +4,33 @@
 # Sits at the top of handle_turn(). Returns None for anything ambiguous → Brain takes over.
 #
 # Supported intent categories:
-#   Media      : play, pause, resume, toggle, next, prev, skip, play-on-app, search-on-app
-#   Volume     : up, down, set, mute, max, min
-#   Power      : sleep, hibernate, lock, shutdown, restart, logout
-#   Display    : brightness up/down/set, dark mode, night mode/shift
-#   Network    : wifi on/off/toggle, bluetooth on/off/toggle
-#   Focus      : do not disturb on/off, focus mode, quiet mode
-#   Screenshot : take screenshot, capture screen, print screen
-#   Quick Info : time, date, battery
-#   Folders    : open downloads / desktop / documents / home
-#   App launch : open / launch / start / restart <app>
-#   App quit   : quit / force quit / kill / exit <app>
-#   URL open   : open / go to / visit <url>
-#   Timer      : set timer for N seconds/minutes/hours
-#   Math       : what is N plus/minus/times/divided by M
+#   Media        : play, pause, resume, toggle, next, prev, skip, play-on-app, search-on-app
+#   Volume       : up, down, set, mute, max, min
+#   Power        : sleep, hibernate, lock, shutdown, restart, logout
+#   Display      : brightness up/down/set, dark mode, night mode/shift
+#   Network      : wifi on/off/toggle, bluetooth on/off/toggle
+#   Focus        : do not disturb on/off, focus mode, quiet mode
+#   Screenshot   : take screenshot, capture screen, print screen
+#   Quick Info   : time, date, battery, uptime, cpu, ram, disk, ip, network status
+#   Folders      : open downloads / desktop / documents / home
+#   App launch   : open / launch / start / restart <app>
+#   App focus    : switch to / focus / bring to front <app>
+#   App quit     : quit / force quit / kill / exit <app>
+#   URL open     : open / go to / visit <url>
+#   Timer        : set timer for N seconds/minutes/hours
+#   Math         : what is N plus/minus/times/divided by M
+#   Unit convert : convert N <unit> to <unit>  (temp/length/weight/speed/volume)
+#   World clock  : what time in <city>
+#   Base convert : N in binary/hex/decimal/octal
+#   Random       : flip a coin, roll a dice, random number between N and M
 
 from __future__ import annotations
 
 import os
+import random as _random_mod
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import threading
@@ -34,9 +41,145 @@ from datetime import datetime
 from typing import Callable, List, Optional
 from urllib.parse import quote_plus
 
+# ── Optional runtime dependencies (guarded imports) ───────────────────────────
+try:
+    import psutil as _psutil
+    _PSUTIL_OK = True
+except ImportError:
+    _psutil = None           # type: ignore[assignment]
+    _PSUTIL_OK = False
+
+try:
+    import zoneinfo as _zoneinfo
+    _zoneinfo.ZoneInfo("UTC")   # smoke-test: fails on Windows without tzdata
+    _ZONEINFO_OK = True
+except (ImportError, KeyError):
+    _zoneinfo = None             # type: ignore[assignment]
+    _ZONEINFO_OK = False
+
 from buddy.logger.logger import get_logger
 
 logger = get_logger("intent_interceptor")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# §0  DEPENDENCY CHECK
+# ══════════════════════════════════════════════════════════════════════════════
+
+# Each entry: display_name → {pip_pkg, check_fn, features}
+_INTENT_DEPS = {
+    "psutil": {
+        "pip_pkg": "psutil",
+        "check": lambda: _PSUTIL_OK,
+        "features": "CPU / RAM / disk / uptime / IP stats",
+    },
+    "tzdata": {
+        "pip_pkg": "tzdata",
+        "check": lambda: _ZONEINFO_OK,
+        "features": "world clock (timezone data on Windows / minimal envs)",
+    },
+}
+
+
+def _pip_install(pkg: str) -> bool:
+    """Run pip install <pkg> using the current Python interpreter."""
+    try:
+        result = subprocess.run(
+            [sys.executable, "-m", "pip", "install", pkg, "-q", "--no-input"],
+            capture_output=True,
+            timeout=120,
+        )
+        return result.returncode == 0
+    except Exception:
+        return False
+
+
+def _recheck_psutil() -> bool:
+    global _psutil, _PSUTIL_OK
+    try:
+        import psutil as _p
+        _psutil = _p
+        _PSUTIL_OK = True
+        return True
+    except ImportError:
+        return False
+
+
+def _recheck_zoneinfo() -> bool:
+    global _zoneinfo, _ZONEINFO_OK
+    try:
+        import zoneinfo as _z
+        _z.ZoneInfo("UTC")
+        _zoneinfo = _z
+        _ZONEINFO_OK = True
+        return True
+    except (ImportError, KeyError):
+        return False
+
+
+_RECHECK = {
+    "psutil": _recheck_psutil,
+    "tzdata": _recheck_zoneinfo,
+}
+
+
+def check_intent_deps(auto_install: bool = True) -> dict[str, bool]:
+    """
+    Check required runtime deps for IntentInterceptor.
+    If auto_install=True (default) and a dep is missing, installs it via pip.
+
+    Returns {dep_name: is_available}.
+    Missing deps disable only their feature group — the interceptor still runs.
+    """
+    status: dict[str, bool] = {}
+    missing: list[str] = []
+
+    for name, info in _INTENT_DEPS.items():
+        if info["check"]():
+            status[name] = True
+        else:
+            missing.append(name)
+            status[name] = False
+
+    if not missing:
+        logger.debug("intent_interceptor: all deps present %s", list(status.keys()))
+        return status
+
+    for name in missing:
+        info = _INTENT_DEPS[name]
+        pkg = info["pip_pkg"]
+        features = info["features"]
+
+        if auto_install:
+            logger.warning(
+                "intent_interceptor: %r not found — installing %r (needed for: %s)",
+                name, pkg, features,
+            )
+            ok = _pip_install(pkg)
+            if ok:
+                rechk = _RECHECK[name]()
+                status[name] = rechk
+                if rechk:
+                    logger.info("intent_interceptor: %r installed successfully.", name)
+                else:
+                    logger.warning(
+                        "intent_interceptor: installed %r but import still failed — "
+                        "restart Buddy or run: pip install %s", name, pkg,
+                    )
+            else:
+                logger.error(
+                    "intent_interceptor: failed to install %r automatically. "
+                    "Run manually: pip install %s\n"
+                    "Affected features: %s", name, pkg, features,
+                )
+        else:
+            logger.warning(
+                "intent_interceptor: %r missing — %s will be unavailable. "
+                "Run: pip install %s", name, features, pkg,
+            )
+
+    return status
+
 
 _PLATFORM = sys.platform  # "darwin" | "linux" | "win32"
 _IS_MAC = _PLATFORM == "darwin"
@@ -158,6 +301,42 @@ _AMBIGUOUS_APP_RE = re.compile(
 _DEVICE_RE = re.compile(
     r"^(my\s+|the\s+)?(computer|pc|mac|machine|laptop|device)$", re.IGNORECASE
 )
+
+# ── Security: processes that must never be targeted by quit/kill ──────────────
+# Shell runtimes — killing these kills Buddy or the user's terminal session.
+# System daemons — killing these can destabilize or crash the OS.
+_PROTECTED_PROCS: frozenset[str] = frozenset({
+    # Python / Buddy runtime
+    "python", "python3", "python3.11", "python3.12", "python3.10",
+    # Shell interpreters
+    "bash", "zsh", "sh", "fish", "tcsh", "csh", "dash", "ksh",
+    # macOS system
+    "launchd", "kernel_task", "windowserver", "loginwindow", "systemuiserver",
+    "coreaudiod", "notificationcenter", "securityd", "configd",
+    # Linux system
+    "init", "systemd", "systemd-journald", "systemd-logind", "systemd-udevd",
+    "dbus", "dbus-daemon", "networkmanager", "polkitd", "udisksd",
+    "sshd", "cron", "crond", "rsyslogd", "udevd", "kthreadd",
+    # Windows system
+    "svchost", "csrss", "lsass", "winlogon", "services", "smss",
+    "system", "registry", "memory compression", "wininit",
+})
+
+
+def _is_protected_proc(name: str) -> bool:
+    """Return True if name matches a protected system/runtime process."""
+    return name.strip().lower() in _PROTECTED_PROCS
+
+
+# ── Security: final arg sanitizer — strips anything that could escape double-
+# quotes in a shell command string.  normalize() + regex capture groups already
+# prevent metacharacters, but this is an explicit defense-in-depth checkpoint.
+_SHELL_UNSAFE_RE = re.compile(r'["\';`$|&<>()\\\n\r\t]')
+
+
+def _sharg(s: str) -> str:
+    """Strip characters that could break out of a double-quoted shell argument."""
+    return _SHELL_UNSAFE_RE.sub("", s).strip()
 
 
 def _play_is_ambiguous(after_play: str) -> bool:
@@ -370,12 +549,16 @@ def _build_patterns() -> list[tuple]:
         raw = (m.group("app") or "").strip()
         if not raw or _AMBIGUOUS_APP_RE.match(raw) or _DEVICE_RE.match(raw):
             return None
+        if _is_protected_proc(raw):
+            return None  # fall through to Brain — never kill system/runtime processes
         return QuickAction("quit_app", {"app": _resolve_app(raw), "force": False})
 
     def force_quit_app(m):
         raw = (m.group("app") or "").strip()
         if not raw or _AMBIGUOUS_APP_RE.match(raw) or _DEVICE_RE.match(raw):
             return None
+        if _is_protected_proc(raw):
+            return None  # fall through to Brain
         return QuickAction("quit_app", {"app": _resolve_app(raw), "force": True})
 
     # ── Volume ───────────────────────────────────────────────────────────────
@@ -505,6 +688,67 @@ def _build_patterns() -> list[tuple]:
         if not a or not b or not op:
             return None
         return QuickAction("math_calculate", {"a": a, "op": op, "b": b})
+
+    # ── System stats (new) ───────────────────────────────────────────────────
+
+    def sys_stat(m):
+        return QuickAction("sys_stat", {"kind": m.lastgroup or m.group(1).lower()})
+
+    # ── App focus / switch (new) ─────────────────────────────────────────────
+
+    def focus_app(m):
+        raw = (m.group("app") or "").strip()
+        if not raw:
+            return None
+        return QuickAction("focus_app", {"app": _resolve_app(raw)})
+
+    # ── Unit conversion (new) ────────────────────────────────────────────────
+
+    def unit_convert(m):
+        try:
+            val = float(m.group("val").replace(",", ""))
+        except (ValueError, IndexError):
+            return None
+        src = re.sub(r"\s+", " ", (m.group("src") or "").strip().lower())
+        dst = re.sub(r"\s+", " ", (m.group("dst") or "").strip().lower())
+        if not src or not dst:
+            return None
+        return QuickAction("unit_convert", {"val": val, "src": src, "dst": dst})
+
+    # ── World clock (new) ────────────────────────────────────────────────────
+
+    def world_clock(m):
+        city = re.sub(r"\s+", " ", (m.group("city") or "").strip().lower())
+        if not city:
+            return None
+        return QuickAction("world_clock", {"city": city})
+
+    # ── Base conversion (new) ────────────────────────────────────────────────
+
+    def base_convert(m):
+        raw = (m.group("num") or "").strip().lower()
+        base = (m.group("base") or "").strip().lower()
+        if not raw or not base:
+            return None
+        return QuickAction("base_convert", {"num": raw, "base": base})
+
+    # ── Random / dice / coin (new) ───────────────────────────────────────────
+
+    def coin_flip(m):
+        return QuickAction("coin_flip")
+
+    def dice_roll(m):
+        sides = int(m.group("sides") or 6)
+        count = int(m.group("count") or 1)
+        return QuickAction("dice_roll", {"sides": sides, "count": count})
+
+    def random_num(m):
+        try:
+            lo = int(m.group("lo"))
+            hi = int(m.group("hi"))
+        except (IndexError, TypeError, ValueError):
+            return None
+        return QuickAction("random_num", {"lo": lo, "hi": hi})
 
     # ── Shared sub-expressions ────────────────────────────────────────────────
 
@@ -843,6 +1087,174 @@ def _build_patterns() -> list[tuple]:
             ),
             math_calc,
         ),
+
+        # ── System stats ─────────────────────────────────────────────────────
+        (
+            P(
+                r"^(how\s+much\s+|what\s+is\s+(my\s+|the\s+)?)?"
+                r"(?P<cpu>cpu(\s+usage)?|processor(\s+usage)?)$",
+                re.I,
+            ),
+            lambda m: QuickAction("sys_stat", {"kind": "cpu"}),
+        ),
+        (
+            P(
+                r"^(how\s+much\s+(ram|memory|free\s+(ram|memory)|available\s+(ram|memory))"
+                r"(\s+(is\s+(left|available)|do\s+i\s+have))?"
+                r"|what\s+is\s+(my\s+|the\s+)?(ram|memory)(\s+usage)?"
+                r"|ram(\s+usage)?|memory(\s+usage)?"
+                r"|free\s+(ram|memory)|available\s+(ram|memory))$",
+                re.I,
+            ),
+            lambda m: QuickAction("sys_stat", {"kind": "ram"}),
+        ),
+        (
+            P(
+                r"^(how\s+much\s+|what\s+is\s+(my\s+|the\s+)?)?"
+                r"(?P<disk>disk(\s+(space|usage))?|storage(\s+left)?|"
+                r"free\s+(disk|storage)|available\s+(disk|storage))$",
+                re.I,
+            ),
+            lambda m: QuickAction("sys_stat", {"kind": "disk"}),
+        ),
+        (
+            P(
+                r"^(how\s+long\s+(has\s+)?(my\s+)?(computer|pc|mac|system|laptop)\s+(been\s+)?"
+                r"(on|running|up)\??|system\s+uptime|uptime|how\s+long\s+since\s+reboot)$",
+                re.I,
+            ),
+            lambda m: QuickAction("sys_stat", {"kind": "uptime"}),
+        ),
+        (
+            P(
+                r"^(what\s+is\s+(my\s+)?|show\s+(my\s+)?|my\s+)?"
+                r"(local\s+)?ip(\s+address)?$",
+                re.I,
+            ),
+            lambda m: QuickAction("sys_stat", {"kind": "ip"}),
+        ),
+        (
+            P(
+                r"^(am\s+i\s+|are\s+we\s+)?connected(\s+to(\s+the)?\s+internet)?"
+                r"|check(\s+my)?\s+internet(\s+connection)?$",
+                re.I,
+            ),
+            lambda m: QuickAction("sys_stat", {"kind": "net"}),
+        ),
+
+        # ── App focus / switch window ─────────────────────────────────────────
+        # "bring spotify to front" / "bring spotify up" — app is mid-phrase
+        (P(r"^bring\s+(?P<app>[\w\s]+?)\s+(to\s+front|up)$", re.I), focus_app),
+        # "bring up spotify" — verb phrase first
+        (P(r"^bring\s+up\s+(?P<app>[\w\s]+)$", re.I), focus_app),
+        # "switch to X", "focus X", "show X", "raise X"
+        (
+            P(
+                r"^(switch\s+to|focus|show|raise)\s+(?P<app>[\w\s]+)$",
+                re.I,
+            ),
+            focus_app,
+        ),
+
+        # ── Unit conversion ───────────────────────────────────────────────────
+        (
+            P(
+                r"^(convert\s+|how\s+many\s+|what\s+is\s+)?"
+                r"(?P<val>[\d,]+(?:\.\d+)?)\s+"
+                r"(?P<src>degrees?\s+(?:celsius|fahrenheit|kelvin|c|f|k)"
+                r"|celsius|fahrenheit|kelvin"
+                r"|km|kilometers?|kilometres?"
+                r"|mi|miles?"
+                r"|m|meters?|metres?"
+                r"|cm|centimeters?|centimetres?"
+                r"|ft|feet|foot"
+                r"|in|inches?|inch"
+                r"|kg|kilograms?"
+                r"|lbs?|pounds?"
+                r"|g|grams?"
+                r"|oz|ounces?"
+                r"|kmh|km\s*/\s*h|kilometers?\s+per\s+hour"
+                r"|mph|miles?\s+per\s+hour"
+                r"|l|liters?|litres?"
+                r"|ml|milliliters?|millilitres?"
+                r"|gal|gallons?"
+                r"|fl\s+oz|fluid\s+ounces?)"
+                r"\s+(?:in|to|into|as)\s+"
+                r"(?P<dst>degrees?\s+(?:celsius|fahrenheit|kelvin|c|f|k)"
+                r"|celsius|fahrenheit|kelvin"
+                r"|km|kilometers?|kilometres?"
+                r"|mi|miles?"
+                r"|m|meters?|metres?"
+                r"|cm|centimeters?|centimetres?"
+                r"|ft|feet|foot"
+                r"|in|inches?|inch"
+                r"|kg|kilograms?"
+                r"|lbs?|pounds?"
+                r"|g|grams?"
+                r"|oz|ounces?"
+                r"|kmh|km\s*/\s*h|kilometers?\s+per\s+hour"
+                r"|mph|miles?\s+per\s+hour"
+                r"|l|liters?|litres?"
+                r"|ml|milliliters?|millilitres?"
+                r"|gal|gallons?"
+                r"|fl\s+oz|fluid\s+ounces?)$",
+                re.I,
+            ),
+            unit_convert,
+        ),
+
+        # ── World clock ───────────────────────────────────────────────────────
+        (
+            P(
+                r"^(what\s+time\s+is\s+it\s+in|current\s+time\s+in|"
+                r"time\s+in|what\s+is\s+the\s+time\s+in)\s+(?P<city>[\w\s]+)$",
+                re.I,
+            ),
+            world_clock,
+        ),
+
+        # ── Number base conversion ────────────────────────────────────────────
+        (
+            P(
+                r"^(what\s+is\s+|convert\s+)?(?P<num>0x[\da-f]+|\d+)\s+"
+                r"(in|to|as)\s+(?P<base>binary|hex(adecimal)?|decimal|octal)$",
+                re.I,
+            ),
+            base_convert,
+        ),
+
+        # ── Coin flip ─────────────────────────────────────────────────────────
+        (P(r"^(flip\s+(a\s+)?coin|heads\s+or\s+tails|toss\s+(a\s+)?coin)$", re.I), coin_flip),
+
+        # ── Dice roll ─────────────────────────────────────────────────────────
+        (
+            P(
+                r"^(roll\s+)?(?P<count>[2-9]|1[0-9])?\s*"
+                r"(d(?P<sides>4|6|8|10|12|20|100)|dice?|die)$",
+                re.I,
+            ),
+            dice_roll,
+        ),
+        (P(r"^roll\s+a\s+(dice?|die)$", re.I), lambda m: QuickAction("dice_roll", {"sides": 6, "count": 1})),
+
+        # ── Random number ─────────────────────────────────────────────────────
+        (
+            P(
+                r"^(give\s+me\s+a\s+|pick\s+a\s+|generate\s+a?\s+)?"
+                r"random\s+(number\s+)?"
+                r"(between\s+(?P<lo>\d+)\s+and\s+(?P<hi>\d+)"
+                r"|from\s+(?P<lo2>\d+)\s+to\s+(?P<hi2>\d+))$",
+                re.I,
+            ),
+            lambda m: QuickAction("random_num", {
+                "lo": int(m.group("lo") or m.group("lo2") or 1),
+                "hi": int(m.group("hi") or m.group("hi2") or 100),
+            }),
+        ),
+        (
+            P(r"^(give\s+me\s+a\s+|pick\s+a\s+|generate\s+a?\s+)?random\s+number$", re.I),
+            lambda m: QuickAction("random_num", {"lo": 1, "hi": 100}),
+        ),
     ]
 
 
@@ -1154,7 +1566,9 @@ def _mute_toggle(p):
 
 @_action("open_app")
 def _open_app(p):
-    app = p.get("app", "")
+    app = _sharg(p.get("app", ""))
+    if not app:
+        raise RuntimeError("No app specified.")
     if _IS_MAC:
         code, out = _run(f'open -a "{app}"')
     elif _IS_WIN:
@@ -1171,7 +1585,9 @@ def _open_app(p):
 
 @_action("restart_app")
 def _restart_app(p):
-    app = p.get("app", "")
+    app = _sharg(p.get("app", ""))
+    if not app or _is_protected_proc(app):
+        return f"Cannot restart {app!r} — it is a protected system or runtime process."
     if _IS_MAC:
         _run(f"osascript -e 'tell application \"{app}\" to quit'")
         time.sleep(1.0)
@@ -1183,7 +1599,8 @@ def _restart_app(p):
         time.sleep(0.5)
         _run(f"powershell -NoProfile -Command \"Start-Process '{app}'\"")
     else:
-        _run(f'pkill -f "{app}"')
+        # Exact process name match — NOT -f (full cmdline)
+        _run(f'pkill -x "{app}"')
         time.sleep(0.5)
         _run(f'xdg-open "{app}"')
     return f"Restarting {app}."
@@ -1191,20 +1608,28 @@ def _restart_app(p):
 
 @_action("quit_app")
 def _quit_app(p):
-    app = p.get("app", "")
+    app = _sharg(p.get("app", ""))
     force = bool(p.get("force", False))
+
+    # Handler-level guard — builder already blocks these, but defence-in-depth.
+    if not app or _is_protected_proc(app):
+        return f"Cannot quit {app!r} — it is a protected system or runtime process."
+
     if _IS_MAC:
         _run(f"osascript -e 'tell application \"{app}\" to quit'")
         if force:
             time.sleep(0.5)
-            _run(f'pkill -9 -f "{app}"')
+            # Use exact process-name match (-x), NOT -f (full cmdline).
+            _run(f'pkill -9 -x "{app}"')
     elif _IS_WIN:
         exe = app if app.endswith(".exe") else f"{app}.exe"
+        exe = _sharg(exe)
         flag = "/F" if force else ""
         _run(f'taskkill /IM "{exe}" {flag}'.strip())
     else:
         signal_flag = "-9" if force else "-15"
-        _run(f'pkill {signal_flag} -f "{app}"')
+        # Use exact process-name match (-x), NOT -f (full cmdline).
+        _run(f'pkill {signal_flag} -x "{app}"')
     label = "Force quit" if force else "Quit"
     return f"{label} {app}."
 
@@ -1226,15 +1651,21 @@ def _open_folder(p):
 
 @_action("open_url")
 def _open_url(p):
-    url = p.get("url", "")
+    url = _sharg(p.get("url", ""))
+    if not url:
+        return "No URL specified."
     if not url.startswith(("http://", "https://")):
         url = "https://" + url
-    if _IS_MAC:
-        _run(f'open "{url}"')
-    elif _IS_WIN:
-        _run(f'start "" "{url}"')
-    else:
-        _run(f'xdg-open "{url}"')
+    # Use shell=False (list form) — URL goes as a literal argument, not shell-expanded.
+    try:
+        if _IS_MAC:
+            subprocess.run(["open", url], check=False, timeout=5)
+        elif _IS_WIN:
+            subprocess.run(["start", "", url], shell=True, check=False, timeout=5)
+        else:
+            subprocess.run(["xdg-open", url], check=False, timeout=5)
+    except Exception as exc:
+        return f"Could not open URL: {exc}"
     return f"Opening {url}."
 
 
@@ -1677,6 +2108,361 @@ def _math_calculate(p):
     return f"{_fmt(a)} {op} {_fmt(b)} = {_fmt(result)}."
 
 
+# ── System stats ─────────────────────────────────────────────────────────────
+
+
+@_action("sys_stat")
+def _sys_stat(p):
+    if not _PSUTIL_OK and p.get("kind") not in ("ip", "net"):
+        return "psutil is not installed. Run: pip install psutil"
+
+    kind = p.get("kind", "")
+
+    if kind == "cpu":
+        pct = _psutil.cpu_percent(interval=0.5)
+        return f"CPU usage: {pct:.1f}%."
+
+    if kind == "ram":
+        vm = _psutil.virtual_memory()
+        used_gb = vm.used / 1e9
+        total_gb = vm.total / 1e9
+        return (
+            f"RAM: {used_gb:.1f} GB used of {total_gb:.1f} GB "
+            f"({vm.percent:.1f}% used, {(100 - vm.percent):.1f}% free)."
+        )
+
+    if kind == "disk":
+        disk_root = "C:\\" if _IS_WIN else "/"
+        du = _psutil.disk_usage(disk_root)
+        free_gb = du.free / 1e9
+        total_gb = du.total / 1e9
+        return (
+            f"Disk: {free_gb:.1f} GB free of {total_gb:.1f} GB "
+            f"({du.percent:.1f}% used)."
+        )
+
+    if kind == "uptime":
+        boot_ts = _psutil.boot_time()
+        elapsed = time.time() - boot_ts
+        h = int(elapsed // 3600)
+        m = int((elapsed % 3600) // 60)
+        boot_str = datetime.fromtimestamp(boot_ts).strftime("%Y-%m-%d %H:%M")
+        return f"System up for {h}h {m}m (booted {boot_str})."
+
+    if kind == "ip":
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(("8.8.8.8", 80))
+            ip = s.getsockname()[0]
+            s.close()
+        except OSError:
+            ip = "unavailable"
+        return f"Local IP: {ip}."
+
+    if kind == "net":
+        try:
+            socket.setdefaulttimeout(3)
+            socket.socket(socket.AF_INET, socket.SOCK_STREAM).connect(("8.8.8.8", 53))
+            return "Connected to the internet."
+        except OSError:
+            return "No internet connection detected."
+
+    return f"Unknown stat: {kind!r}"
+
+
+# ── App focus / switch window ─────────────────────────────────────────────────
+
+
+@_action("focus_app")
+def _focus_app(p):
+    app = _sharg(p.get("app", ""))
+    if not app:
+        return "No app specified."
+
+    if _IS_MAC:
+        # osascript takes the app name as part of the AppleScript string — use list form
+        # to avoid any shell interpretation of the app name.
+        result = subprocess.run(
+            ["osascript", "-e", f'tell application "{app}" to activate'],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode == 0:
+            return f"Switched to {app}."
+        return f"Could not focus {app}: {result.stderr.strip()}"
+
+    if _IS_WIN:
+        script = (
+            f'$p=(Get-Process | Where-Object {{$_.MainWindowTitle -match "{app}"}} '
+            f'| Select-Object -First 1);'
+            f'if($p){{$wsh=New-Object -ComObject WScript.Shell;$wsh.AppActivate($p.Id)}}'
+        )
+        code, out = _run(f'powershell -NoProfile -Command "{script}"')
+        if code == 0:
+            return f"Switched to {app}."
+        return f"Could not focus {app}: {out}"
+
+    # Linux — try wmctrl then xdotool
+    if shutil.which("wmctrl"):
+        code, _ = _run(f'wmctrl -a "{app}"')
+        if code == 0:
+            return f"Switched to {app}."
+    if shutil.which("xdotool"):
+        code, _ = _run(f'xdotool search --name "{app}" windowactivate --sync')
+        if code == 0:
+            return f"Switched to {app}."
+    return f"Could not focus {app}. Install wmctrl or xdotool."
+
+
+# ── Unit conversion ───────────────────────────────────────────────────────────
+
+# Canonical unit names after alias resolution
+_UNIT_ALIASES: dict[str, str] = {
+    # temperature
+    "c": "celsius", "f": "fahrenheit", "k": "kelvin",
+    "degree celsius": "celsius", "degrees celsius": "celsius",
+    "degree fahrenheit": "fahrenheit", "degrees fahrenheit": "fahrenheit",
+    "degree kelvin": "kelvin", "degrees kelvin": "kelvin",
+    "degree c": "celsius", "degrees c": "celsius",
+    "degree f": "fahrenheit", "degrees f": "fahrenheit",
+    "degree k": "kelvin", "degrees k": "kelvin",
+    # length
+    "kilometer": "km", "kilometers": "km", "kilometre": "km", "kilometres": "km",
+    "mile": "mi", "miles": "mi",
+    "meter": "m", "meters": "m", "metre": "m", "metres": "m",
+    "centimeter": "cm", "centimeters": "cm", "centimetre": "cm", "centimetres": "cm",
+    "foot": "ft", "feet": "ft",
+    "inch": "in", "inches": "in",
+    # weight
+    "kilogram": "kg", "kilograms": "kg",
+    "pound": "lb", "pounds": "lb", "lbs": "lb",
+    "gram": "g", "grams": "g",
+    "ounce": "oz", "ounces": "oz",
+    # speed
+    "kmh": "km/h", "km/h": "km/h", "kilometers per hour": "km/h",
+    "kilometres per hour": "km/h", "km per hour": "km/h",
+    "mph": "mph", "miles per hour": "mph",
+    # volume
+    "liter": "l", "liters": "l", "litre": "l", "litres": "l",
+    "milliliter": "ml", "milliliters": "ml",
+    "millilitre": "ml", "millilitres": "ml",
+    "gallon": "gal", "gallons": "gal",
+    "fluid ounce": "fl oz", "fluid ounces": "fl oz",
+}
+
+# Conversion factors to a canonical base unit per category
+# temperature handled separately (non-linear)
+_LENGTH_TO_M: dict[str, float] = {
+    "km": 1000, "m": 1, "cm": 0.01, "mi": 1609.344, "ft": 0.3048, "in": 0.0254,
+}
+_WEIGHT_TO_KG: dict[str, float] = {
+    "kg": 1, "g": 0.001, "lb": 0.453592, "oz": 0.0283495,
+}
+_SPEED_TO_KMH: dict[str, float] = {
+    "km/h": 1, "mph": 1.60934,
+}
+_VOLUME_TO_L: dict[str, float] = {
+    "l": 1, "ml": 0.001, "gal": 3.78541, "fl oz": 0.0295735,
+}
+
+
+def _canonical_unit(raw: str) -> str:
+    r = raw.strip().lower()
+    return _UNIT_ALIASES.get(r, r)
+
+
+def _convert_units(val: float, src: str, dst: str) -> str:
+    src = _canonical_unit(src)
+    dst = _canonical_unit(dst)
+
+    if src == dst:
+        return f"{val:g} {src} = {val:g} {dst}."
+
+    # Temperature (non-linear)
+    _TEMP = {"celsius", "fahrenheit", "kelvin"}
+    if src in _TEMP or dst in _TEMP:
+        if src == "celsius" and dst == "fahrenheit":
+            r = val * 9 / 5 + 32
+        elif src == "fahrenheit" and dst == "celsius":
+            r = (val - 32) * 5 / 9
+        elif src == "celsius" and dst == "kelvin":
+            r = val + 273.15
+        elif src == "kelvin" and dst == "celsius":
+            r = val - 273.15
+        elif src == "fahrenheit" and dst == "kelvin":
+            r = (val - 32) * 5 / 9 + 273.15
+        elif src == "kelvin" and dst == "fahrenheit":
+            r = (val - 273.15) * 9 / 5 + 32
+        else:
+            return f"Cannot convert {src} to {dst}."
+        return f"{val:g} {src} = {r:.4g} {dst}."
+
+    # Linear categories
+    for table, label in (
+        (_LENGTH_TO_M, "length"),
+        (_WEIGHT_TO_KG, "weight"),
+        (_SPEED_TO_KMH, "speed"),
+        (_VOLUME_TO_L, "volume"),
+    ):
+        if src in table and dst in table:
+            base = val * table[src]
+            result = base / table[dst]
+            def _fmt(n: float) -> str:
+                return f"{n:.6g}"
+            return f"{val:g} {src} = {_fmt(result)} {dst}."
+
+    return f"Cannot convert {src!r} to {dst!r} — incompatible units."
+
+
+@_action("unit_convert")
+def _unit_convert(p):
+    try:
+        val = float(p["val"])
+    except (KeyError, ValueError):
+        return "Could not parse the value."
+    return _convert_units(val, str(p.get("src", "")), str(p.get("dst", "")))
+
+
+# ── World clock ───────────────────────────────────────────────────────────────
+
+_CITY_TZ: dict[str, str] = {
+    # Americas
+    "new york": "America/New_York", "nyc": "America/New_York",
+    "los angeles": "America/Los_Angeles", "la": "America/Los_Angeles",
+    "chicago": "America/Chicago", "houston": "America/Chicago",
+    "toronto": "America/Toronto", "vancouver": "America/Vancouver",
+    "mexico city": "America/Mexico_City",
+    "sao paulo": "America/Sao_Paulo", "buenos aires": "America/Argentina/Buenos_Aires",
+    "bogota": "America/Bogota", "lima": "America/Lima",
+    # Europe
+    "london": "Europe/London", "uk": "Europe/London",
+    "paris": "Europe/Paris", "france": "Europe/Paris",
+    "berlin": "Europe/Berlin", "germany": "Europe/Berlin",
+    "madrid": "Europe/Madrid", "rome": "Europe/Rome",
+    "amsterdam": "Europe/Amsterdam", "brussels": "Europe/Brussels",
+    "zurich": "Europe/Zurich", "vienna": "Europe/Vienna",
+    "warsaw": "Europe/Warsaw", "prague": "Europe/Prague",
+    "stockholm": "Europe/Stockholm", "oslo": "Europe/Oslo",
+    "helsinki": "Europe/Helsinki", "lisbon": "Europe/Lisbon",
+    "athens": "Europe/Athens", "budapest": "Europe/Budapest",
+    "moscow": "Europe/Moscow", "russia": "Europe/Moscow",
+    "istanbul": "Europe/Istanbul", "turkey": "Europe/Istanbul",
+    # Asia / Pacific
+    "dubai": "Asia/Dubai", "uae": "Asia/Dubai",
+    "mumbai": "Asia/Kolkata", "delhi": "Asia/Kolkata",
+    "kolkata": "Asia/Kolkata", "india": "Asia/Kolkata",
+    "karachi": "Asia/Karachi", "pakistan": "Asia/Karachi",
+    "dhaka": "Asia/Dhaka", "bangladesh": "Asia/Dhaka",
+    "colombo": "Asia/Colombo", "kathmandu": "Asia/Kathmandu",
+    "tashkent": "Asia/Tashkent",
+    "bangkok": "Asia/Bangkok", "thailand": "Asia/Bangkok",
+    "singapore": "Asia/Singapore",
+    "kuala lumpur": "Asia/Kuala_Lumpur", "malaysia": "Asia/Kuala_Lumpur",
+    "jakarta": "Asia/Jakarta", "indonesia": "Asia/Jakarta",
+    "hong kong": "Asia/Hong_Kong",
+    "shanghai": "Asia/Shanghai", "beijing": "Asia/Shanghai", "china": "Asia/Shanghai",
+    "taipei": "Asia/Taipei", "taiwan": "Asia/Taipei",
+    "seoul": "Asia/Seoul", "korea": "Asia/Seoul",
+    "tokyo": "Asia/Tokyo", "japan": "Asia/Tokyo",
+    "sydney": "Australia/Sydney", "australia": "Australia/Sydney",
+    "melbourne": "Australia/Melbourne", "brisbane": "Australia/Brisbane",
+    "auckland": "Pacific/Auckland", "new zealand": "Pacific/Auckland",
+    # Africa
+    "cairo": "Africa/Cairo", "egypt": "Africa/Cairo",
+    "johannesburg": "Africa/Johannesburg", "south africa": "Africa/Johannesburg",
+    "nairobi": "Africa/Nairobi", "kenya": "Africa/Nairobi",
+    "lagos": "Africa/Lagos", "nigeria": "Africa/Lagos",
+    "casablanca": "Africa/Casablanca",
+}
+
+
+@_action("world_clock")
+def _world_clock(p):
+    if not _ZONEINFO_OK:
+        return "Timezone data not available. Run: pip install tzdata"
+    city = str(p.get("city", "")).strip().lower()
+    tz_name = _CITY_TZ.get(city)
+    if not tz_name:
+        return f"Don't know the timezone for {city!r}. Try a major city name."
+    try:
+        tz = _zoneinfo.ZoneInfo(tz_name)
+        now = datetime.now(tz)
+        return f"It's {now.strftime('%H:%M')} in {city.title()} ({now.strftime('%A, %d %b %Y')}, {tz_name})."
+    except Exception as exc:
+        return f"Could not get time for {city}: {exc}"
+
+
+# ── Number base conversion ────────────────────────────────────────────────────
+
+
+@_action("base_convert")
+def _base_convert(p):
+    raw = str(p.get("num", "")).strip().lower()
+    base = str(p.get("base", "")).strip().lower()
+
+    # Parse input (supports 0x prefix for hex input)
+    try:
+        if raw.startswith("0x"):
+            n = int(raw, 16)
+            src_label = f"{raw} (hex)"
+        else:
+            n = int(raw, 10)
+            src_label = f"{n} (decimal)"
+    except ValueError:
+        return f"Could not parse number: {raw!r}"
+
+    base_norm = base.rstrip("adecimlo")  # "hex", "hexadecimal" → "hex"
+    if "hex" in base:
+        result = hex(n)
+        label = "hex"
+    elif base == "binary":
+        result = bin(n)
+        label = "binary"
+    elif base == "octal":
+        result = oct(n)
+        label = "octal"
+    elif base == "decimal":
+        result = str(n)
+        label = "decimal"
+    else:
+        return f"Unknown base: {base!r}"
+
+    return f"{src_label} = {result} ({label})."
+
+
+# ── Coin flip / dice roll / random ────────────────────────────────────────────
+
+
+@_action("coin_flip")
+def _coin_flip(p):
+    result = _random_mod.choice(["Heads", "Tails"])
+    return f"{result}!"
+
+
+@_action("dice_roll")
+def _dice_roll(p):
+    sides = int(p.get("sides", 6))
+    count = max(1, int(p.get("count", 1)))
+    if sides < 2:
+        return "A die needs at least 2 sides."
+    rolls = [_random_mod.randint(1, sides) for _ in range(count)]
+    if count == 1:
+        return f"Rolled a d{sides}: {rolls[0]}."
+    return f"Rolled {count}d{sides}: {rolls} (total: {sum(rolls)})."
+
+
+@_action("random_num")
+def _random_num(p):
+    try:
+        lo = int(p.get("lo", 1))
+        hi = int(p.get("hi", 100))
+    except (ValueError, TypeError):
+        return "Invalid range."
+    if lo > hi:
+        lo, hi = hi, lo
+    result = _random_mod.randint(lo, hi)
+    return f"Random number between {lo} and {hi}: {result}."
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # §8  ACTION EXECUTOR
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1704,6 +2490,9 @@ class IntentInterceptor:
         if action:
             reply, ok = interceptor.execute(action)
     """
+
+    def __init__(self) -> None:
+        check_intent_deps(auto_install=True)
 
     def match(self, normalized: str) -> Optional[QuickAction]:
         if not normalized:

@@ -22,6 +22,13 @@ from buddy.logger.logger import get_logger
 from buddy.prompts.vision_prompts import VISION_TOOL_PROMPT
 from buddy.tools.vision.image_encoder import is_image_path
 
+import unicodedata as _unicodedata
+
+
+def _space_norm(s: str) -> str:
+    return ''.join(' ' if (_unicodedata.category(c) == 'Zs' or c == ' ') else c for c in s)
+
+
 logger = get_logger("vision_tool")
 
 TOOL_NAME = "vision"
@@ -120,16 +127,18 @@ class VisionTool:
         for p in raw_paths:
             r = Path(p).expanduser().resolve()
             if not r.exists():
-                # macOS screenshot filenames use   (narrow no-break space)
-                # between the time and AM/PM. If the user typed a regular space,
-                # try swapping space variants to find the real file.
+                # macOS screenshot filenames use narrow no-break space ( )
+                # between time and AM/PM. Scan the parent dir and match after
+                # collapsing all Unicode space variants to ASCII space.
+                _parent = r.parent
+                _target = _space_norm(r.name)
                 _found = False
-                for _a, _b in [(" ", " "), (" ", " "), (" ", " "), (" ", " ")]:
-                    _alt = Path(str(r).replace(_a, _b))
-                    if _alt.exists():
-                        r = _alt
-                        _found = True
-                        break
+                if _parent.is_dir():
+                    for _entry in _parent.iterdir():
+                        if _space_norm(_entry.name) == _target:
+                            r = _entry
+                            _found = True
+                            break
                 if not _found:
                     raise ValueError(f"Image file not found: {r}")
             if not r.is_file():

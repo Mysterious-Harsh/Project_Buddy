@@ -126,27 +126,36 @@ def extract_image_paths(text: str) -> List[str]:
     """
     Scan a message string for tokens that look like existing image file paths.
 
-    Tokens are split on whitespace. A token qualifies if:
-      - It has a recognized image extension
-      - The file actually exists on disk
+    Strategy (in order):
+      1. Quoted paths — anything inside "..." or '...' that has an image extension.
+      2. Whitespace-split tokens for simple no-space paths.
+    Paths with spaces (e.g. macOS screenshots) are only caught via quoting.
 
-    Returns a list of resolved absolute path strings (may be empty).
+    Returns deduplicated resolved absolute path strings (may be empty).
     """
+    import re
     if not text:
         return []
 
-    found: List[str] = []
-    for token in text.split():
-        token = token.strip("\"'(),;")
-        if not token:
-            continue
-        if not is_image_path(token):
-            continue
-        try:
-            p = Path(token).expanduser().resolve()
-            if p.is_file():
-                found.append(str(p))
-        except Exception:
-            continue
+    seen: List[str] = []
 
-    return found
+    def _try(raw: str) -> None:
+        raw = raw.strip("\"'(),;")
+        if not raw or not is_image_path(raw):
+            return
+        try:
+            p = Path(raw).expanduser().resolve()
+            if p.is_file() and str(p) not in seen:
+                seen.append(str(p))
+        except Exception:
+            pass
+
+    # Pass 1: quoted strings (handles paths with spaces)
+    for m in re.finditer(r'["\']([^"\']+)["\']', text):
+        _try(m.group(1))
+
+    # Pass 2: whitespace-split tokens (no-space paths, unquoted)
+    for token in text.split():
+        _try(token)
+
+    return seen

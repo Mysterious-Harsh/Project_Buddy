@@ -182,7 +182,7 @@ class WebFetch:
         call: WebDownloadCall,
         on_progress: Optional[Callable[[str, bool], None]],
     ) -> Dict[str, Any]:
-        dest = Path(call.dest_path)
+        dest = Path(call.dest_path).expanduser()
 
         if dest.is_dir():
             raw = urlparse(call.url).path.rstrip("/").split("/")[-1] or "download"
