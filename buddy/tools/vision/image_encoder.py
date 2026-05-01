@@ -7,13 +7,42 @@ from __future__ import annotations
 
 import base64
 import os
+import unicodedata
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 _IMAGE_EXTENSIONS = frozenset(
     {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tiff", ".tif"}
 )
 _MAX_SIZE_BYTES = 20 * 1024 * 1024  # 20 MB guard
+
+
+def _space_norm(s: str) -> str:
+    """Collapse all Unicode space variants (Zs category) to ASCII space."""
+    return "".join(" " if unicodedata.category(c) == "Zs" else c for c in s)
+
+
+def resolve_image_path(raw: str) -> Optional[Path]:
+    """
+    Resolve a user-supplied image path to an existing Path, or return None.
+
+    Handles:
+      - ~ expansion
+      - macOS screenshot filenames that use narrow no-break space (U+202F) between
+        the time and AM/PM — typed paths use regular space, actual file uses U+202F.
+        Resolved by scanning the parent directory with Unicode space normalization.
+    """
+    p = Path(raw).expanduser().resolve()
+    if p.exists():
+        return p
+    # Space-variant scan: compare filenames after collapsing all Unicode spaces.
+    parent = p.parent
+    target = _space_norm(p.name)
+    if parent.is_dir():
+        for entry in parent.iterdir():
+            if _space_norm(entry.name) == target:
+                return entry
+    return None
 
 
 def is_image_path(token: str) -> bool:
@@ -144,17 +173,17 @@ def extract_image_paths(text: str) -> List[str]:
         if not raw or not is_image_path(raw):
             return
         try:
-            p = Path(raw).expanduser().resolve()
-            if p.is_file() and str(p) not in seen:
+            p = resolve_image_path(raw)
+            if p is not None and p.is_file() and str(p) not in seen:
                 seen.append(str(p))
         except Exception:
             pass
 
-    # Pass 1: quoted strings (handles paths with spaces)
+    # Pass 1: quoted strings — catches paths with spaces
     for m in re.finditer(r'["\']([^"\']+)["\']', text):
         _try(m.group(1))
 
-    # Pass 2: whitespace-split tokens (no-space paths, unquoted)
+    # Pass 2: whitespace-split tokens — catches simple no-space paths
     for token in text.split():
         _try(token)
 

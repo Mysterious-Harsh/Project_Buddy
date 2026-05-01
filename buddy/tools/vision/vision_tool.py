@@ -20,14 +20,7 @@ from typing import Any, Callable, Dict, List, Literal, Optional
 
 from buddy.logger.logger import get_logger
 from buddy.prompts.vision_prompts import VISION_TOOL_PROMPT
-from buddy.tools.vision.image_encoder import is_image_path
-
-import unicodedata as _unicodedata
-
-
-def _space_norm(s: str) -> str:
-    return ''.join(' ' if (_unicodedata.category(c) == 'Zs' or c == ' ') else c for c in s)
-
+from buddy.tools.vision.image_encoder import is_image_path, resolve_image_path, _space_norm
 
 logger = get_logger("vision_tool")
 
@@ -122,25 +115,13 @@ class VisionTool:
         if not raw_paths:
             raise ValueError("'path' or 'paths' is required for action='analyze'")
 
-        # Validate and resolve each path
+        # Validate and resolve each path (resolve_image_path handles ~ and
+        # macOS narrow no-break space in screenshot filenames)
         resolved: List[str] = []
         for p in raw_paths:
-            r = Path(p).expanduser().resolve()
-            if not r.exists():
-                # macOS screenshot filenames use narrow no-break space ( )
-                # between time and AM/PM. Scan the parent dir and match after
-                # collapsing all Unicode space variants to ASCII space.
-                _parent = r.parent
-                _target = _space_norm(r.name)
-                _found = False
-                if _parent.is_dir():
-                    for _entry in _parent.iterdir():
-                        if _space_norm(_entry.name) == _target:
-                            r = _entry
-                            _found = True
-                            break
-                if not _found:
-                    raise ValueError(f"Image file not found: {r}")
+            r = resolve_image_path(p)
+            if r is None:
+                raise ValueError(f"Image file not found: {p}")
             if not r.is_file():
                 raise ValueError(f"Path is not a file: {r}")
             if not is_image_path(str(r)):

@@ -1754,17 +1754,7 @@ def _run_first_boot_wizard(
     user_name = _wizard_ask("Your name", default=default_name)
     print()
 
-    # Q2: Language
-    _wizard_line(_c("Primary language?", "tagline"))
-    _wizard_line(
-        f"  {_c('[1]', 'key')} English    {_c('[2]', 'key')} Hindi   "
-        f" {_c('[3]', 'key')} Hinglish"
-    )
-    lang_raw = _wizard_ask("Choice", default="1")
-    language = {"1": "en", "2": "hi", "3": "hinglish"}.get(lang_raw.strip(), "en")
-    print()
-
-    # Q3: Web search
+    # Q2: Web search
     _wizard_line(_c("Web search engine?", "tagline"))
     _wizard_line(
         f"  {_c('[S]', 'key')} SearXNG  "
@@ -1778,17 +1768,17 @@ def _run_first_boot_wizard(
     web_engine = "searxng" if web_raw.startswith("S") else "duckduckgo"
     print()
 
-    # Q4: STT
+    # Q3: STT
     stt = _wizard_yn("Voice input — speak to Buddy via mic?", default=False)
     print()
 
-    # Q5: TTS
+    # Q4: TTS
     tts = _wizard_yn("Voice output — Buddy speaks responses?", default=False)
     print()
 
     return {
         "user_name": user_name,
-        "language": language,
+        "language": "en",
         "web_engine": web_engine,
         "stt": stt,
         "tts": tts,
