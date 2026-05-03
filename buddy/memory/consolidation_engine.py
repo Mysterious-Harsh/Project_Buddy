@@ -69,7 +69,6 @@
 # ╚══════════════════════════════════════════════════════════════════════════════╝
 from __future__ import annotations
 
-import json
 import math
 import re
 import sqlite3
@@ -1236,6 +1235,8 @@ def _apply_summary_cluster(
         min(1.0, 0.6 * max(0.0, min(1.0, salience)) + 0.4 * cluster.avg_importance),
     )
 
+    prov_expires = now + budget.provisional_window_days * 86400 if is_provisional else None
+
     summary_mem = MemoryEntry(
         text=summary_text,
         embedding=emb_np,
@@ -1249,24 +1250,12 @@ def _apply_summary_cluster(
         consolidated_into_id=None,
         last_consolidated_at=now,
         deleted=0,
+        is_summary=1,
+        consolidation_cycles=0,
+        provisional_expires_at=prov_expires,
         metadata={
-            "is_summary": True,
             "summary_of_ids": list(cluster.ids),
-            "summary_confidence": confidence,
-            "is_provisional": is_provisional,
-            # v4: extended reconsolidation window [P12]
-            "provisional_expires_at": (
-                now + budget.provisional_window_days * 86400 if is_provisional else None
-            ),
-            "consolidation_cycles": 0,
-            # v4: track sleep phase that produced this summary
-            "summary_sleep_phase": "REM" if cluster.max_arousal > 0.5 else "SWS",
-            "cluster_max_arousal": cluster.max_arousal,
-            # v5-P9: depth of summarization chain (prevents semantic drift)
             "consolidation_depth": new_depth,
-            # v5-P10: schema vs episodic cluster provenance
-            "cluster_type": "schema" if cluster.is_schema else "episodic",
-            "cluster_time_span_days": round(cluster.time_span_days, 1),
         },
     )
 
@@ -1280,31 +1269,18 @@ def _apply_summary_cluster(
             vector_store.soft_delete(mid)
             soft_deleted_count += 1
 
-        # v5-P7: When the summary is provisional (low-confidence), protect source
-        # memories from hard-purge until the provisional window expires.
-        # Without this, source data is lost even when the summary may be wrong.
+        # v5-P7: protect source memories from hard-purge until provisional window expires.
         if is_provisional:
-            provisional_expires_at = now + budget.provisional_window_days * 86400
             db_path = str(getattr(sqlite_store, "db_path", "") or "")
             if db_path:
                 try:
                     with sqlite3.connect(db_path) as conn:
-                        for mid in cluster.ids:
-                            row = conn.execute(
-                                "SELECT metadata FROM memories WHERE id=?", (mid,)
-                            ).fetchone()
-                            if row is None:
-                                continue
-                            try:
-                                meta = json.loads(row[0] or "{}")
-                            except (json.JSONDecodeError, TypeError):
-                                meta = {}
-                            meta["provisional_source_protected"] = True
-                            meta["provisional_expires_at"] = provisional_expires_at
-                            conn.execute(
-                                "UPDATE memories SET metadata=? WHERE id=?",
-                                (json.dumps(meta), mid),
-                            )
+                        conn.executemany(
+                            """UPDATE memories
+                               SET provisional_source_protected=1, provisional_expires_at=?
+                               WHERE id=?""",
+                            [(prov_expires, mid) for mid in cluster.ids],
+                        )
                         conn.commit()
                 except Exception:
                     logger.exception("p7.provisional_protect_failed cluster_size=%d", len(cluster.ids))
@@ -1328,20 +1304,16 @@ def _increment_cycle_counts(
     if not db_path or not survivor_ids:
         return 0
 
+    now_ts = time.time()
     updated = 0
     try:
         with sqlite3.connect(db_path) as conn:
             for mid in survivor_ids:
                 try:
                     conn.execute(
-                        """UPDATE memories
-                           SET metadata = json_set(
-                               COALESCE(metadata, '{}'),
-                               '$.consolidation_cycles',
-                               COALESCE(json_extract(metadata, '$.consolidation_cycles'), 0) + 1
-                           )
-                           WHERE id = ?""",  # v5-P6: no deleted=0 filter — bump all scanned
-                        (mid,),
+                        "UPDATE memories SET consolidation_cycles = consolidation_cycles + 1,"
+                        " last_consolidated_at = ? WHERE id=?",
+                        (now_ts, mid),
                     )
                     updated += 1
                 except Exception:
@@ -1385,7 +1357,7 @@ def _plan_tier_updates(
         info = neighbor_map.get(m.id)
         sim_max = info.sim_max if info else 0.0
         dyn_imp = dynamic_importances.get(m.id, 0.0)
-        cycles = int((getattr(m, "metadata", {}) or {}).get("consolidation_cycles", 0))
+        cycles = int(getattr(m, "consolidation_cycles", 0) or 0)
         M = _compute_strength(
             m,
             now=now,
@@ -1475,9 +1447,7 @@ def _is_protected(
                    consolidated_into_id check).
       "critical" → protected if not yet consolidated (same gate as Rule A/B).
     """
-    pt = str(
-        (getattr(m, "metadata", {}) or {}).get("protection_tier", "normal") or "normal"
-    ).lower()
+    pt = str(getattr(m, "protection_tier", "normal") or "normal").lower()
 
     # Rule C-immortal: protected unconditionally — survives consolidation
     if pt == "immortal":
@@ -1578,8 +1548,8 @@ def _plan_hard_deletes(
                          AND consolidated_into_id IS NOT NULL
                          AND COALESCE(last_consolidated_at, created_at) <= ?
                          AND NOT (
-                             json_extract(metadata, '$.provisional_source_protected') = 1
-                             AND json_extract(metadata, '$.provisional_expires_at') > ?
+                             provisional_source_protected = 1
+                             AND provisional_expires_at > ?
                          )
                        LIMIT ?""",
                     (cutoff, now, limit),
@@ -2188,7 +2158,7 @@ def _print_dry_run(
             if budget.use_temporal_gradient
             else 0.0
         )
-        cycles = int((getattr(m, "metadata", {}) or {}).get("consolidation_cycles", 0))
+        cycles = int(getattr(m, "consolidation_cycles", 0) or 0)
         flag = "⚡" if (info and info.is_surprising) else "  "
         phase = "REM" if arousal > 0.5 else "SWS"
         print(
@@ -2234,7 +2204,7 @@ def _print_dry_run(
                 dynamic_importances=dynamic_importances,
                 id_map=id_map,
             )
-            cyc = int((getattr(m, "metadata", {}) or {}).get("consolidation_cycles", 0))
+            cyc = int(getattr(m, "consolidation_cycles", 0) or 0)
             print(
                 f"  {d} {mem_id}  {old} → {new}  M={M:.3f}  "
                 f"dyn_imp={dynamic_importances.get(mem_id, 0):.2f}  cyc={cyc}"

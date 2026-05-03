@@ -928,6 +928,26 @@ class Brain:
         return {"function": "error", "arguments": {}, "summary": str(raw).strip()}
 
     # ======================================================
+    # Opener: proactive session start
+    # ======================================================
+    def generate_opener(self, recent_turns: str = "") -> str:
+        from buddy.prompts.opener_prompts import OPENER_PROMPT
+        from buddy.brain.prompt_builder import build_opener_prompt
+
+        system_prompt = self._build_system_prompt([BUDDY_BEHAVIOR, OPENER_PROMPT])
+        prompt = build_opener_prompt(system=system_prompt, recent_turns=recent_turns)
+
+        _, text = self._call_llm_generate(
+            prompt=prompt,
+            temperature=0.6,
+            stream=False,
+            json_mode=False,
+            n_predict=256,
+            options={},
+        )
+        return (text or "").strip()
+
+    # ======================================================
     # Internal: LLM call (generate only)
     # ======================================================
     def _call_llm_generate(

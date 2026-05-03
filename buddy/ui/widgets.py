@@ -126,7 +126,7 @@ def _banner_markup(*, compact: bool = False) -> str:
     tagline = f"[dim {_VIOLET}]Cognitive AI  ·  Offline-first  ·  Memory-driven[/]"
     if compact:
         return logo + "\n" + tagline
-    hint = f"[dim {_DIM}]type or speak  ·  ESC to interrupt  ·  F2 mute  ·  F3 sleep[/]"
+    hint = f"[dim {_DIM}]type or speak  ·  ESC to interrupt  ·  F2 mic  ·  F3 sleep[/]"
     return logo + "\n" + tagline + "\n" + hint
 
 
@@ -139,7 +139,7 @@ def _banner_markup(*, compact: bool = False) -> str:
 class SystemState:
     sleeping: bool = False
     consolidating: bool = False
-    voice_muted: bool = False
+    mic_off: bool = False
     pipeline_running: bool = False
     last_voice_cmd_ts: float = 0.0
 
@@ -150,9 +150,9 @@ class VoiceCmd(Enum):
     QUIET = "quiet"  # stop TTS voice output only (pipeline keeps running)
     SLEEP = "sleep"
     WAKE = "wake"
-    MUTE = "mute"
-    UNMUTE = "unmute"
-    TOGGLE_MUTE = "toggle_mute"
+    MIC_OFF = "mic_off"
+    MIC_ON = "mic_on"
+    MIC_TOGGLE = "mic_toggle"
 
 
 def _match_voice_command(text: str) -> VoiceCmd:
@@ -185,12 +185,14 @@ def _match_voice_command(text: str) -> VoiceCmd:
         return VoiceCmd.SLEEP
     if t in {"wake", "wake up", "buddy wake", "buddy wake up"}:
         return VoiceCmd.WAKE
-    if t in {"mute", "mute voice", "buddy mute"}:
-        return VoiceCmd.MUTE
-    if t in {"unmute", "unmute voice", "buddy unmute"}:
-        return VoiceCmd.UNMUTE
-    if t in {"toggle mute", "toggle voice"}:
-        return VoiceCmd.TOGGLE_MUTE
+    if t in {"mic off", "turn off mic", "turn mic off", "disable mic", "buddy mic off",
+             "mute", "mute voice", "buddy mute"}:
+        return VoiceCmd.MIC_OFF
+    if t in {"mic on", "turn on mic", "turn mic on", "enable mic", "buddy mic on",
+             "unmute", "unmute voice", "buddy unmute"}:
+        return VoiceCmd.MIC_ON
+    if t in {"toggle mic", "mic toggle", "toggle mute", "toggle voice"}:
+        return VoiceCmd.MIC_TOGGLE
     return VoiceCmd.NONE
 
 
@@ -688,7 +690,7 @@ class InfoPane(Static):
         with self._state_lock:
             sleeping = self._sys_state.sleeping
             pipeline = self._sys_state.pipeline_running
-            voice_muted = self._sys_state.voice_muted
+            mic_off = self._sys_state.mic_off
 
         if sleeping:
             state_s = f"[{_VIOLET}]sleeping[/]"
@@ -699,8 +701,8 @@ class InfoPane(Static):
 
         if not self._voice_enabled:
             voice_s = f"[{_DIM}]off[/]"
-        elif voice_muted:
-            voice_s = f"[{_YELLOW}]muted[/]"
+        elif mic_off:
+            voice_s = f"[{_YELLOW}]Mic Off[/]"
         else:
             voice_s = f"[{_GREEN}]on[/]"
 
@@ -810,7 +812,7 @@ class StatusBar(Static):
     }}
     """
 
-    _SHORTCUTS = f"[dim {_DIM}]ESC:stop  F2:mute  F3:sleep  Ctrl+C×2:quit[/]"
+    _SHORTCUTS = f"[dim {_DIM}]ESC:stop  F2:mic  F3:sleep  Ctrl+C×2:quit[/]"
 
     _info: reactive[str] = reactive("")
     _hint: reactive[str] = reactive("")

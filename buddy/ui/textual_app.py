@@ -52,8 +52,9 @@ from typing import Any
 
 from rich.markup import escape as markup_escape
 from textual.app import App, ComposeResult
-from textual.screen import Screen
-from textual.widgets import ContentSwitcher
+from textual.containers import Vertical
+from textual.screen import ModalScreen, Screen
+from textual.widgets import ContentSwitcher, Label, ListItem, ListView
 
 from buddy.buddy_core.pipeline import handle_turn
 from buddy.logger.logger import get_logger
@@ -234,6 +235,83 @@ class BootScreen(Screen):
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# MicSelectScreen — mic device picker modal (opened by F4)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+class MicSelectScreen(ModalScreen):
+    """
+    Microphone selection modal.
+
+    Receives the device list from MainScreen (already filtered for virtual
+    devices by stt._list_input_devices()).  Dismisses with (global_idx, name)
+    on confirmation or None on cancel.
+    """
+
+    BINDINGS = [("escape", "cancel", "Cancel")]
+
+    CSS = f"""
+    MicSelectScreen {{
+        align: center middle;
+    }}
+    #mic-dialog {{
+        width: 62;
+        max-height: 22;
+        border: round {_CYAN};
+        background: {_BG};
+        padding: 1 2;
+    }}
+    #mic-title {{
+        text-align: center;
+        color: {_CYAN};
+        margin-bottom: 1;
+    }}
+    #mic-list {{
+        height: auto;
+        max-height: 14;
+        border: solid {_DIM};
+    }}
+    #mic-footer {{
+        text-align: center;
+        color: {_DIM};
+        margin-top: 1;
+    }}
+    """
+
+    def __init__(
+        self,
+        devices: list[tuple[int, dict]],
+        current_idx: int | None,
+    ) -> None:
+        super().__init__()
+        self._devices = devices        # [(global_idx, device_dict), ...]
+        self._current_idx = current_idx
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="mic-dialog"):
+            yield Label("🎙  Select Microphone", id="mic-title")
+            with ListView(id="mic-list"):
+                for global_idx, dev in self._devices:
+                    name = dev.get("name", f"Device {global_idx}")
+                    marker = "  ●" if global_idx == self._current_idx else ""
+                    yield ListItem(Label(f"[{global_idx}]  {name}{marker}"))
+            yield Label(
+                "↑↓ navigate   Enter select   ESC cancel",
+                id="mic-footer",
+            )
+
+    def on_list_view_selected(self, event: ListView.Selected) -> None:
+        idx = event.list_view.index
+        if idx is not None and 0 <= idx < len(self._devices):
+            global_idx, dev = self._devices[idx]
+            name = dev.get("name", f"Device {global_idx}")
+            self.dismiss((global_idx, name))
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # MainScreen — primary chat screen
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -254,8 +332,9 @@ class MainScreen(Screen):
     """
 
     BINDINGS = [
-        ("f2", "toggle_mute", "Mute/Unmute"),
+        ("f2", "toggle_mute", "Mic On/Off"),
         ("f3", "toggle_sleep", "Sleep/Wake"),
+        ("f4", "select_mic", "Mic"),
         ("ctrl+c", "quit_request", "Quit"),
     ]
 
@@ -278,6 +357,7 @@ class MainScreen(Screen):
         state_lock: threading.Lock,
         interrupt_event: threading.Event,
         memory_manager: Any | None = None,
+        opener_text: str = "",
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -287,6 +367,7 @@ class MainScreen(Screen):
         self._state_lock = state_lock
         self._interrupt_event = interrupt_event
         self._memory_manager = memory_manager
+        self._opener_text = opener_text
         self._active_turn: asyncio.Task | None = None
         self._turn_lock = asyncio.Lock()
         self._quit_event = asyncio.Event()
@@ -361,7 +442,7 @@ class MainScreen(Screen):
             buddy_cfg = cfg.get("buddy", {}) or {}
             general_cfg = buddy_cfg.get("general", {}) or {}
             self._idle_timeout_s = float(
-                general_cfg.get("sleep_after_idle_sec", 20) * 60
+                general_cfg.get("sleep_after_idle_min", 20) * 60
             )
         except Exception:
             logger.debug("on_mount: failed to read idle timeout", exc_info=True)
@@ -373,7 +454,17 @@ class MainScreen(Screen):
             logger.debug("on_mount: BuddyInput focus failed", exc_info=True)
 
         self._track(self._inactivity_watcher())
+        if self._opener_text:
+            self._track(self._show_opener())
         self._refresh_info_bar()
+
+    async def _show_opener(self) -> None:
+        arts = getattr(self._state, "artifacts", None)
+        conversations = getattr(arts, "conversations", None)
+        if self._w_chat_log:
+            await self._w_chat_log.add_message(self._opener_text, "buddy")
+        if conversations:
+            conversations.add_buddy(self._opener_text)
 
     def _refresh_info_bar(self, turn_ms: int | None = None) -> None:
         # FIX-14: use cached references.
@@ -425,6 +516,44 @@ class MainScreen(Screen):
 
     def action_toggle_sleep(self) -> None:
         self._toggle_sleep()
+
+    def action_select_mic(self) -> None:
+        """F4 — mute immediately, open mic picker, unmute on close."""
+        if self._stt is None:
+            return
+
+        with self._state_lock:
+            was_muted = self._sys_state.mic_off
+
+        # Release mic right away so the modal doesn't feel laggy.
+        if not was_muted:
+            self._set_voice_mute(True)
+
+        devices = self._stt._list_input_devices()
+        if not devices:
+            # No real input devices found — restore state and bail.
+            if not was_muted:
+                self._set_voice_mute(False)
+            if self._w_status_bar:
+                self._w_status_bar.set_hint(f"[{_YELLOW}]No mic devices found[/]")
+            return
+
+        def _on_mic_selected(result: tuple[int, str] | None) -> None:
+            if result is not None:
+                new_idx, name = result
+                self._stt.microphone_index = new_idx  # type: ignore[union-attr]
+            if not was_muted:
+                self._set_voice_mute(False)
+            if result is not None and self._w_status_bar:
+                _icon = "🎙 " if _USE_UNICODE else ""
+                self._w_status_bar.set_hint(
+                    f"[{_GREEN}]{_icon}{markup_escape(name)}[/]"
+                )
+
+        self.app.push_screen(
+            MicSelectScreen(devices, self._stt.microphone_index),
+            _on_mic_selected,
+        )
 
     def action_quit_request(self) -> None:
         now = time.monotonic()
@@ -530,7 +659,7 @@ class MainScreen(Screen):
 
         with self._state_lock:
             sleeping = self._sys_state.sleeping
-            muted = self._sys_state.voice_muted
+            muted = self._sys_state.mic_off
             running = self._sys_state.pipeline_running
 
         if running and cmd == VoiceCmd.STOP:
@@ -548,10 +677,10 @@ class MainScreen(Screen):
         if cmd == VoiceCmd.SLEEP:
             self._track(self._async_set_sleeping(True))
             return
-        if cmd in (VoiceCmd.MUTE, VoiceCmd.TOGGLE_MUTE):
+        if cmd in (VoiceCmd.MIC_OFF, VoiceCmd.MIC_TOGGLE):
             self._toggle_voice_mute()
             return
-        if cmd == VoiceCmd.UNMUTE:
+        if cmd == VoiceCmd.MIC_ON:
             self._set_voice_mute(False)
             return
         if muted:
@@ -786,15 +915,19 @@ class MainScreen(Screen):
         if sleeping:
             sleep_view.reset_stats()
             switcher.current = "sleep-view"
-            status_bar.set_hint(
-                f"[dim {_VIOLET}]😴 sleeping — consolidating memories…[/]", 0
-            )
             mm = self._memory_manager
+            started = False
             if mm is not None:
                 started = mm.start_consolidation(on_done=self._on_consolidation_done)
                 if started:
                     with self._state_lock:
                         self._sys_state.consolidating = True
+            if started:
+                status_bar.set_hint(
+                    f"[dim {_VIOLET}]😴 sleeping — consolidating memories…[/]", 0
+                )
+            else:
+                status_bar.set_hint(f"[dim {_VIOLET}]😴 sleeping[/]", 0)
         else:
             # FIX-02: sleeping already set to False at the top — no duplicate write.
             mm = self._memory_manager
@@ -817,13 +950,9 @@ class MainScreen(Screen):
             try:
                 sv = self._w_sleep_view or self.query_one(SleepView)
                 if report:
-                    flash = getattr(report, "flash_processed", 0) or 0
-                    short = getattr(report, "short_processed", 0) or 0
-                    long_ = (
-                        getattr(report, "long_processed", 0)
-                        or getattr(report, "summarized", 0)
-                        or 0
-                    )
+                    flash = getattr(report, "scanned", 0) or 0
+                    short = getattr(report, "promoted", 0) or 0
+                    long_ = getattr(report, "summarized", 0) or 0
                     sv.update_consolidation_stats(flash=flash, short=short, long=long_)
             except Exception:
                 logger.debug("_on_consolidation_done._apply failed", exc_info=True)
@@ -839,16 +968,16 @@ class MainScreen(Screen):
 
     def _set_voice_mute(self, muted: bool) -> None:
         with self._state_lock:
-            if self._sys_state.voice_muted == muted:
+            if self._sys_state.mic_off == muted:
                 return
             if self._stt is not None:
                 try:
-                    self._stt.mute() if muted else self._stt.unmute()
+                    self._stt.mic_off() if muted else self._stt.mic_on()
                 except Exception:
                     logger.debug(
                         "_set_voice_mute: stt mute/unmute failed", exc_info=True
                     )
-            self._sys_state.voice_muted = muted
+            self._sys_state.mic_off = muted
         try:
             mic = self._w_mic_indicator or self.query_one(MicIndicator)
             mic.set_state("muted" if muted else "idle")
@@ -857,12 +986,12 @@ class MainScreen(Screen):
         # FIX-11: escape the icon string so Rich markup is never broken by
         # unexpected characters in the mute icon.
         if muted:
-            raw_icon = "🔇 " if _USE_UNICODE else "M "
+            raw_icon = "🔇 " if _USE_UNICODE else ""
             icon = markup_escape(raw_icon)
-            hint = f"[{_DIM}]{icon}muted[/]"
+            hint = f"[{_DIM}]{icon}Mic Off[/]"
         else:
             hint = (
-                f"[{_GREEN}]🔊 unmuted[/]" if _USE_UNICODE else f"[{_GREEN}]unmuted[/]"
+                f"[{_GREEN}]🎙 Mic On[/]" if _USE_UNICODE else f"[{_GREEN}]Mic On[/]"
             )
         try:
             sb = self._w_status_bar or self.query_one(StatusBar)
@@ -873,7 +1002,7 @@ class MainScreen(Screen):
 
     def _toggle_voice_mute(self) -> None:
         with self._state_lock:
-            muted = not self._sys_state.voice_muted
+            muted = not self._sys_state.mic_off
         self._set_voice_mute(muted)
 
     def set_stt_engine(self, stt: Any) -> None:
@@ -1003,7 +1132,29 @@ class BuddyApp(App):
 
         self._bootstrap_state = state  # retained for shutdown in on_unmount
 
-        mm = getattr(getattr(state, "artifacts", None), "memory_manager", None)
+        arts = getattr(state, "artifacts", None)
+        brain = getattr(arts, "brain", None)
+        conversations = getattr(arts, "conversations", None)
+
+        opener_text = ""
+        if brain is not None:
+            try:
+                boot_log = self.screen.query_one(BootLog)
+                await boot_log.add_message("waking up...", "running")
+            except Exception:
+                pass
+            recent = conversations.get_recent_conversations() if conversations else ""
+            try:
+                opener_text = await asyncio.wait_for(
+                    asyncio.to_thread(brain.generate_opener, recent),
+                    timeout=45.0,
+                )
+            except asyncio.TimeoutError:
+                logger.warning("opener timed out after 45s, skipping")
+            except Exception:
+                logger.warning("opener generation failed", exc_info=True)
+
+        mm = getattr(arts, "memory_manager", None)
         self._main_screen = MainScreen(
             state=state,
             input_queue=self._iq,
@@ -1011,6 +1162,7 @@ class BuddyApp(App):
             state_lock=self._state_lock,
             interrupt_event=self._interrupt_event,
             memory_manager=mm,
+            opener_text=opener_text,
         )
         await self.switch_screen(self._main_screen)
         self._track(self._start_stt(state))

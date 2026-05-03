@@ -131,7 +131,7 @@ DEFAULT_BLOCKSIZE = 512
 # Effect on timing: changes _frame_sec granularity (below_for, above_for steps).
 
 AUDIO_QUEUE_TIMEOUT = 0.10
-# Seconds the VAD loop waits on queue.get() before checking _running/_muted.
+# Seconds the VAD loop waits on queue.get() before checking _running/_mic_off.
 # RAISE (e.g. 0.25) → lower idle CPU at the cost of slower stop() response.
 # DO NOT lower below 0.05 — causes wasted wakeups with no new audio.
 
@@ -147,13 +147,14 @@ SILERO_CHUNK = 512
 # Samples fed per Silero inference call. Trained on exactly 512 @16 kHz = 32 ms.
 # ⚠ DO NOT CHANGE — the model's RNN timing is calibrated to this window size.
 
-SILERO_THRESH_START = 0.50
+SILERO_THRESH_START = 0.60
 # Silero speech probability needed to count a chunk as "voiced" (idle → recording).
-# RAISE (0.50–0.65) → if false triggers occur on TV / background conversation.
+# RAISE (0.60–0.75) → if false triggers occur on TV / background music / conversation.
 #   Effect: misses soft or distant voices; needs stronger speech to start.
-# LOWER (0.25–0.35) → catches whispers and far-field voices.
+# LOWER (0.30–0.45) → catches whispers and far-field voices.
 #   Effect: may trigger on breath sounds, fans, or sustained background noise.
-# Recommended range: 0.30–0.55. Keep at least 0.05 above SILERO_THRESH_END.
+# Recommended range: 0.50–0.70. Keep at least 0.05 above SILERO_THRESH_END.
+# Raised from 0.50 → 0.60: music vocals score 0.50–0.60; clear speech scores 0.85+.
 
 SILERO_THRESH_END = 0.30
 # Silero probability below which a chunk counts as silence during recording.
@@ -162,11 +163,12 @@ SILERO_THRESH_END = 0.30
 # LOWER → recording holds open through longer mid-sentence pauses.
 # Rule: always keep SILERO_THRESH_END < SILERO_THRESH_START by at least 0.05.
 
-SILERO_ONSET_CHUNKS = 2
+SILERO_ONSET_CHUNKS = 4
 # Consecutive voiced Silero chunks needed before recording starts (debounce).
-# 2 × 32 ms = 64 ms — fast enough for any speech, rejects single noise spikes.
-# RAISE (3–4) → more robust to brief non-speech sounds; adds 32 ms delay per step.
-# LOWER to 1 → fastest possible response; may trigger on short non-speech bursts.
+# 4 × 32 ms = 128 ms — still fast for any speech, rejects music and noise bursts.
+# RAISE (5–6) → more robust; adds 32 ms latency per step.
+# LOWER to 2 → fastest response; may trigger on music vocals or brief non-speech.
+# Raised from 2 → 4: 64 ms was too short to distinguish music from speech onset.
 
 # ── Segmentation (both VAD back-ends) ────────────────────────────────────────
 
@@ -695,8 +697,8 @@ class SpeechToText:
         "_tx_stop",  # threading.Event
         "_tx_thread",
         # ── mute ────────────────────────────────────────────────────────────
-        "_muted",  # bool
-        "_unmute_event",  # threading.Event — SET when active, CLEAR when muted
+        "_mic_off",  # bool
+        "_mic_on_event",  # threading.Event — SET when mic is ON, CLEAR when off
         # ── callbacks ───────────────────────────────────────────────────────
         "_cbw",
         "enable_beep",
@@ -780,12 +782,12 @@ class SpeechToText:
         self._running = False
         self._listen_thread: Optional[threading.Thread] = None
 
-        # ── mute ─────────────────────────────────────────────────────────────
-        # _unmute_event is SET when the system is ACTIVE (not muted).
-        # Both worker threads wait on it when muted → zero CPU while parked.
-        self._muted = False
-        self._unmute_event = threading.Event()
-        self._unmute_event.set()  # start in active (unmuted) state
+        # ── mic on/off ────────────────────────────────────────────────────────
+        # _mic_on_event is SET when the mic is ON (active).
+        # Both worker threads wait on it when mic is off → zero CPU while parked.
+        self._mic_off = False
+        self._mic_on_event = threading.Event()
+        self._mic_on_event.set()  # start with mic on
 
         # ── callbacks ────────────────────────────────────────────────────────
         self._cbw = _CallbackWorker()
@@ -904,7 +906,7 @@ class SpeechToText:
             return
         self._running = True
         self._tx_stop.clear()
-        self._unmute_event.set()  # ensure active on start
+        self._mic_on_event.set()  # ensure active on start
 
         self._tx_thread = threading.Thread(
             target=self._transcribe_worker, daemon=True, name="stt-tx"
@@ -919,7 +921,7 @@ class SpeechToText:
     def stop(self) -> None:
         """Shut down all threads and release all resources."""
         self._running = False
-        self._unmute_event.set()  # unblock any parked threads so they can exit
+        self._mic_on_event.set()  # unblock any parked threads so they can exit
 
         # Unblock VAD queue.get
         try:
@@ -947,20 +949,21 @@ class SpeechToText:
         logger.info("[STT] Shutdown complete.")
 
     # =========================================================================
-    # Mute / unmute
+    # Mic on / off
     # =========================================================================
 
     @property
-    def is_muted(self) -> bool:
+    def is_mic_off(self) -> bool:
         """True while the microphone is released and the model is offloaded."""
-        return self._muted
+        return self._mic_off
 
-    def mute(self) -> None:
-        if not self._running or self._muted:
+    def mic_off(self) -> None:
+        """Release the mic, offload Whisper, park worker threads (zero CPU)."""
+        if not self._running or self._mic_off:
             return
 
-        self._muted = True
-        self._unmute_event.clear()
+        self._mic_off = True
+        self._mic_on_event.clear()
 
         try:
             self._audio_q.put_nowait(b"")
@@ -968,30 +971,28 @@ class SpeechToText:
             pass
 
         self._drain_audio_q()
-        self._tx_queue_drain()  # 🔥 FIX: Discard pending transcriptions from pre-mute audio
+        self._tx_queue_drain()
         self._offload_whisper_model()
-        logger.info(
-            "[STT] Muted — mic released, model offloaded, stale audio discarded."
-        )
+        logger.info("[STT] Mic off — mic released, model offloaded, stale audio discarded.")
 
-    def unmute(self) -> None:
+    def mic_on(self) -> None:
         """
         • Reload the Whisper model.
         • Reclaim the microphone.
         • Run a fresh calibration pass (uses the same calibration_sec as __init__).
 
-        Thread-safe.  No-op if not muted.
+        Thread-safe.  No-op if mic is already on.
         """
-        if not self._running or not self._muted:
+        if not self._running or not self._mic_off:
             return
 
         # Reload model before unparking threads (warm-up happens inside)
         self._load_whisper_model()
 
-        self._muted = False
-        self._unmute_event.set()  # wake both worker threads
+        self._mic_off = False
+        self._mic_on_event.set()  # wake both worker threads
 
-        logger.info("[STT] Unmuted — model loaded, mic reclaimed, recalibrating…")
+        logger.info("[STT] Mic on — model loaded, mic reclaimed, recalibrating…")
 
     # =========================================================================
     # Beep
@@ -1080,8 +1081,8 @@ class SpeechToText:
         _req_sr = self.sample_rate
 
         while self._running:
-            if self._muted:
-                self._unmute_event.wait(timeout=1.0)
+            if self._mic_off:
+                self._mic_on_event.wait(timeout=1.0)
                 continue
 
             device_id = candidates[cand_i % len(candidates)]
@@ -1173,7 +1174,7 @@ class SpeechToText:
                     if fail_counts.get(k, 0) < 2:
                         all_bad = False
                         break
-                if all_bad and not self._muted:
+                if all_bad and not self._mic_off:
                     self._running = False
                     logger.error("[STT] Cannot open any microphone device — giving up.")
                     return
@@ -1258,6 +1259,7 @@ class SpeechToText:
         last_voiced: Optional[float] = None
         audio_buf: List[np.ndarray] = []
         onset_chunks = 0
+        onset_e_win: Deque[float] = deque(maxlen=ONSET_WIN_FRAMES)
         below_for = 0.0
         cooldown_until = 0.0
         speech_prob = 0.0
@@ -1272,12 +1274,12 @@ class SpeechToText:
         else:
             logger.info("[STT/Silero] Starting (background calibration)… ")
 
-        while self._running and not self._muted:
+        while self._running and not self._mic_off:
             try:
                 data = self._audio_q.get(timeout=AUDIO_QUEUE_TIMEOUT)
             except queue.Empty:
                 continue
-            if not data or self._muted:
+            if not data or self._mic_off:
                 break
 
             pcm = np.frombuffer(data, dtype=np.int16)
@@ -1347,7 +1349,7 @@ class SpeechToText:
                 else:
                     chunk_f32 = chunk_f32[:SILERO_CHUNK]
 
-                if e >= start_thr * 0.05:
+                if e >= start_thr * 0.25:
                     try:
                         speech_prob = float(
                             vad(torch.from_numpy(chunk_f32), DEFAULT_SAMPLE_RATE).item()
@@ -1355,6 +1357,8 @@ class SpeechToText:
                     except Exception:
                         speech_prob = 0.0
                 else:
+                    # Energy too low for speech — feed to Silero for RNN continuity
+                    # but force speech_prob to 0 (no trigger possible).
                     try:
                         vad(torch.from_numpy(chunk_f32), DEFAULT_SAMPLE_RATE)
                     except Exception:
@@ -1381,9 +1385,15 @@ class SpeechToText:
             if in_cooldown:
                 continue
 
-            # ── 6. Pre-roll (idle frames only) ───────────────────────────────
+            # ── 6. Pre-roll + onset energy tracking (idle frames only) ──────────
             if not recording:
                 preroll.append(pcm.copy())
+                # Track energy variance over onset window for flatness check.
+                # Mirrors Custom VAD: music has flat amplitude; speech is dynamic.
+                if e >= start_thr * 0.20:
+                    onset_e_win.append(e)
+                elif e < start_thr * 0.10:
+                    onset_e_win.clear()
 
             # ── 7. Debug meter ────────────────────────────────────────────────
             if self.debug and not recording and (now - dbg_last) >= 1.0:
@@ -1407,21 +1417,46 @@ class SpeechToText:
                         onset_chunks = max(0, onset_chunks - 1)
 
                 if onset_chunks >= SILERO_ONSET_CHUNKS:
-                    recording = True
-                    onset_chunks = 0
-                    below_for = 0.0
-                    audio_buf.clear()
-                    audio_buf.extend(preroll)
-                    preroll.clear()
-                    speech_start = now
-                    last_voiced = now
-                    self._on_speech_detected()
-                    if self.debug:
-                        logger.info(
-                            "[STT/Silero] RECORD start | e=%.6f prob=%.3f ",
-                            e,
-                            smooth_prob,
-                        )
+                    # Onset flatness gate — mirrors Custom VAD to reject music/hum.
+                    # Speech has a dynamic amplitude envelope (ratio ≥ 1.6).
+                    # Music / sustained noise has flat energy (ratio < 1.6).
+                    flat_ok = True
+                    oe_len = len(onset_e_win)
+                    if oe_len >= ONSET_WIN_FRAMES:
+                        e_max = max(onset_e_win)
+                        e_min = min(onset_e_win)
+                        ratio = e_max / (e_min + 1e-12)
+                        flat_ok = ratio >= ONSET_FLATNESS_MAX
+
+                    if flat_ok:
+                        recording = True
+                        onset_chunks = 0
+                        onset_e_win.clear()
+                        below_for = 0.0
+                        audio_buf.clear()
+                        audio_buf.extend(preroll)
+                        preroll.clear()
+                        speech_start = now
+                        last_voiced = now
+                        self._on_speech_detected()
+                        if self.debug:
+                            logger.info(
+                                "[STT/Silero] RECORD start | e=%.6f prob=%.3f ",
+                                e,
+                                smooth_prob,
+                            )
+                    else:
+                        # Flat onset → music/hum. Hard decay to prevent backlog.
+                        onset_chunks = max(0, onset_chunks - 2)
+                        if self.debug:
+                            oe = list(onset_e_win)
+                            ratio_dbg = (max(oe) / (min(oe) + 1e-12)) if oe else 0.0
+                            logger.info(
+                                "[STT/Silero] Onset flat (music/hum rejected)"
+                                " | e=%.6f ratio=%.2f",
+                                e,
+                                ratio_dbg,
+                            )
                 continue
 
             # ── 9. RECORDING ──────────────────────────────────────────────────
@@ -1462,6 +1497,7 @@ class SpeechToText:
                 speech_start = None
                 last_voiced = None
                 onset_chunks = 0
+                onset_e_win.clear()
                 below_for = 0.0
                 cooldown_until = now + COOLDOWN_SEC
 
@@ -1540,13 +1576,13 @@ class SpeechToText:
         voiced_frames = 0
         dbg_last = 0.0
 
-        while self._running and not self._muted:
+        while self._running and not self._mic_off:
             # ── 1. Fetch frame ────────────────────────────────────────────────
             try:
                 data = self._audio_q.get(timeout=AUDIO_QUEUE_TIMEOUT)
             except queue.Empty:
                 continue
-            if not data or self._muted:
+            if not data or self._mic_off:
                 break
 
             pcm = np.frombuffer(data, dtype=np.int16)
@@ -1835,13 +1871,13 @@ class SpeechToText:
         """
         Serial Whisper transcription worker.
 
-        Parks on _unmute_event while muted → zero CPU / GPU usage.
+        Parks on _mic_on_event while mic is off → zero CPU / GPU usage.
         Processes one clip at a time; the queue depth (8) prevents accumulation.
         """
         while not self._tx_stop.is_set():
             # Park while muted — wait wakes instantly on unmute()
-            if self._muted:
-                self._unmute_event.wait(timeout=1.0)
+            if self._mic_off:
+                self._mic_on_event.wait(timeout=1.0)
                 continue
 
             try:
@@ -2143,14 +2179,14 @@ def live_test() -> None:
                 input()
             except EOFError:
                 break
-            if stt.is_muted:
-                stt.unmute()
-                print("🎙️   Unmuted — recalibrating…\n")
+            if stt.is_mic_off:
+                stt.mic_on()
+                print("🎙️   Mic on — recalibrating…\n")
             else:
-                stt.mute()
-                print("🔇  Muted — mic released, model offloaded.\n")
+                stt.mic_off()
+                print("🔇  Mic off — released, model offloaded.\n")
 
-    threading.Thread(target=_toggle, daemon=True, name="live-mute").start()
+    threading.Thread(target=_toggle, daemon=True, name="live-mic").start()
 
     try:
         while True:

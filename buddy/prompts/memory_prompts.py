@@ -1,7 +1,8 @@
 MEMORY_SUMMARY_PROMPT = """
 <task>
 §1. TASK
-Consolidate the memories below into a single minimal summary.
+Consolidate the memories below into a complete summary that preserves every fact,
+detail, and signal with forward value. Nothing worth knowing should be lost in consolidation.
 Output strict JSON only.
 </task>
 
@@ -48,6 +49,11 @@ KEEP — facts that change future behavior:
   Stated goals, plans, commitments
   Sensitive context (health, family, work situations)
   Anything the user may expect to be recalled
+  Specific details: exact values, paths, names, dates, numbers, configurations
+
+  WHEN IN DOUBT → KEEP IT.
+  A specific detail lost in consolidation cannot be recovered. The cost of retaining
+  one extra fact is near zero. The cost of losing an important detail can be very high.
 
 DISCARD — facts with no forward value:
   Reasoning chains, justifications, explanations of why something was said
@@ -56,7 +62,10 @@ DISCARD — facts with no forward value:
   Pleasantries, filler
 
 MERGE — when the same fact appears multiple times:
-  Write one statement — the most complete version.
+  Write one statement — the most complete and specific version.
+  The merged result must capture ALL concrete details from every source entry.
+  Never reduce specificity to achieve brevity. If two entries each add a unique detail,
+  both details must survive in the merged output.
 
 COLLAPSE — chains of state transitions:
   Reduce to a single present-tense truth. Intermediate states never survive.

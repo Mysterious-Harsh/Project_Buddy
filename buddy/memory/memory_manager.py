@@ -112,7 +112,6 @@ class MemoryCandidateLite:
     composite_score: float
     summary: str
     content: str
-    source: Optional[str] = None
     created_at_iso: Optional[str] = None
     memory_type: str = "flash"
 
@@ -530,8 +529,6 @@ class MemoryManager:
 
             imp = _clamp01(memory.get("salience", 0.0))
             md: Dict[str, Any] = dict(metadata or {})
-            if source is not None:
-                md.setdefault("source", str(source))
 
             # P3 (Phase 2): capture protection_tier from Brain ingestion output
             pt = (
@@ -539,8 +536,6 @@ class MemoryManager:
             )
             if pt not in ("normal", "critical", "immortal"):
                 pt = "normal"
-            if pt != "normal":
-                md["protection_tier"] = pt
 
             txt = mem_text.lower() if normalize_text_lower else mem_text
             e = MemoryEntry(text=txt)
@@ -548,6 +543,8 @@ class MemoryManager:
             e.role = role if role is not None else "buddy"
             e.memory_type = mem_type
             e.importance = imp
+            e.protection_tier = pt
+            e.encoding_arousal = float(max(0.0, min(1.0, float((md.pop("encoding_arousal", None) or 0.0)))))
             e.metadata = md
             if source_turn is not None:
                 e.source_turn = int(source_turn)
@@ -561,14 +558,13 @@ class MemoryManager:
             t = t.lower()
 
         md2: Dict[str, Any] = dict(metadata or {})
-        if source is not None:
-            md2.setdefault("source", str(source))
 
         e2 = MemoryEntry(text=t)
         e2.embedding = self.embedder.embed_passage(text=t)
         e2.role = role if role is not None else "user"
         e2.memory_type = (memory_type or "flash").strip().lower() or "flash"
         e2.importance = _clamp01(importance)
+        e2.encoding_arousal = float(max(0.0, min(1.0, float((md2.pop("encoding_arousal", None) or 0.0)))))
         e2.metadata = md2
         if source_turn is not None:
             e2.source_turn = int(source_turn)
@@ -668,7 +664,7 @@ class MemoryManager:
         if self.vector is None or self.embedder is None:
             return
         arousal = float(
-            (getattr(entry, "metadata", {}) or {}).get("encoding_arousal", 0.0) or 0.0
+            float(getattr(entry, "encoding_arousal", 0.0) or 0.0)
         )
         if arousal < 0.7:
             return
@@ -827,7 +823,6 @@ class MemoryManager:
 
         for e, sc, pl in hydrated:
             rerank_score = 0.0
-            source = None
             if isinstance(pl, dict):
                 rr = pl.get("_rerank")
                 if isinstance(rr, dict):
@@ -835,13 +830,11 @@ class MemoryManager:
                         rerank_score = float(rr.get("score", 0.0) or 0.0)
                     except Exception:
                         pass
-                sv = pl.get("source")
-                source = sv if isinstance(sv, str) else None
 
             # P14/P15: composite score using sleep-persisted consolidation_strength
             strength = float(getattr(e, "consolidation_strength", 0.0) or 0.0)
             arousal = float(
-                (getattr(e, "metadata", {}) or {}).get("encoding_arousal", 0.0) or 0.0
+                float(getattr(e, "encoding_arousal", 0.0) or 0.0)
             )
             final = _composite_score(
                 semantic=float(sc),
@@ -860,7 +853,6 @@ class MemoryManager:
                     composite_score=final,
                     summary=_summarize(e.text),
                     content=str(e.text),
-                    source=source,
                     created_at_iso=_iso(getattr(e, "created_at", None)),
                     memory_type=str(getattr(e, "memory_type", "flash") or "flash"),
                 ),

@@ -231,11 +231,12 @@ class FollowupStack:
         stage: str,
         step_id: Optional[int] = None,
         tool_name: Optional[str] = None,
+        skip_depth_check: bool = False,
     ) -> bool:
         if not followup:
             return False
 
-        if self.depth >= self._max_depth:
+        if not skip_depth_check and self.depth >= self._max_depth:
             await self._ui_output(
                 "Too many follow-up questions. Please restate the task clearly."
             )
@@ -374,6 +375,7 @@ class ActionRouter:
                 followup=(_status == "followup"),
                 followup_question=str(planner_parsed.get("message") or ""),
                 stage="planner",
+                skip_depth_check=True,
             )
             if not rerun:
                 self.stack.clear()

@@ -75,6 +75,20 @@ class MemoryEntry:
     # Cached strength from latest consolidation run — read at recall time (Phase 3).
     # 0.0 = never consolidated or too new. Written by consolidation_engine Phase 0b.
     consolidation_strength: float = 0.0
+    consolidation_cycles: int = 0
+    is_summary: int = 0
+
+    # --------------------------
+    # Retrieval signals (first-class columns, not metadata blobs)
+    # --------------------------
+    encoding_arousal: float = 0.0
+    protection_tier: str = "normal"  # "normal" | "critical" | "immortal"
+
+    # --------------------------
+    # Provisional protection
+    # --------------------------
+    provisional_expires_at: Optional[float] = None
+    provisional_source_protected: int = 0
 
     # --------------------------
     # Free-form metadata
@@ -127,12 +141,39 @@ class MemoryEntry:
         # SQLite-friendly ints (0/1)
         self.pending_upsert = int(bool(self.pending_upsert))
         self.deleted = int(bool(self.deleted))
+        self.is_summary = int(bool(self.is_summary))
+        self.provisional_source_protected = int(bool(self.provisional_source_protected))
 
         # consolidation_strength clamp
         try:
             self.consolidation_strength = float(self.consolidation_strength or 0.0)
         except Exception:
             self.consolidation_strength = 0.0
+
+        # consolidation_cycles clamp
+        try:
+            self.consolidation_cycles = max(0, int(self.consolidation_cycles or 0))
+        except Exception:
+            self.consolidation_cycles = 0
+
+        # encoding_arousal clamp
+        try:
+            self.encoding_arousal = float(max(0.0, min(1.0, float(self.encoding_arousal or 0.0))))
+        except Exception:
+            self.encoding_arousal = 0.0
+
+        # protection_tier guard
+        _ALLOWED_TIERS = {"normal", "critical", "immortal"}
+        pt = str(self.protection_tier or "normal").strip().lower()
+        self.protection_tier = pt if pt in _ALLOWED_TIERS else "normal"
+
+        # provisional_expires_at normalization
+        v = self.provisional_expires_at
+        if v is not None:
+            try:
+                self.provisional_expires_at = float(v)
+            except Exception:
+                self.provisional_expires_at = None
 
         # consolidation_status guard (locked to 3 states)
         s = (self.consolidation_status or "candidate").strip().lower()
@@ -213,6 +254,18 @@ class MemoryEntry:
                 else None
             ),
             "consolidation_strength": float(self.consolidation_strength),
+            "consolidation_cycles": int(self.consolidation_cycles),
+            "is_summary": int(self.is_summary),
+            # retrieval signals
+            "encoding_arousal": float(self.encoding_arousal),
+            "protection_tier": self.protection_tier,
+            # provisional protection
+            "provisional_expires_at": (
+                float(self.provisional_expires_at)
+                if self.provisional_expires_at is not None
+                else None
+            ),
+            "provisional_source_protected": int(self.provisional_source_protected),
             # metadata
             "metadata": dict(self.metadata or {}),
         }

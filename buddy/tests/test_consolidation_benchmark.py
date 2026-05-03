@@ -686,7 +686,7 @@ class TestEncodingFidelity:
         b = SleepBudget()
         m = _make_entry("User's blood type is O-negative.", importance=0.50)
         m.consolidated_into_id = str(uuid.uuid4())  # already consolidated
-        m.metadata = {"protection_tier": "immortal"}
+        m.protection_tier = "immortal"
 
         result = _is_protected(m, b, dup_count=5)
         assert result, (
@@ -699,7 +699,7 @@ class TestEncodingFidelity:
         b = SleepBudget()
         m = _make_entry("User has a penicillin allergy.", importance=0.45)
         m.consolidated_into_id = None
-        m.metadata = {"protection_tier": "critical"}
+        m.protection_tier = "critical"
 
         result = _is_protected(m, b, dup_count=3)
         assert result, (
@@ -712,7 +712,7 @@ class TestEncodingFidelity:
         b = SleepBudget()
         m = _make_entry("User prefers Python.", importance=0.45)
         m.consolidated_into_id = str(uuid.uuid4())  # consolidated → safe to purge
-        m.metadata = {"protection_tier": "critical"}
+        m.protection_tier = "critical"
 
         result = _is_protected(m, b, dup_count=3)
         assert not result, (
@@ -726,16 +726,16 @@ class TestEncodingFidelity:
 
         # imp=0.50, dup_count=3, normal → NOT protected (below both thresholds)
         m_low = _make_entry("User mentioned dark mode.", importance=0.50)
-        m_low.metadata = {"protection_tier": "normal"}
+        m_low.protection_tier = "normal"
         assert not _is_protected(m_low, b, dup_count=3)
 
         # imp=0.85, normal → protected via Rule A
         m_high = _make_entry("User's wife is named Priya.", importance=0.85)
-        m_high.metadata = {"protection_tier": "normal"}
+        m_high.protection_tier = "normal"
         assert _is_protected(m_high, b, dup_count=3)
 
     def test_protection_tier_written_to_metadata(self):
-        """create_memory_entry() must store protection_tier in entry metadata."""
+        """create_memory_entry() must store protection_tier as a first-class field."""
         import tempfile, os
         from buddy.memory.memory_manager import MemoryManager
         from buddy.memory.sqlite_store import SQLiteStore
@@ -767,11 +767,14 @@ class TestEncodingFidelity:
             }
             entry = mm.create_memory_entry(memory=memory_dict, role="buddy")
             assert entry is not None
-            assert entry.metadata.get("protection_tier") == "critical", (
-                f"Expected 'critical' in metadata, got: {entry.metadata}"
+            assert entry.protection_tier == "critical", (
+                f"Expected protection_tier='critical' on entry, got: {entry.protection_tier}"
+            )
+            assert "protection_tier" not in entry.metadata, (
+                "protection_tier must not be stored in metadata (it is a first-class field)"
             )
 
-            # normal tier must NOT pollute metadata
+            # normal tier must stay as default
             memory_dict_normal = {
                 "memory_type": "flash",
                 "memory_text": "User prefers dark mode.",
@@ -780,8 +783,8 @@ class TestEncodingFidelity:
             }
             entry_normal = mm.create_memory_entry(memory=memory_dict_normal, role="buddy")
             assert entry_normal is not None
-            assert "protection_tier" not in entry_normal.metadata, (
-                "normal protection_tier must not be stored in metadata (no-op)"
+            assert entry_normal.protection_tier == "normal", (
+                f"Expected protection_tier='normal', got: {entry_normal.protection_tier}"
             )
         finally:
             os.unlink(db_path)
@@ -1426,7 +1429,7 @@ class TestTuningPolish:
                 embedding=base.copy(),
                 memory_type="flash",
                 importance=0.80,
-                metadata={"encoding_arousal": 0.90},
+                encoding_arousal=0.90,
             )
             mm.add_entry(high_arousal_entry)
             # _novelty_burst runs in a daemon thread — wait for it to finish

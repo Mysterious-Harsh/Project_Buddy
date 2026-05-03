@@ -132,8 +132,18 @@ class SQLiteStore:
                 last_consolidated_at     REAL NULL,
                 -- v5: cached strength from last sleep cycle (read at recall time)
                 consolidation_strength   REAL NOT NULL DEFAULT 0.0,
+                consolidation_cycles     INTEGER NOT NULL DEFAULT 0,
+                is_summary               INTEGER NOT NULL DEFAULT 0,
 
-                -- arbitrary metadata
+                -- retrieval signals (first-class columns)
+                encoding_arousal              REAL NOT NULL DEFAULT 0.0,
+                protection_tier               TEXT NOT NULL DEFAULT 'normal',
+
+                -- provisional protection
+                provisional_expires_at        REAL NULL,
+                provisional_source_protected  INTEGER NOT NULL DEFAULT 0,
+
+                -- arbitrary metadata (summary_of_ids, consolidation_depth only)
                 metadata   TEXT NOT NULL DEFAULT '{}'
             );
             """)
@@ -180,6 +190,10 @@ class SQLiteStore:
             "CREATE INDEX IF NOT EXISTS idx_memories_id_deleted ON "
             "memories(id, deleted);"
         )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_memories_provisional ON "
+            "memories(deleted, provisional_source_protected, provisional_expires_at);"
+        )
 
         self._conn.commit()
 
@@ -223,7 +237,15 @@ class SQLiteStore:
         add_col("consolidated_into_id", "TEXT NULL")
         add_col("consolidation_error", "TEXT NULL")
         add_col("last_consolidated_at", "REAL NULL")
-        add_col("consolidation_strength", "REAL NOT NULL DEFAULT 0.0")  # v5
+        add_col("consolidation_strength", "REAL NOT NULL DEFAULT 0.0")
+        add_col("consolidation_cycles", "INTEGER NOT NULL DEFAULT 0")
+        add_col("is_summary", "INTEGER NOT NULL DEFAULT 0")
+
+        add_col("encoding_arousal", "REAL NOT NULL DEFAULT 0.0")
+        add_col("protection_tier", "TEXT NOT NULL DEFAULT 'normal'")
+
+        add_col("provisional_expires_at", "REAL NULL")
+        add_col("provisional_source_protected", "INTEGER NOT NULL DEFAULT 0")
 
         add_col("metadata", "TEXT NOT NULL DEFAULT '{}'")
 
@@ -289,11 +311,41 @@ class SQLiteStore:
 
         e.metadata = self._loads_json(row["metadata"], {})
 
-        # v5: consolidation_strength (graceful fallback for old rows before migration)
         try:
             e.consolidation_strength = float(row["consolidation_strength"] or 0.0)
         except (IndexError, KeyError):
             e.consolidation_strength = 0.0
+
+        try:
+            e.consolidation_cycles = int(row["consolidation_cycles"] or 0)
+        except (IndexError, KeyError):
+            e.consolidation_cycles = 0
+
+        try:
+            e.is_summary = int(row["is_summary"] or 0)
+        except (IndexError, KeyError):
+            e.is_summary = 0
+
+        try:
+            e.encoding_arousal = float(row["encoding_arousal"] or 0.0)
+        except (IndexError, KeyError):
+            e.encoding_arousal = 0.0
+
+        try:
+            e.protection_tier = str(row["protection_tier"] or "normal")
+        except (IndexError, KeyError):
+            e.protection_tier = "normal"
+
+        try:
+            v = row["provisional_expires_at"]
+            e.provisional_expires_at = float(v) if v is not None else None
+        except (IndexError, KeyError):
+            e.provisional_expires_at = None
+
+        try:
+            e.provisional_source_protected = int(row["provisional_source_protected"] or 0)
+        except (IndexError, KeyError):
+            e.provisional_source_protected = 0
 
         # embedding_json is optional and only used for re-upsert/debug
         emb_json = row["embedding_json"]
@@ -353,10 +405,12 @@ class SQLiteStore:
             pending_upsert, upsert_error, upsert_attempts, last_upsert_at,
             deleted,
             consolidation_status, consolidated_into_id, consolidation_error, last_consolidated_at,
-            consolidation_strength,
+            consolidation_strength, consolidation_cycles, is_summary,
+            encoding_arousal, protection_tier,
+            provisional_expires_at, provisional_source_protected,
             metadata
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             text=excluded.text,
             embedding_json=excluded.embedding_json,
@@ -378,6 +432,12 @@ class SQLiteStore:
             consolidation_error=excluded.consolidation_error,
             last_consolidated_at=excluded.last_consolidated_at,
             consolidation_strength=excluded.consolidation_strength,
+            consolidation_cycles=excluded.consolidation_cycles,
+            is_summary=excluded.is_summary,
+            encoding_arousal=excluded.encoding_arousal,
+            protection_tier=excluded.protection_tier,
+            provisional_expires_at=excluded.provisional_expires_at,
+            provisional_source_protected=excluded.provisional_source_protected,
             metadata=excluded.metadata;
         """
 
@@ -403,6 +463,12 @@ class SQLiteStore:
             getattr(entry, "consolidation_error", None),
             getattr(entry, "last_consolidated_at", None),
             float(getattr(entry, "consolidation_strength", 0.0) or 0.0),
+            int(getattr(entry, "consolidation_cycles", 0) or 0),
+            int(getattr(entry, "is_summary", 0) or 0),
+            float(getattr(entry, "encoding_arousal", 0.0) or 0.0),
+            str(getattr(entry, "protection_tier", "normal") or "normal"),
+            getattr(entry, "provisional_expires_at", None),
+            int(getattr(entry, "provisional_source_protected", 0) or 0),
             metadata,
         )
 
@@ -947,10 +1013,12 @@ class SQLiteStore:
             pending_upsert, upsert_error, upsert_attempts, last_upsert_at,
             deleted,
             consolidation_status, consolidated_into_id, consolidation_error, last_consolidated_at,
-            consolidation_strength,
+            consolidation_strength, consolidation_cycles, is_summary,
+            encoding_arousal, protection_tier,
+            provisional_expires_at, provisional_source_protected,
             metadata
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             text=excluded.text,
             embedding_json=excluded.embedding_json,
@@ -972,6 +1040,12 @@ class SQLiteStore:
             consolidation_error=excluded.consolidation_error,
             last_consolidated_at=excluded.last_consolidated_at,
             consolidation_strength=excluded.consolidation_strength,
+            consolidation_cycles=excluded.consolidation_cycles,
+            is_summary=excluded.is_summary,
+            encoding_arousal=excluded.encoding_arousal,
+            protection_tier=excluded.protection_tier,
+            provisional_expires_at=excluded.provisional_expires_at,
+            provisional_source_protected=excluded.provisional_source_protected,
             metadata=excluded.metadata;
         """
 
@@ -1028,6 +1102,12 @@ class SQLiteStore:
                 getattr(entry, "consolidation_error", None),
                 getattr(entry, "last_consolidated_at", None),
                 float(getattr(entry, "consolidation_strength", 0.0) or 0.0),
+                int(getattr(entry, "consolidation_cycles", 0) or 0),
+                int(getattr(entry, "is_summary", 0) or 0),
+                float(getattr(entry, "encoding_arousal", 0.0) or 0.0),
+                str(getattr(entry, "protection_tier", "normal") or "normal"),
+                getattr(entry, "provisional_expires_at", None),
+                int(getattr(entry, "provisional_source_protected", 0) or 0),
                 metadata,
             )
             params_list.append(params)

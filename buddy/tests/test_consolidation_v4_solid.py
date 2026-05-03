@@ -101,7 +101,10 @@ def _mem(
     m.created_at = now - created_days * DAY
     m.last_accessed = (now - last_days * DAY) if last_days is not None else None
     m.source_turn = source_turn
-    m.metadata = meta if meta is not None else {"consolidation_cycles": 0}
+    effective_meta = dict(meta) if meta is not None else {}
+    m.protection_tier = str(effective_meta.pop("protection_tier", "normal") or "normal")
+    m.consolidation_cycles = int(effective_meta.pop("consolidation_cycles", 0) or 0)
+    m.metadata = effective_meta
     m.embedding = emb
     return m
 

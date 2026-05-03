@@ -7,7 +7,7 @@
 # -----------------------------------------
 [general]
 name = "Buddy"
-sleep_after_idle_sec = 5
+sleep_after_idle_min = 5
 
 # -----------------------------------------
 # Bootstrap
@@ -80,7 +80,7 @@ whisper_model_size = "small"
 language = "en"
 silence_timeout = 1.4
 calibration_sec = 2.0
-speech_trigger_mult = 3.0
+speech_trigger_mult = 4.5
 whisper_vad_filter = true
 use_silero_vad = true
 enable_beep = true

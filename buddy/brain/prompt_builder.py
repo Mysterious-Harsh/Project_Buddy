@@ -320,6 +320,38 @@ def build_memory_summary_prompt(
     return "\n".join([sys_block, tool_block, prefill])
 
 
+def build_opener_prompt(
+    system: str,
+    recent_turns: str,
+    think_tag: str = "<think>",
+) -> str:
+    """
+    Assembles the session opener ChatML prompt.
+
+    system       → BUDDY_IDENTITY + BUDDY_BEHAVIOR + OPENER_PROMPT
+    recent_turns → ChatML-formatted turns from get_recent_conversations() (may be empty)
+
+    Final token layout the model sees:
+      [SYSTEM]   /think + system
+      [USER]     <context><recent_conversations>...</recent_conversations></context>
+      [ASST]     <think>   ← open prefill
+    """
+    sys_block = f"<|im_start|>system\n/think\n{system}\n<|im_end|>"
+
+    history = recent_turns.strip() if recent_turns and recent_turns.strip() else "None."
+    ctx_block = (
+        "<|im_start|>user\n"
+        "<context>\n"
+        f"<recent_conversations>\n{history}\n</recent_conversations>\n"
+        "</context>\n"
+        "<|im_end|>"
+    )
+
+    prefill = f"<|im_start|>assistant\n{think_tag}\n"
+
+    return "\n".join([sys_block, ctx_block, prefill])
+
+
 def build_executor_prompt(
     system: str,
     datetime_block: str,

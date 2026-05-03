@@ -1486,8 +1486,6 @@ def _create_artifacts(
         arts.llama_client = _LlamaClient()(
             model=llama_model, base_url=llama_base_url, debug=debug
         )
-        if not arts.llama_client.warmup():
-            integrity.warnings.append("llama_warmup_failed")
     except Exception as ex:
         integrity.warnings.append(f"llama_client_failed:{ex!r}")
 

@@ -415,7 +415,7 @@ def _banner_centered(
     # — commands — deep-violet bullet, bright-cyan key ————————
     cmds = [
         ("exit", "Exit Buddy"),
-        ("F2", "Toggle Mute"),
+        ("F2", "Mic On/Off"),
         ("F3", "Toggle Sleep"),
         ("Ctrl+C", "Interrupt Buddy"),
     ]
@@ -513,7 +513,7 @@ def _banner_plain(
     # Commands plain
     cmds = [
         ("exit", "Exit Buddy"),
-        ("F2", "Toggle Mute"),
+        ("F2", "Mic On/Off"),
         ("F3", "Toggle Sleep"),
         ("Ctrl+C", "Interrupt Buddy"),
     ]

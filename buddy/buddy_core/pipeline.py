@@ -99,7 +99,7 @@ def _safe_source(source: str) -> str:
 # Encoding arousal (P1 — Phase 2)
 # ---------------------------------------------------------------------------
 # Lightweight keyword-density arousal signal from the raw user message,
-# captured BEFORE Brain compresses it. Stored as metadata.encoding_arousal.
+# captured BEFORE Brain compresses it. Stored as MemoryEntry.encoding_arousal column.
 _AROUSAL_KEYWORDS: frozenset = frozenset({
     # urgency / emphasis
     "urgent",
