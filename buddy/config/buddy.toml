@@ -118,7 +118,7 @@ permissions_auto_approve = false
 #                       (dynamic mode only — ignored when searxng_override = true).
 # -----------------------------------------
 [web_search]
-engine = "duckduckgo"
+engine = "searxng"
 searxng_url = "http://127.0.0.1:8888"
 searxng_override = false
 searxng_use_external = false

@@ -284,7 +284,7 @@ class MicSelectScreen(ModalScreen):
         current_idx: int | None,
     ) -> None:
         super().__init__()
-        self._devices = devices        # [(global_idx, device_dict), ...]
+        self._devices = devices  # [(global_idx, device_dict), ...]
         self._current_idx = current_idx
 
     def compose(self) -> ComposeResult:
@@ -454,17 +454,24 @@ class MainScreen(Screen):
             logger.debug("on_mount: BuddyInput focus failed", exc_info=True)
 
         self._track(self._inactivity_watcher())
-        if self._opener_text:
-            self._track(self._show_opener())
+        self._track(self._show_opener())
         self._refresh_info_bar()
 
     async def _show_opener(self) -> None:
-        arts = getattr(self._state, "artifacts", None)
+        arts = getattr(self._state, "artifacts", {})
         conversations = getattr(arts, "conversations", None)
-        if self._w_chat_log:
-            await self._w_chat_log.add_message(self._opener_text, "buddy")
-        if conversations:
-            conversations.add_buddy(self._opener_text)
+
+        # Replay snapshot history into the chat log before the opener.
+        if conversations and self._w_chat_log:
+            for msg in conversations.get_messages():
+                kind = "buddy" if msg.role == "Buddy" else "user"
+                await self._w_chat_log.add_message(msg.text, kind)
+
+        if self._opener_text:
+            if self._w_chat_log:
+                await self._w_chat_log.add_message(self._opener_text, "buddy")
+            if conversations is not None:
+                conversations.add_buddy(self._opener_text)
 
     def _refresh_info_bar(self, turn_ms: int | None = None) -> None:
         # FIX-14: use cached references.
@@ -990,9 +997,7 @@ class MainScreen(Screen):
             icon = markup_escape(raw_icon)
             hint = f"[{_DIM}]{icon}Mic Off[/]"
         else:
-            hint = (
-                f"[{_GREEN}]🎙 Mic On[/]" if _USE_UNICODE else f"[{_GREEN}]Mic On[/]"
-            )
+            hint = f"[{_GREEN}]🎙 Mic On[/]" if _USE_UNICODE else f"[{_GREEN}]Mic On[/]"
         try:
             sb = self._w_status_bar or self.query_one(StatusBar)
             sb.set_hint(hint)

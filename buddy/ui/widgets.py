@@ -1023,8 +1023,12 @@ class ChatBubble(Static):
                 )
                 self.update(Align(panel, align="right"))
             else:
-                # Buddy bubbles fill the full available width.
-                _w = max(self._MIN_WIDTH, int(available * self._BUDDY_WIDTH_FRAC))
+                # Buddy bubbles size to content, capped at _BUDDY_WIDTH_FRAC.
+                lines = (text or " ").splitlines() or [" "]
+                _longest = max(cell_len(line) for line in lines)
+                _content_w = _longest + 8
+                _max_w = max(self._MIN_WIDTH, int(available * self._BUDDY_WIDTH_FRAC))
+                _w = min(_max_w, max(self._MIN_WIDTH, _content_w))
                 panel = Panel(
                     Text(display, style=_WHITE),
                     title=f"[{_VIOLET}]◈ Buddy[/]",

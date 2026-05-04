@@ -1734,12 +1734,14 @@ def _run_first_boot_wizard(
     defaults = {
         "user_name": default_name,
         "language": "en",
-        "web_engine": "duckduckgo",
+        "web_engine": "searxng",
         "stt": False,
         "tts": False,
     }
 
-    if not show_ui:
+    import sys as _sys
+
+    if not show_ui or not _sys.stdin.isatty():
         return defaults
 
     _wizard_header("BUDDY — FIRST AWAKENING")
@@ -1762,7 +1764,7 @@ def _run_first_boot_wizard(
         f"  {_c('[D]', 'key')} DuckDuckGo  "
         + _c("(no setup required, works immediately)", "dim")
     )
-    web_raw = _wizard_ask("Choice", default="D").upper()
+    web_raw = _wizard_ask("Choice", default="S").upper()
     web_engine = "searxng" if web_raw.startswith("S") else "duckduckgo"
     print()
 
@@ -1836,8 +1838,13 @@ name = "{escaped_name}"
 language = "{language}"
 """
 
-    # Append new [web_search] section
-    if "[web_search]" not in text:
+    # Patch engine in existing [web_search] section, or append a new one
+    if "[web_search]" in text:
+        if _re.search(r"(?m)^engine\s*=", text):
+            text = _re.sub(r'(?m)^engine\s*=.*$', f'engine = "{web_engine}"', text)
+        else:
+            text = _re.sub(r"(\[web_search\])", f'\\1\nengine = "{web_engine}"', text)
+    else:
         text += f"""
 [web_search]
 engine = "{web_engine}"
@@ -1889,14 +1896,17 @@ def run_pre_textual_setup() -> Optional[Dict[str, Any]]:
         get_or_select_vision,
     )
 
+    # Check BEFORE _load_runtime_config — that function calls _copy_defaults_once()
+    # which copies buddy.toml from the package, making _needs_first_boot_wizard()
+    # always return False if called after.
+    needs_first_boot = _needs_first_boot_wizard()
+
     runtime = _load_runtime_config()
     fs = runtime["fs"]
     config_dir: Path = fs["config_dir"]
     assets_dir: Path = fs["assets_dir"]
     data_dir: Path = fs["data_dir"]
     os_profile_file: Path = fs["os_profile_file"]
-
-    needs_first_boot = _needs_first_boot_wizard()
     needs_model = _ms_load(config_dir) is None
     needs_vision = _vs_load(config_dir) is None
 
@@ -2196,7 +2206,7 @@ def bootstrap(
         _stt = _wizard_result["stt"]
         _tts = _wizard_result["tts"]
     else:
-        _web_engine = _web_cfg.get("engine") or "duckduckgo"
+        _web_engine = _web_cfg.get("engine") or "searxng"
         _stt = _feat_cfg.get("enable_audio_stt", False)
         _tts = _feat_cfg.get("enable_audio_tts", False)
 

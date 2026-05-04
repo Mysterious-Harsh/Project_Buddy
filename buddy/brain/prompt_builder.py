@@ -333,15 +333,19 @@ def build_opener_prompt(
 
     Final token layout the model sees:
       [SYSTEM]   /think + system
-      [USER]     <context><recent_conversations>...</recent_conversations></context>
+      [USER]     <context><current_time>...</current_time><recent_conversations>...</recent_conversations></context>
       [ASST]     <think>   ← open prefill
     """
+    import datetime as _dt
     sys_block = f"<|im_start|>system\n/think\n{system}\n<|im_end|>"
 
+    now = _dt.datetime.now()
+    time_str = now.strftime("%H:%M")
     history = recent_turns.strip() if recent_turns and recent_turns.strip() else "None."
     ctx_block = (
         "<|im_start|>user\n"
         "<context>\n"
+        f"<current_time>{time_str}</current_time>\n"
         f"<recent_conversations>\n{history}\n</recent_conversations>\n"
         "</context>\n"
         "<|im_end|>"

@@ -942,7 +942,6 @@ class Brain:
             temperature=0.6,
             stream=False,
             json_mode=False,
-            n_predict=256,
             options={},
         )
         return (text or "").strip()

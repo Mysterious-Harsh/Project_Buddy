@@ -267,6 +267,10 @@ class Conversations:
     # Utility
     # ==========================================================
 
+    def get_messages(self) -> list[ConversationMessage]:
+        """Return a snapshot copy of all buffered messages."""
+        return list(self._messages)
+
     def clear(self) -> None:
         self._messages.clear()
         self._autosave_snapshot()
