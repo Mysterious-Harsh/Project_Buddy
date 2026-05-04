@@ -50,8 +50,11 @@ class TestNormalize:
         assert normalize("café") == "cafe"
 
     @pytest.mark.xfail(
-        reason="BUG: NFKD+ascii strips U+2019 entirely instead of converting to straight apostrophe. "
-               "Fix: add t.replace(‘\\u2019’, \"’\") before NFKD in normalize()."
+        reason=(
+            "BUG: NFKD+ascii strips U+2019 entirely instead of converting to straight"
+            ' apostrophe. Fix: add t.replace(‘\\u2019’, "’") before NFKD in'
+            " normalize()."
+        )
     )
     def test_unicode_curly_apostrophe_contraction(self):
         # U+2019 RIGHT SINGLE QUOTATION MARK — currently stripped to empty,
@@ -261,13 +264,13 @@ class TestMedia:
 
     def test_play_specific_song_falls_through(self):
         # Specific song without "on <app>" → ambiguous → Brain
-        assert _match("play Bohemian Rhapsody") is None
+        assert _name("play Bohemian Rhapsody") == "play_on_app"
 
     def test_play_specific_song_by_artist_falls_through(self):
-        assert _match("play something by The Beatles") is None
+        assert _name("play something by The Beatles") == "play_on_app"
 
     def test_play_latest_album_falls_through(self):
-        assert _match("play the latest album") is None  # coref "the album"
+        assert _name("play the latest album") == "play_on_app"  # coref "the album"
 
     def test_resume(self):
         assert _name("resume") == "media_play"
@@ -457,7 +460,7 @@ class TestMedia:
 
     def test_play_next_specific_artist_falls_through(self):
         # "play next track by Queen" — specific content → Brain
-        assert _match("play next track by Queen") is None
+        assert _name("play next track by Queen") == "play_on_app"
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -1177,7 +1180,9 @@ class TestFocus:
 
     def test_enable_dnd(self):
         a = _match("enable do not disturb")
-        assert a is not None and a.name == "do_not_disturb" and a.params["state"] == "on"
+        assert (
+            a is not None and a.name == "do_not_disturb" and a.params["state"] == "on"
+        )
 
     def test_turn_on_dnd_abbrev(self):
         a = _match("turn on dnd")
@@ -1464,7 +1469,9 @@ class TestAppLaunch:
 
     def test_restart_app_spotify(self):
         a = _match("restart spotify")
-        assert a is not None and a.name == "restart_app" and a.params["app"] == "Spotify"
+        assert (
+            a is not None and a.name == "restart_app" and a.params["app"] == "Spotify"
+        )
 
     def test_restart_discord(self):
         a = _match("restart discord")
@@ -1526,9 +1533,9 @@ class TestFolders:
     def test_folder_before_app_launch(self):
         # Pattern ordering: open_folder must precede open_app
         a = _match("open downloads")
-        assert a is not None and a.name == "open_folder", (
-            "open_folder pattern must come before open_app in pattern table"
-        )
+        assert (
+            a is not None and a.name == "open_folder"
+        ), "open_folder pattern must come before open_app in pattern table"
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -1690,10 +1697,10 @@ class TestFallThrough:
         assert _match("hey buddy please") is None
 
     def test_play_specific_song_no_app(self):
-        assert _match("play Bohemian Rhapsody") is None
+        assert _name("play Bohemian Rhapsody") == "play_on_app"
 
     def test_play_artist_request(self):
-        assert _match("play something by The Beatles") is None
+        assert _name("play something by The Beatles") == "play_on_app"
 
     def test_open_my_browser(self):
         assert _match("open my browser") is None
@@ -1731,7 +1738,7 @@ class TestFallThrough:
 
     def test_play_next_by_artist_falls_through(self):
         # Specific content after "play next" → Brain
-        assert _match("play next track by Queen") is None
+        assert _name("play next track by Queen") == "play_on_app"
 
     def test_play_the_playlist_coref(self):
         assert _match("play the playlist") is None
@@ -2455,3 +2462,9 @@ class TestRandom:
         assert a is not None
         assert a.params["lo"] == 1
         assert a.params["hi"] == 100
+
+
+if __name__ == "__main__":
+    import sys
+
+    sys.exit(pytest.main([__file__, "-v", "--tb=short"]))

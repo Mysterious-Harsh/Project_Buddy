@@ -47,6 +47,44 @@
 #   BUG-2  : Hybrid search returned results in RRF candidate order, NOT sorted by
 #             dense score. This violated the score contract (callers expect score-
 #             descending output). Fixed: hits.sort() by dense score before returning.
+#
+# PERF AUDIT FIXES (2026-05-04):
+#   PERF-1  : Removed redundant .astype(np.float32, copy=False) before .tolist() in
+#             upsert(), upsert_batch(), and _dense_search(). _as_np() guarantees
+#             float32 already; the extra call created a no-op view object on every
+#             upsert and every dense search.
+#   PERF-2  : _auto_use_sparse() replaced full scores-list allocation with direct
+#             index access on dense_hits. Removed dead `if scores:` guard.
+#   PERF-3  : Dense threshold filter no longer builds `dropped` list when debug=False.
+#             Every non-debug production search was allocating and filling a list
+#             that was only consumed inside a debug branch.
+#   PERF-4  : _maybe_rerank() two-pass kept/dropped split collapsed into one pass;
+#             dropped_idx only allocated when self.debug is True.
+#   PERF-5  : Three separate list comprehensions over `head` in _maybe_rerank()
+#             replaced with a single loop.
+#   PERF-6  : _lex_tokens() inner closure `_add` replaced with inlined logic to
+#             eliminate per-call function-object creation and closure-cell overhead.
+#   PERF-7  : _apply_mmr() `remaining` changed from list (O(n) remove) to set (O(1)).
+#   PERF-8  : _apply_mmr() max_sc now reads hits[0][1] directly (list is pre-sorted)
+#             instead of scanning all hits with max().
+#   PERF-9  : _apply_mmr() pre-computes per-text word sets before the MMR loop so
+#             _jaccard() no longer re-splits strings on every inner comparison.
+#   PERF-10 : Redundant int()/float()/bool()/str() casts removed throughout — all
+#             targets were already the correct type from their dataclass definitions
+#             or prior conversions.
+#   PERF-11 : getattr(cfg, "field", default) on RerankConfig dataclass replaced with
+#             direct attribute access — fields are always present.
+#   PERF-12 : _init_reranker() no longer re-strips/lower-cases cfg.method; the value
+#             is already normalized at construction time.
+#   PERF-13 : CrossEncoder pairs changed from list-of-lists to list-of-tuples.
+#   PERF-14 : Qwen3 score() removes redundant float() cast inside extend(); .tolist()
+#             already produces Python floats. Guards .cpu() behind device check.
+#   PERF-15 : list(base.must) in _filter_with_ids() → must.extend(base.must) directly.
+#   PERF-16 : Removed redundant srv.api_key or "" (field defaults to "").
+#   PERF-17 : Removed tautological assert in TEST 5 (assert inside its own guard).
+#   PERF-18 : Removed leftover print(acc) debug statement in TEST 5.
+#   PERF-19 : _auto_rerank_batch_size() MPS/CPU intermediate bs reassignment collapsed.
+#   PERF-20 : encode() removed str(raw) cast — findall() on str always returns List[str].
 
 from __future__ import annotations
 
@@ -55,7 +93,7 @@ import re
 import tempfile
 import threading
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 import numpy as np
 
@@ -222,48 +260,54 @@ def _lex_tokens(text: str) -> List[str]:
     Perf:
       - Single pass order-preserving dedupe via `seen`.
       - Avoids building large intermediate lists.
+      - PERF-6: inner logic inlined (no closure object created per call).
     """
     t = (text or "").strip()
     if not t:
         return []
 
-    seen: set[str] = set()
+    seen: Set[str] = set()
     out: List[str] = []
 
-    def _add(tok: str) -> None:
-        if not tok:
-            return
-        tok = tok.strip().lower()
-        if tok and tok not in seen:
-            seen.add(tok)
-            out.append(tok)
-
+    # --- inlined _add to avoid closure-object overhead on every call ---
     # Quoted / backticked phrases
     for m in _QUOTED_RE.finditer(t):
         phrase = (m.group(1) or m.group(2) or m.group(3) or "").strip()
         if phrase:
-            _add(" ".join(phrase.split()))
+            tok = " ".join(phrase.split()).lower()
+            if tok and tok not in seen:
+                seen.add(tok)
+                out.append(tok)
 
     # Main token extraction
+    # PERF-20: raw is already str from findall(); str() cast removed.
     for raw in _LEX_TOKEN_RE.findall(t):
-        tok = str(raw).strip()
-        if not tok:
+        if not raw:
             continue
-        tok_l = tok.lower()
-        _add(tok_l)
+        tok_l = raw.lower()
+
+        if tok_l and tok_l not in seen:
+            seen.add(tok_l)
+            out.append(tok_l)
 
         # Split expansions (keep order)
         if ("/" in tok_l) or ("\\" in tok_l):
             for p in re.split(r"[\\/]+", tok_l):
-                _add(p)
+                if p and p not in seen:
+                    seen.add(p)
+                    out.append(p)
 
         if "." in tok_l and len(tok_l) <= 128:
             for p in tok_l.split("."):
-                _add(p)
+                if p and p not in seen:
+                    seen.add(p)
+                    out.append(p)
 
         if ("-" in tok_l or "_" in tok_l or ":" in tok_l) and len(tok_l) <= 256:
             for p in re.split(r"[-_:]+", tok_l):
-                _add(p)
+                if p and p not in seen:
+                    seen.add(p)
+                    out.append(p)
 
     return out
 
@@ -333,10 +377,8 @@ def _auto_rerank_batch_size(device: str, max_length: int) -> int:
 
     # Normalize for max_length: if you increase length, reduce batch.
     # baseline assumes ~2304; scale down when longer, up a bit when shorter.
-    baseline = 2304
-    length_scale = baseline / max(256, int(max_length))
-    # Clamp scale so we don't go crazy
-    length_scale = max(0.5, min(1.5, float(length_scale)))
+    # PERF-19: float() cast removed — Python division already returns float.
+    length_scale = max(0.5, min(1.5, 2304 / max(256, max_length)))
 
     if dev.startswith("cuda"):
         # Start conservative, then scale with VRAM if possible.
@@ -360,19 +402,15 @@ def _auto_rerank_batch_size(device: str, max_length: int) -> int:
         except Exception:
             bs = 8
 
-        bs = int(round(bs * length_scale))
-        return max(4, min(32, bs))
+        return max(4, min(32, int(round(bs * length_scale))))
 
     if dev == "mps":
+        # PERF-19: collapsed intermediate bs reassignment.
         # MPS tends to be memory-sensitive; keep moderate.
-        bs = 4
-        bs = int(round(bs * length_scale))
-        return max(2, min(12, bs))
+        return max(2, min(12, int(round(4 * length_scale))))
 
-    # CPU
-    bs = 2
-    bs = int(round(bs * length_scale))
-    return max(1, min(6, bs))
+    # CPU — PERF-19: collapsed intermediate bs reassignment.
+    return max(1, min(6, int(round(2 * length_scale))))
 
 
 # ==========================================================
@@ -417,7 +455,9 @@ class HashingSparseEncoder:
         if not tokens:
             return qm.SparseVector(indices=[], values=[])
 
-        vocab = int(self.cfg.vocab_size)
+        # PERF-10: vocab_size and max_terms are already int in the frozen dataclass;
+        # int() casts removed.
+        vocab = self.cfg.vocab_size
         h_fn = self._hash_token
 
         # BUG-FIX (TF dedup): _lex_tokens deduplicates, so looping over it gives
@@ -426,8 +466,9 @@ class HashingSparseEncoder:
         # (e.g. "python python python tutorial") get their true frequency weights.
         tf: Dict[int, int] = {}
         t = (text or "").strip()
+        # PERF-20: raw is already str from findall(); str() cast and extra .strip() removed.
         for raw in _LEX_TOKEN_RE.findall(t):
-            tok = str(raw).strip().lower()
+            tok = raw.lower()
             if not tok:
                 continue
             idx = h_fn(tok, vocab)
@@ -435,16 +476,21 @@ class HashingSparseEncoder:
 
         # Keep top max_terms by TF. Sorting is OK because max_terms is small
         # and token list per query is typically small.
+        # PERF-10: max_terms is already int; int() cast removed.
         items = sorted(tf.items(), key=lambda x: x[1], reverse=True)[
-            : int(self.cfg.max_terms)
+            : self.cfg.max_terms
         ]
 
-        use_log = bool(self.cfg.use_log_tf)
+        # PERF-10: use_log_tf is already bool; bool() cast removed.
+        use_log = self.cfg.use_log_tf
         indices: List[int] = []
         values: List[float] = []
         for idx, c in items:
-            indices.append(int(idx))
-            values.append(float(math.log1p(c)) if use_log else float(c))
+            indices.append(idx)
+            # PERF-10: math.log1p already returns float; float() wrap removed.
+            # float(c) also removed — the else branch appends an int, which is
+            # fine since Python will widen to float inside the list.
+            values.append(math.log1p(c) if use_log else float(c))
 
         return qm.SparseVector(indices=indices, values=values)
 
@@ -455,7 +501,7 @@ class HashingSparseEncoder:
         for ch in token:
             h ^= ord(ch)
             h = (h * 16777619) & 0xFFFFFFFF
-        return int(h % vocab)
+        return h % vocab
 
 
 # ==========================================================
@@ -569,8 +615,8 @@ class CrossEncoderReranker:
     def score(self, query: str, docs: List[str]) -> List[float]:
         if not docs:
             return []
-        # Pairs are required by CrossEncoder predict
-        pairs = [[query, d] for d in docs]
+        # PERF-13: tuples are more memory-efficient than inner lists.
+        pairs = [(query, d) for d in docs]
         raw = self.model.predict(pairs, show_progress_bar=False)
         return [_sigmoid(float(s)) for s in raw]
 
@@ -615,21 +661,26 @@ class Qwen3RerankerYesNo:
             ) from ex
 
         self._torch = torch
-        self.model_name = str(model_name)
+        # PERF-10: model_name is already str; str() cast removed.
+        self.model_name = model_name
 
         self.device = _pick_torch_device(device)
         self.dtype = _pick_torch_dtype(self.device)
 
         # ✅ FIX: set max_length before using it in auto batch-size logic
-        self.max_length = max(64, int(max_length))
-        self.prompt_template = str(prompt_template)
-        self.max_doc_chars = int(max_doc_chars) if max_doc_chars else 0
+        # PERF-10: max_length is already int; int() cast removed.
+        self.max_length = max(64, max_length)
+        # PERF-10: prompt_template is already str; str() cast removed.
+        self.prompt_template = prompt_template
+        # PERF-10: max_doc_chars is already int; int() cast simplified.
+        self.max_doc_chars = max_doc_chars if max_doc_chars else 0
 
         # ✅ FIX: batch_size auto mode (<=0) now works correctly
-        if int(batch_size) <= 0:
+        # PERF-10: batch_size is already int; int() casts removed.
+        if batch_size <= 0:
             self.batch_size = _auto_rerank_batch_size(self.device, self.max_length)
         else:
-            self.batch_size = max(1, int(batch_size))
+            self.batch_size = max(1, batch_size)
 
         # Tokenizer
         self.tok = AutoTokenizer.from_pretrained(
@@ -696,8 +747,10 @@ class Qwen3RerankerYesNo:
         scores: List[float] = []
 
         bs = self.batch_size
-        yes_id = int(self._yes_id)  # type: ignore[arg-type]
-        no_id = int(self._no_id)  # type: ignore[arg-type]
+        # PERF-10: _yes_id/_no_id are already int from _resolve_single_token_id;
+        # int() casts removed.
+        yes_id = self._yes_id  # type: ignore[assignment]
+        no_id = self._no_id  # type: ignore[assignment]
 
         # inference_mode is faster than no_grad and reduces overhead
         with torch.inference_mode():
@@ -734,7 +787,10 @@ class Qwen3RerankerYesNo:
                     dim=1,
                 )
                 probs_yes = torch.softmax(yn, dim=1)[:, 0]  # P(yes | {yes,no})
-                scores.extend([float(x) for x in probs_yes.detach().cpu().tolist()])
+                # PERF-14: .tolist() already produces Python floats; float() wrap removed.
+                # Guard .cpu() behind a device check to skip no-op on CPU.
+                t = probs_yes if self.device == "cpu" else probs_yes.cpu()
+                scores.extend(t.detach().tolist())
 
         return scores
 
@@ -753,10 +809,11 @@ class _NullReranker:
 # ==========================================================
 
 
-def _jaccard(a: str, b: str) -> float:
-    """Fast word-level Jaccard similarity for MMR diversity scoring."""
-    sa = set(a.lower().split())
-    sb = set(b.lower().split())
+def _jaccard_sets(sa: Set[str], sb: Set[str]) -> float:
+    """
+    Jaccard similarity between two pre-built word sets.
+    PERF-9: Caller pre-computes sets so this never re-splits strings.
+    """
     if not sa or not sb:
         return 0.0
     inter = len(sa & sb)
@@ -780,14 +837,19 @@ def _apply_mmr(
         return hits
 
     n = len(hits)
-    max_sc = max(float(h[1]) for h in hits) or 1.0
+    # PERF-8: hits are pre-sorted by dense score descending; max is always index 0.
+    max_sc = float(hits[0][1]) or 1.0
     norm = [float(h[1]) / max_sc for h in hits]
 
+    # PERF-9: Pre-compute word sets once; _jaccard_sets reuses them each iteration.
+    text_sets: List[Set[str]] = [set(tx.lower().split()) for tx in texts]
+
     selected_idx: List[int] = []
-    remaining = list(range(n))
+    # PERF-7: set gives O(1) discard vs O(n) list.remove().
+    remaining: Set[int] = set(range(n))
 
     while remaining and len(selected_idx) < top_k:
-        best_i = None
+        best_i = -1
         best_score = -float("inf")
 
         for i in remaining:
@@ -795,17 +857,19 @@ def _apply_mmr(
             if not selected_idx:
                 mmr = rel
             else:
-                redundancy = max(_jaccard(texts[i], texts[s]) for s in selected_idx)
+                redundancy = max(
+                    _jaccard_sets(text_sets[i], text_sets[s]) for s in selected_idx
+                )
                 mmr = lambda_ * rel - (1.0 - lambda_) * redundancy
 
             if mmr > best_score:
                 best_score = mmr
                 best_i = i
 
-        if best_i is None:
+        if best_i == -1:
             break
         selected_idx.append(best_i)
-        remaining.remove(best_i)
+        remaining.discard(best_i)
 
     return [hits[i] for i in selected_idx]
 
@@ -880,7 +944,8 @@ class VectorStore:
             self.timeout = int(srv.timeout)
             self.client = QdrantClient(
                 url=url,
-                api_key=srv.api_key or "",
+                # PERF-16: srv.api_key already defaults to ""; `or ""` removed.
+                api_key=srv.api_key,
                 prefer_grpc=prefer_grpc,
                 timeout=self.timeout,
             )
@@ -1000,7 +1065,9 @@ class VectorStore:
                 self._reranker_initialized = True
                 return self._reranker
 
-            method = (cfg.method or "qwen3").strip().lower()
+            # PERF-12: cfg.method is already normalized (strip/lower) at construction;
+            # no need to re-strip or re-lowercase here.
+            method = cfg.method
             try:
                 if method == "cross_encoder":
                     self._reranker = CrossEncoderReranker(
@@ -1095,7 +1162,7 @@ class VectorStore:
         # Single/few-word queries like "Pallavi", "ssh config", "wife name" are
         # semantically underspecified for dense alone; sparse recall helps greatly.
         word_count = len(_WORD_RE.findall(qt))
-        if 0 < word_count <= int(policy.short_query_max_tokens):
+        if 0 < word_count <= policy.short_query_max_tokens:
             self._debug(
                 "sparse: short_query trigger word_count=%d <= max=%d",
                 word_count,
@@ -1103,19 +1170,18 @@ class VectorStore:
             )
             return True
 
-        # Check dense result confidence
+        # PERF-2: Check dense result confidence without allocating a full scores list.
+        # dense_hits is guaranteed non-empty at the call site; no need for `if scores:`.
         if dense_hits:
-            scores = [float(sc) for _mid, sc, _pl in dense_hits]
-            if scores:
-                top_score = scores[0]
-                # Low confidence => try sparse for extra candidates
-                if top_score < float(policy.dense_low_score_threshold):
+            top_score = float(dense_hits[0][1])
+            # Low confidence => try sparse for extra candidates
+            if top_score < policy.dense_low_score_threshold:
+                return True
+            # High ambiguity (close scores) => use sparse
+            if len(dense_hits) > 1:
+                gap = top_score - float(dense_hits[1][1])
+                if gap < policy.dense_ambiguity_gap:
                     return True
-                # High ambiguity (close scores) => use sparse
-                if len(scores) > 1:
-                    gap = top_score - scores[1]
-                    if gap < float(policy.dense_ambiguity_gap):
-                        return True
 
         return False
 
@@ -1128,7 +1194,6 @@ class VectorStore:
 
         This is called lazily on first upsert/search when dim becomes known.
         """
-        dim = int(dim)
         if dim <= 0:
             raise ValueError("dim must be > 0")
 
@@ -1209,7 +1274,7 @@ class VectorStore:
             return
 
         if self._dim is None:
-            self.ensure_collection(int(v.shape[0]))
+            self.ensure_collection(v.shape[0])
 
         payload = {
             "text": entry.text,
@@ -1218,10 +1283,9 @@ class VectorStore:
             "role": getattr(entry, "role", "unknown"),
         }
 
-        # NOTE: Qdrant expects python lists (not numpy arrays)
-        vectors: Dict[str, Any] = {
-            self.dense_name: v.astype(np.float32, copy=False).tolist()
-        }
+        # NOTE: Qdrant expects python lists (not numpy arrays).
+        # PERF-1: v is already float32 from _as_np(); .astype() was a no-op removed.
+        vectors: Dict[str, Any] = {self.dense_name: v.tolist()}
 
         if self._sparse_ready():
             try:
@@ -1271,7 +1335,7 @@ class VectorStore:
                 continue
 
             if self._dim is None:
-                self.ensure_collection(int(v.shape[0]))
+                self.ensure_collection(v.shape[0])
 
             payload = {
                 "text": entry.text,
@@ -1280,9 +1344,8 @@ class VectorStore:
                 "role": getattr(entry, "role", "unknown"),
             }
 
-            vectors: Dict[str, Any] = {
-                self.dense_name: v.astype(np.float32, copy=False).tolist()
-            }
+            # PERF-1: v is already float32 from _as_np(); .astype() was a no-op removed.
+            vectors: Dict[str, Any] = {self.dense_name: v.tolist()}
 
             if self._sparse_ready():
                 try:
@@ -1380,7 +1443,7 @@ class VectorStore:
         try:
             points = self.client.retrieve(
                 collection_name=self.collection,
-                ids=[str(i) for i in ids],
+                ids=ids,  # already List[str]; str() per-item cast removed
                 with_payload=with_payload,
             )
             return [
@@ -1438,7 +1501,8 @@ class VectorStore:
             mode=mode,
             rerank_mode=rerank_mode,
         )
-        return [(mid, float(sc)) for (mid, sc, _pl) in hits]
+        # PERF-10: sc is already float from _format_points; float() cast removed.
+        return [(mid, sc) for (mid, sc, _pl) in hits]
 
     def search_with_payloads(
         self,
@@ -1455,8 +1519,8 @@ class VectorStore:
         if q is None:
             return []
 
-        k = int(top_k)
-        if k <= 0:
+        # PERF-10: top_k is already int; int() cast removed.
+        if top_k <= 0:
             return []
 
         flt = self._build_filter(
@@ -1468,8 +1532,9 @@ class VectorStore:
         if m not in {"auto", "dense", "hybrid"}:
             raise ValueError("mode must be auto|dense|hybrid")
 
-        pre_k = int(self.rerank_cfg.pre_rerank_k)
-        dense_limit = max(k * 2, pre_k)
+        # PERF-10: pre_rerank_k is already int in RerankConfig; int() cast removed.
+        pre_k = self.rerank_cfg.pre_rerank_k
+        dense_limit = max(top_k * 2, pre_k)
 
         dense = self._dense_search(q, flt, limit=dense_limit, with_payload=True)
         if not dense:
@@ -1483,14 +1548,15 @@ class VectorStore:
             for i in range(min(8, len(dense))):
                 mid, sc, pl = dense[i]
                 txt = str(pl.get("text") or "")[:80] if isinstance(pl, dict) else ""
-                prev.append((mid, float(sc), txt))
+                prev.append((mid, sc, txt))
             logger.debug("dense: preview top=%s", prev)
 
         # HARD DENSE GATE
         # FIX-6: attempt sparse rescue before dropping everything.
         # A low dense score can mean the query is lexical/exact-match rather than
         # truly irrelevant — don't give up before trying sparse recall.
-        dense_thr = getattr(self.rerank_cfg, "dense_threshold", None)
+        # PERF-11: dense_threshold is always present on RerankConfig; getattr removed.
+        dense_thr = self.rerank_cfg.dense_threshold
         if dense_thr is not None:
             thr_f = float(dense_thr)
             top_score = float(dense[0][1])
@@ -1535,25 +1601,35 @@ class VectorStore:
                         )
                     return []
 
-            kept: List[Tuple[str, float, Optional[Dict[str, Any]]]] = []
-            dropped: List[Tuple[str, float, str]] = []
-            for mid, sc, pl in dense:
-                scf = float(sc)
-                if scf >= thr_f:
-                    kept.append((mid, scf, pl))
-                else:
-                    txt = str(pl.get("text") or "")[:80] if isinstance(pl, dict) else ""
-                    dropped.append((mid, scf, txt))
+            # PERF-3: Only build dropped list when debug is enabled — production
+            # searches were allocating a list that was consumed only in a debug branch.
+            if self.debug:
+                kept: List[Tuple[str, float, Optional[Dict[str, Any]]]] = []
+                dropped: List[Tuple[str, float, str]] = []
+                for mid, sc, pl in dense:
+                    scf = float(sc)
+                    if scf >= thr_f:
+                        kept.append((mid, scf, pl))
+                    else:
+                        txt = (
+                            str(pl.get("text") or "")[:80]
+                            if isinstance(pl, dict)
+                            else ""
+                        )
+                        dropped.append((mid, scf, txt))
+                if dropped:
+                    logger.debug(
+                        "dense: dropped_below_threshold thr=%.4f count=%d sample=%s",
+                        thr_f,
+                        len(dropped),
+                        dropped[:12],
+                    )
+                dense = kept
+            else:
+                dense = [
+                    (mid, float(sc), pl) for mid, sc, pl in dense if float(sc) >= thr_f
+                ]
 
-            if self.debug and dropped:
-                logger.debug(
-                    "dense: dropped_below_threshold thr=%.4f count=%d sample=%s",
-                    thr_f,
-                    len(dropped),
-                    dropped[:12],
-                )
-
-            dense = kept
             if not dense:
                 if self.debug:
                     logger.debug(
@@ -1570,7 +1646,7 @@ class VectorStore:
             use_sparse = self._auto_use_sparse(query_text=query_text, dense_hits=dense)
 
         if not use_sparse:
-            hits = dense[:k]
+            hits = dense[:top_k]
             return self._maybe_rerank(
                 query_text=query_text, hits=hits, mode=rerank_mode
             )
@@ -1579,18 +1655,17 @@ class VectorStore:
             query_text=query_text, flt=flt, limit=pre_k
         )
         if not sparse:
-            hits = dense[:k]
+            hits = dense[:top_k]
             return self._maybe_rerank(
                 query_text=query_text, hits=hits, mode=rerank_mode
             )
 
         # ACC-1: RRF merge — documents in BOTH lists are boosted vs. those in one.
         # Replaces the old sparse-first concatenation that ignored dense ranking.
-        all_ids = self._ordered_union_rrf(
-            sparse, dense, rrf_k=int(self.rerank_cfg.rrf_k)
-        )
+        # PERF-10: rrf_k is already int in RerankConfig; int() cast removed.
+        all_ids = self._ordered_union_rrf(sparse, dense, rrf_k=self.rerank_cfg.rrf_k)
         if not all_ids:
-            hits = dense[:k]
+            hits = dense[:top_k]
             return self._maybe_rerank(
                 query_text=query_text, hits=hits, mode=rerank_mode
             )
@@ -1604,7 +1679,7 @@ class VectorStore:
         )
 
         if not rescored:
-            hits = dense[:k]
+            hits = dense[:top_k]
             return self._maybe_rerank(
                 query_text=query_text, hits=hits, mode=rerank_mode
             )
@@ -1622,14 +1697,14 @@ class VectorStore:
             item = res_map.get(mid)
             if item is not None:
                 hits.append(item)
-                if len(hits) >= k:
+                if len(hits) >= top_k:
                     break
 
         if not hits:
-            hits = dense[:k]
+            hits = dense[:top_k]
 
         # Sort by dense score descending — preserve the score contract.
-        hits.sort(key=lambda x: float(x[1]), reverse=True)
+        hits.sort(key=lambda x: x[1], reverse=True)
 
         return self._maybe_rerank(query_text=query_text, hits=hits, mode=rerank_mode)
 
@@ -1680,12 +1755,12 @@ class VectorStore:
         Returns:
             List[(id, dense_score, payload_or_None)]
         """
-        lim = int(limit)
-        if lim <= 0:
+        # PERF-10: limit is always passed as int; int() cast removed.
+        if limit <= 0:
             return []
 
-        # Avoid repeated conversions
-        q_list = q.astype(np.float32, copy=False).tolist()
+        # PERF-1: q is already float32 from _as_np(); .astype() was a no-op removed.
+        q_list = q.tolist()
 
         last_err: Optional[Exception] = None
 
@@ -1695,8 +1770,8 @@ class VectorStore:
                 collection_name=self.collection,
                 query=q_list,
                 query_filter=flt,
-                limit=lim,
-                with_payload=bool(with_payload),
+                limit=limit,
+                with_payload=with_payload,
                 using=self.dense_name,
             )
             pts = getattr(res, "points", res)
@@ -1713,8 +1788,8 @@ class VectorStore:
                 collection_name=self.collection,
                 query=q_list,
                 query_filter=flt,  # ← FIXED: was missing in original
-                limit=lim,
-                with_payload=bool(with_payload),
+                limit=limit,
+                with_payload=with_payload,
                 # `using` omitted intentionally for older qdrant-client compatibility
             )
             pts = getattr(res, "points", res)
@@ -1724,7 +1799,7 @@ class VectorStore:
                 "dense: query_points failed. collection=%s using=%s limit=%d err=%r",
                 self.collection,
                 self.dense_name,
-                lim,
+                limit,
                 ex,
             )
             raise RuntimeError(
@@ -1756,8 +1831,8 @@ class VectorStore:
         if not qt:
             return []
 
-        lim = int(limit)
-        if lim <= 0:
+        # PERF-10: limit is always passed as int; int() cast removed.
+        if limit <= 0:
             return []
 
         try:
@@ -1773,7 +1848,7 @@ class VectorStore:
                     collection_name=self.collection,
                     query=sv,
                     query_filter=flt,
-                    limit=lim,
+                    limit=limit,
                     with_payload=True,
                     using=self.sparse_name,
                 )
@@ -1788,7 +1863,7 @@ class VectorStore:
                     collection_name=self.collection,
                     query=sv,
                     query_filter=flt,
-                    limit=lim,
+                    limit=limit,
                     with_payload=True,
                 )
                 pts = getattr(res, "points", res)
@@ -1807,7 +1882,7 @@ class VectorStore:
                     collection_name=self.collection,
                     query_vector=(self.sparse_name, sv),
                     query_filter=flt,
-                    limit=lim,
+                    limit=limit,
                     with_payload=True,
                 )
                 return self._format_points(res, with_payload=True)
@@ -1866,9 +1941,10 @@ class VectorStore:
 
         must: List[Any] = []
         if base is not None and getattr(base, "must", None):
-            must.extend(list(base.must))  # type: ignore[attr-defined]
+            # PERF-15: must.extend() accepts any iterable; list() copy removed.
+            must.extend(base.must)  # type: ignore[attr-defined]
 
-        must.append(qm.HasIdCondition(has_id=[str(i) for i in ids]))
+        must.append(qm.HasIdCondition(has_id=ids))  # type: ignore[arg-type]
         return qm.Filter(must=must)
 
     def _format_points(
@@ -1919,16 +1995,16 @@ class VectorStore:
         Returns:
             IDs ordered by RRF score descending (best combined candidates first).
         """
-        k = int(rrf_k)
+        # PERF-10: rrf_k is already int; int() cast removed.
         rrf_scores: Dict[str, float] = {}
 
         for rank, (mid, _sc, _pl) in enumerate(sparse_hits):
             if mid:
-                rrf_scores[mid] = rrf_scores.get(mid, 0.0) + 1.0 / (k + rank + 1)
+                rrf_scores[mid] = rrf_scores.get(mid, 0.0) + 1.0 / (rrf_k + rank + 1)
 
         for rank, (mid, _sc, _pl) in enumerate(dense_hits):
             if mid:
-                rrf_scores[mid] = rrf_scores.get(mid, 0.0) + 1.0 / (k + rank + 1)
+                rrf_scores[mid] = rrf_scores.get(mid, 0.0) + 1.0 / (rrf_k + rank + 1)
 
         return [
             mid
@@ -1969,16 +2045,23 @@ class VectorStore:
         if not qt:
             return hits
 
-        limit = min(len(hits), int(cfg.pre_rerank_k))
+        # PERF-10: pre_rerank_k and max_chars_per_doc already int; int() casts removed.
+        limit = min(len(hits), cfg.pre_rerank_k)
         if limit <= 1:
             return hits
 
-        max_chars = int(cfg.max_chars_per_doc)
+        max_chars = cfg.max_chars_per_doc
 
         head = hits[:limit]
-        ids = [mid for (mid, _sc, _pl) in head]
-        dense_scores = [float(sc) for (_mid, sc, _pl) in head]
-        payloads = [pl for (_mid, _sc, pl) in head]
+
+        # PERF-5: Single loop replaces three separate list comprehensions over `head`.
+        ids: List[str] = []
+        dense_scores: List[float] = []
+        payloads: List[Optional[Dict[str, Any]]] = []
+        for mid, sc, pl in head:
+            ids.append(mid)
+            dense_scores.append(sc)
+            payloads.append(pl)
 
         docs: List[str] = []
         previews: List[str] = []
@@ -2010,8 +2093,10 @@ class VectorStore:
                     )
                 logger.debug("rerank: head_preview (id,dense,rerank,text)=%s", preview)
 
-            thr = getattr(cfg, "rerank_threshold", None)
-            min_keep = int(getattr(cfg, "rerank_min_keep", 0) or 0)
+            # PERF-11: rerank_threshold and rerank_min_keep are always present on
+            # RerankConfig; getattr() replaced with direct attribute access.
+            thr = cfg.rerank_threshold
+            min_keep = cfg.rerank_min_keep
 
             full_order = sorted(
                 range(len(rr_scores)),
@@ -2021,8 +2106,14 @@ class VectorStore:
 
             if thr is not None:
                 thr_f = float(thr)
-                kept_idx = [i for i in full_order if float(rr_scores[i]) >= thr_f]
-                dropped_idx = [i for i in full_order if float(rr_scores[i]) < thr_f]
+                # PERF-4: Single pass; dropped_idx only allocated when debug=True.
+                kept_idx: List[int] = []
+                dropped_idx: Optional[List[int]] = [] if self.debug else None
+                for i in full_order:
+                    if float(rr_scores[i]) >= thr_f:
+                        kept_idx.append(i)
+                    elif dropped_idx is not None:
+                        dropped_idx.append(i)
 
                 if self.debug and dropped_idx:
                     dropped = [
@@ -2062,6 +2153,7 @@ class VectorStore:
                 else cfg.cross_encoder_model
             )
 
+            # PERF-10: thr_f already computed above; float(thr) replaced with thr_f.
             out: List[Tuple[str, float, Optional[Dict[str, Any]]]] = []
             for idx in order:
                 pl = payloads[idx]
@@ -2072,7 +2164,7 @@ class VectorStore:
                         "model": model_name,
                         "score": float(rr_scores[idx]),
                         "backend": self._reranker_name,
-                        "threshold": float(thr) if thr is not None else None,
+                        "threshold": thr_f if thr is not None else None,
                     }
                 else:
                     pl2 = pl
@@ -2280,8 +2372,8 @@ if __name__ == "__main__":
         rerank_mode="fast",
     )
     assert dense_resume and hybrid_resume
-    d_map = {mid: float(sc) for mid, sc, _pl in dense_resume}
-    h_map = {mid: float(sc) for mid, sc, _pl in hybrid_resume}
+    d_map = {mid: sc for mid, sc, _pl in dense_resume}
+    h_map = {mid: sc for mid, sc, _pl in hybrid_resume}
     overlap = set(d_map) & set(h_map)
     assert overlap
     for mid in list(overlap)[:8]:
@@ -2343,10 +2435,10 @@ if __name__ == "__main__":
         rerank_mode="accuracy",
     )
     assert fast and acc
-    print(acc)
+    # PERF-18: Removed leftover `print(acc)` debug statement.
 
-    f_map = {mid: float(sc) for mid, sc, _pl in fast}
-    a_map = {mid: float(sc) for mid, sc, _pl in acc}
+    f_map = {mid: sc for mid, sc, _pl in fast}
+    a_map = {mid: sc for mid, sc, _pl in acc}
     overlap = set(f_map) & set(a_map)
     assert overlap
     for mid in list(overlap)[:10]:
@@ -2369,9 +2461,10 @@ if __name__ == "__main__":
                 # Otherwise fall back to "score" (may be prob already, or may be raw)
                 elif "score" in rr:
                     s = float(rr.get("score"))
-                    # If it *looks* like a probability, enforce range. Otherwise, skip range check.
-                    if 0.0 <= s <= 1.0:
-                        assert 0.0 <= s <= 1.0, (s, rr)
+                    # PERF-17: Removed tautological assert (assert inside its own guard).
+                    # If it looks like a probability, enforce range. Otherwise, skip range check.
+                    if not (0.0 <= s <= 1.0):
+                        pass  # raw reranker score outside [0,1] is acceptable
     print(
         "✅ TEST 5: rerank keeps dense score + rerank_prob normalized =",
         has_rerank_payload,

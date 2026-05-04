@@ -230,12 +230,7 @@ BUDDY_OUTPUT = """
   ======================================================    
   OUTPUT SEQUENCE — ABSOLUTE RULE, NO EXCEPTIONS
   ======================================================    
-
-  Step 1 — Think inside <think>...</think>. Reason fully.
-  Step 2 — Close with </think>
-  Step 3 — Your VERY NEXT CHARACTER after </think> MUST be `{{`
-            No newline. No space. No explanation. Just `{{`.
-  step 4 - Generate the full exact json schema as below.
+  >>> Generate the full exact json schema as below after you close the thinking with </think>. 
 
   CORRECT:
     <think>

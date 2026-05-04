@@ -1,21 +1,55 @@
-# buddy/actions/action_router.py
 from __future__ import annotations
 
 import asyncio
 import json
 import time
+from collections import deque
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
 from buddy.logger.logger import get_logger
+from buddy.tools.registry import ToolRegistry
 
 logger = get_logger("action_router")
 
 # ==========================================================
 # Success output projection — lean responder-friendly output
 # ==========================================================
-
 _ALWAYS_STRIP = {"OK", "TOOL"}
+
+# Precompute FS fields for O(1) lookup
+_FS_FIELDS = frozenset({
+    "PATH",
+    "ACTION",
+    "FORMAT",
+    "ENTRIES",
+    "TREE_TEXT",
+    "TOTAL",
+    "CONTENT",
+    "SIZE_BYTES",
+    "MODIFIED",
+    "CREATED",
+    "LINE_COUNT",
+    "START_LINE",
+    "END_LINE",
+    "ROWS_TOTAL",
+    "ROWS_AFTER_FILTER",
+    "COLUMNS",
+    "SHEET",
+    "EXISTS",
+    "IS_FILE",
+    "IS_DIR",
+    "MIME",
+    "OPENED",
+    "RESULTS",
+    "TOTAL_FOUND",
+    "DESTINATION",
+    "DIFF",
+    "TRUNCATED",
+    "NOTE",
+    "NEEDS_CONFIRMATION",
+    "PREVIEW",
+})
 
 
 def _project_success(tool_name: str, result: Dict[str, Any]) -> Dict[str, Any]:
@@ -25,19 +59,16 @@ def _project_success(tool_name: str, result: Dict[str, Any]) -> Dict[str, Any]:
     On failure the full result is kept so the executor can retry with full context.
     """
     if tool_name == "terminal":
-        projected: Dict[str, Any] = {
+        return {
             "CWD": result.get("CWD"),
             "COMMAND": result.get("COMMAND"),
             "EXIT_CODE": result.get("EXIT_CODE"),
             "STDOUT": result.get("STDOUT"),
             "STDERR": result.get("STDERR"),
             "TIMEOUT": result.get("TIMEOUT"),
+            **({"IS_DAEMON": True} if result.get("IS_DAEMON") else {}),
+            **({"PID": result["PID"]} if result.get("PID") is not None else {}),
         }
-        if result.get("IS_DAEMON"):  # only when True
-            projected["IS_DAEMON"] = True
-        if result.get("PID") is not None:  # only when set
-            projected["PID"] = result["PID"]
-        return projected
 
     if tool_name == "web_search":
         return {
@@ -46,38 +77,34 @@ def _project_success(tool_name: str, result: Dict[str, Any]) -> Dict[str, Any]:
         }
 
     if tool_name == "filesystem":
-        projected: Dict[str, Any] = {}
-        for field in (
-            # common
-            "PATH", "ACTION", "FORMAT",
-            # ls
-            "ENTRIES", "TREE_TEXT", "TOTAL",
-            # read
-            "CONTENT", "SIZE_BYTES", "MODIFIED", "CREATED",
-            "LINE_COUNT", "START_LINE", "END_LINE",
-            "ROWS_TOTAL", "ROWS_AFTER_FILTER", "COLUMNS", "SHEET",
-            "EXISTS", "IS_FILE", "IS_DIR",
-            "MIME", "OPENED",
-            # find
-            "RESULTS", "TOTAL_FOUND",
-            # manage
-            "DESTINATION", "DIFF",
-            # shared
-            "TRUNCATED", "NOTE",
-            "NEEDS_CONFIRMATION", "PREVIEW",
-        ):
-            if result.get(field) is not None:
-                projected[field] = result[field]
-        return projected
+        # Set-based filtering replaces manual loop + repeated .get()
+        return {k: v for k, v in result.items() if k in _FS_FIELDS and v is not None}
 
     if tool_name == "browser":
         return {
-            k: v for k, v in result.items()
-            if k not in _ALWAYS_STRIP and k in (
-                "ACTION", "TASK", "URL", "STEPS", "SUMMARY",
-                "FILLED", "FAILED", "DESCRIPTION", "KEY_FINDING",
-                "TEXT_FOUND", "TITLE", "FORM_FIELDS", "BUTTONS",
-                "HAS_CAPTCHA", "SESSIONS", "EXISTS", "DOMAIN", "ERROR",
+            k: v
+            for k, v in result.items()
+            if k not in _ALWAYS_STRIP
+            and k
+            in (
+                "ACTION",
+                "TASK",
+                "URL",
+                "STEPS",
+                "SUMMARY",
+                "FILLED",
+                "FAILED",
+                "DESCRIPTION",
+                "KEY_FINDING",
+                "TEXT_FOUND",
+                "TITLE",
+                "FORM_FIELDS",
+                "BUTTONS",
+                "HAS_CAPTCHA",
+                "SESSIONS",
+                "EXISTS",
+                "DOMAIN",
+                "ERROR",
             )
         }
 
@@ -89,7 +116,6 @@ def _project_success(tool_name: str, result: Dict[str, Any]) -> Dict[str, Any]:
 
 
 # Maps tool name → action verb shown in the spinner during executor + tool execution.
-# Tools may override this with a more specific label via their own on_progress call.
 _TOOL_VERB: Dict[str, str] = {
     "filesystem": "Tending to files...",
     "terminal": "Setting things in motion...",
@@ -112,11 +138,10 @@ class PlanOutcome:
 UiInputFn = Callable[[], Awaitable[str]]
 UiPrintFn = Callable[[str], Awaitable[None]]
 
+
 # ==========================================================
 # Error Stack (per-step, full tool dict)
 # ==========================================================
-
-
 @dataclass
 class ErrorEntry:
     ts: str
@@ -127,15 +152,15 @@ class ErrorEntry:
 class ErrorStack:
     """
     Per-step error history for executor retries.
-
     Rule:
       - ONLY store the FULL dict returned by the tool when ok == False.
       - No extraction, no summarization, no extra details.
     """
 
     def __init__(self, *, max_depth: int = 3) -> None:
-        self._max_depth = int(max_depth)
-        self._entries: List[ErrorEntry] = []
+        self._max_depth = max_depth
+        self._entries: deque[ErrorEntry] = deque(maxlen=max_depth)
+        self._cache: Optional[str] = None
 
     @property
     def depth(self) -> int:
@@ -143,42 +168,44 @@ class ErrorStack:
 
     def clear(self) -> None:
         self._entries.clear()
+        self._cache = None
 
     def add(self, *, tool_result: Dict[str, Any], attempt: int) -> None:
-        # store exactly what tool returned (full dict)
         if not isinstance(tool_result, dict):
             return
 
         ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         self._entries.append(
-            ErrorEntry(ts=ts, attempt=int(attempt), tool_result=tool_result)
+            ErrorEntry(ts=ts, attempt=attempt, tool_result=tool_result)
         )
-
-        # hard cap
-        if len(self._entries) > self._max_depth:
-            self._entries = self._entries[-self._max_depth :]
+        self._cache = None  # invalidate cache
 
     @property
     def appendix(self) -> str:
+        if self._cache is not None:
+            return self._cache
         if not self._entries:
-            return ""
+            self._cache = ""
+            return self._cache
 
         lines: List[str] = []
         for e in self._entries:
             lines.append(f"[{e.ts}] Attempt {e.attempt}:")
             try:
-                lines.append(json.dumps(e.tool_result, ensure_ascii=False, indent=2))
+                # Removed indent=2 for performance. LLMs don't need whitespace.
+                lines.append(json.dumps(e.tool_result, ensure_ascii=False))
             except Exception:
-                lines.append(str(e.tool_result))
+                # Prevent memory blowup on massive binary/class objects
+                lines.append(repr(e.tool_result)[:500] + "...")
             lines.append("")
-        return "\n".join(lines).strip()
+
+        self._cache = "\n".join(lines).strip()
+        return self._cache
 
 
 # ==========================================================
 # Followup Stack (global)
 # ==========================================================
-
-
 @dataclass
 class FollowupEntry:
     ts: str
@@ -203,8 +230,9 @@ class FollowupStack:
     ) -> None:
         self._ui_output = ui_output
         self._ui_input = ui_input
-        self._max_depth = int(max_depth)
-        self._entries: List[FollowupEntry] = []
+        self._max_depth = max_depth
+        self._entries: deque[FollowupEntry] = deque(maxlen=max_depth)
+        self._cache: Optional[str] = None
 
     @property
     def depth(self) -> int:
@@ -212,16 +240,24 @@ class FollowupStack:
 
     def clear(self) -> None:
         self._entries.clear()
+        self._cache = None
 
     @property
     def appendix(self) -> str:
+        if self._cache is not None:
+            return self._cache
         if not self._entries:
-            return ""
+            self._cache = ""
+            return self._cache
+
         blocks: List[str] = []
         for e in self._entries:
+            # Cleaned token spacing for standard LLM template compatibility
             blocks.append(f"<|im_start|>assistant\n{e.question}\n<|im_end|>")
             blocks.append(f"<|im_start|>user\n{e.answer}\n<|im_end|>")
-        return "\n".join(blocks)
+
+        self._cache = "\n".join(blocks)
+        return self._cache
 
     async def handle(
         self,
@@ -257,18 +293,16 @@ class FollowupStack:
                 tool_name=tool_name,
             )
         )
+        self._cache = None  # invalidate cache
         return True
 
 
 # ==========================================================
 # Action Router (plan + execute)
 # ==========================================================
-
-
 class ActionRouter:
     """
     v1 ActionRouter (PLAN + EXECUTE)
-
     Flow:
       1) Planner loop (may ask followups)
       2) For each step:
@@ -276,6 +310,9 @@ class ActionRouter:
          - Per-step retry loop:
              (executor -> tool -> if error -> push ErrorStack -> rerun executor)
     """
+
+    # Hard safety cap to prevent infinite planner followup loops
+    _MAX_PLANNER_FOLLOWUPS = 5
 
     def __init__(
         self,
@@ -292,13 +329,13 @@ class ActionRouter:
         self._ui_input = ui_input
         self.stack = FollowupStack(ui_output=self._ui_output, ui_input=self._ui_input)
         self.errors = ErrorStack(max_depth=3)
-        self._max_step_attempts = int(max_step_attempts)
+        self._max_step_attempts = max_step_attempts
 
-        from buddy.tools.registry import ToolRegistry
-
+        # Registry loaded once at init
         self._registry = ToolRegistry()
         _tools = self._registry.available_tools()
-        self._available_tools_str = json.dumps(_tools, ensure_ascii=False, indent=2)
+        # Removed indent=2 for smaller payloads & faster serialization
+        self._available_tools_str = json.dumps(_tools, ensure_ascii=False)
         self._registry_tools: List[str] = [t["name"] for t in _tools]
 
         logger.debug("ActionRouter initialized with brain=%s", type(brain).__name__)
@@ -318,14 +355,13 @@ class ActionRouter:
             "ACTION start turn_id=%s session_id=%s planner_instructions=%s",
             turn_id,
             session_id,
-            planner_instructions,
+            planner_instructions[:100],
         )
         now_iso, timezone = self._get_time_info()
 
         registry = self._registry
         available_tools_str = self._available_tools_str
 
-        # ── log what the planner will see ────────────────────────────────────
         logger.info(
             "┌─ PLANNER INPUT ─────────────────────────────────────────\n"
             "│  tools (%d): %s\n"
@@ -341,10 +377,12 @@ class ActionRouter:
         # ======================================================
         t0 = time.perf_counter()
         planner_parsed: Dict[str, Any] = {}
+        planner_followup_count = 0
+
         if on_token:
             on_token("Drawing up a plan...", False)
-        while True:
 
+        while True:
             try:
                 planner_payload = await asyncio.to_thread(
                     self.brain.run_planner,
@@ -368,8 +406,9 @@ class ActionRouter:
                     ),
                     "step_execution_map": {},
                 }
+
             planner_parsed = planner_payload.get("parsed") or planner_payload or {}
-            _status = str(planner_parsed.get("status") or "").strip().lower()
+            _status = (planner_parsed.get("status") or "").strip().lower()
 
             rerun = await self.stack.handle(
                 followup=(_status == "followup"),
@@ -378,10 +417,15 @@ class ActionRouter:
                 skip_depth_check=True,
             )
             if not rerun:
-                self.stack.clear()
+                break
+
+            planner_followup_count += 1
+            if planner_followup_count >= self._MAX_PLANNER_FOLLOWUPS:
+                logger.warning("Planner followup safety cap reached. Breaking loop.")
                 break
 
         planner_dt = time.perf_counter() - t0
+        self.stack.clear()  # Reset for execution phase
 
         # ── log the plan the planner produced ────────────────────────────────
         _steps_raw = planner_parsed.get("steps") or []
@@ -427,19 +471,20 @@ class ActionRouter:
             planner_parsed.get("responder_instruction") or ""
         ).strip()
         steps = (
-            (planner_parsed.get("steps") or [])
+            planner_parsed.get("steps") or []
             if isinstance(planner_parsed, dict)
             else []
         )
+
         if not steps:
             if _status == "refusal":
                 refusal_msg = str(planner_parsed.get("message") or "").strip()
                 responder_instruction = (
-                    f"Could not do this — capability not available: {refusal_msg}. "
-                    "Tell the user plainly what can't be done and suggest the nearest alternative."
+                    f"Could not do this — capability not available: {refusal_msg}. Tell"
+                    " the user plainly what can't be done and suggest the nearest"
+                    " alternative."
                 )
             elif _status not in ("followup",):
-                # parse failure or success with empty steps — something broke internally
                 responder_instruction = (
                     "Buddy failed to plan this action due to an internal error. "
                     "Tell the user something went wrong and offer to retry."
@@ -454,6 +499,7 @@ class ActionRouter:
 
         # 🔒 LOCKED execution structure
         step_execution_map: Dict[str, Dict[str, Any]] = {}
+
         # ======================================================
         # 2) Execute steps sequentially
         # ======================================================
@@ -464,8 +510,8 @@ class ActionRouter:
             goal = str(step.get("goal") or "").strip()
             instruction = str(step.get("instruction") or "").strip()
             hints = str(step.get("hints") or "").strip()
-            ack = goal
-            instruction = {
+
+            instruction_dict = {
                 "Execution_Step_Id": step_id,
                 "Goal": goal,
                 "Instruction": instruction,
@@ -503,6 +549,7 @@ class ActionRouter:
                 output_name,
                 input_steps,
             )
+
             # Show tool-mapped action verb in the spinner
             if on_token:
                 step_verb = _TOOL_VERB.get(tool_name, f"Executing · {tool_name}")
@@ -514,10 +561,7 @@ class ActionRouter:
             # Build prior_outputs (DATA FLOW)
             prior_outputs: Dict[str, Any] = {}
             for dep_id in input_steps:
-                try:
-                    dep_key = str(int(dep_id))
-                except Exception:
-                    continue
+                dep_key = str(dep_id)
                 dep_entry = step_execution_map.get(dep_key)
                 if dep_entry and dep_entry.get("output_name"):
                     prior_outputs[str(dep_entry["output_name"])] = dep_entry.get(
@@ -547,22 +591,22 @@ class ActionRouter:
             self.stack.clear()
 
             # serialize once — neither changes between retry attempts
-            instruction_json = json.dumps(instruction, indent=2, ensure_ascii=False)
-            prior_outputs_json = json.dumps(prior_outputs, indent=2, ensure_ascii=False)
+            instruction_json = json.dumps(instruction_dict, ensure_ascii=False)
+            prior_outputs_json = json.dumps(prior_outputs, ensure_ascii=False)
 
-            # ==================================================
+            # ======================================================
             # Per-step attempt loop (executor -> tool -> retry on error)
-            # ==================================================
+            # ======================================================
             attempt = 0
             exec_result: Dict[str, Any] = {}
+            tool_exec_result: Dict[str, Any] = {}
 
             while True:
-                # Stop condition: too many tool attempts (NOT followups)
-                if attempt > self._max_step_attempts:
+                # Fixed off-by-one: runs exactly max_step_attempts times
+                if attempt >= self._max_step_attempts:
                     break
-                if attempt > 0:
-                    if on_token:
-                        on_token("Something slipped... catching it 🫣", False)
+                if attempt > 0 and on_token:
+                    on_token("Something slipped... catching it 🫣", False)
 
                 logger.info(
                     "step %d attempt %d/%d executor_call tool=%s",
@@ -589,10 +633,16 @@ class ActionRouter:
                     exec_ms = int((time.perf_counter() - t0) * 1000)
                     logger.warning(
                         "step %d attempt %d executor_llm_exception dt_ms=%d err=%r",
-                        step_id, attempt, exec_ms, exc,
+                        step_id,
+                        attempt,
+                        exec_ms,
+                        exc,
                     )
                     self.errors.add(
-                        tool_result={"OK": False, "ERROR": f"Executor LLM call raised: {exc}"},
+                        tool_result={
+                            "OK": False,
+                            "ERROR": f"Executor LLM call raised: {exc}",
+                        },
                         attempt=attempt,
                     )
                     attempt += 1
@@ -619,7 +669,7 @@ class ActionRouter:
 
                     rerun = await self.stack.handle(
                         followup=True,
-                        followup_question=str(fq),
+                        followup_question=fq,
                         stage="executor",
                         step_id=step_id,
                         tool_name=tool_name,
@@ -654,7 +704,9 @@ class ActionRouter:
                 # REFUSAL path (hard stop)
                 # ---------------------------
                 if status == "refusal":
-                    reason = str(exec_result.get("message") or "Executor refused step").strip()
+                    reason = str(
+                        exec_result.get("message") or "Executor refused step"
+                    ).strip()
                     step_execution_map[str(step_id)] = {
                         "tool": tool_name,
                         "goal": goal,
@@ -677,7 +729,9 @@ class ActionRouter:
                         "status": "failed",
                         "error": {
                             "type": "invalid_executor_output",
-                            "message": f"Executor returned unrecognised status='{status}'",
+                            "message": (
+                                f"Executor returned unrecognised status='{status}'"
+                            ),
                         },
                     }
                     logger.error(
@@ -691,7 +745,9 @@ class ActionRouter:
                     "┌─ EXECUTOR CALL  step=%d attempt=%d tool=%s ──────────────\n"
                     "│  fn=%s  args=%s\n"
                     "└─────────────────────────────────────────────────────────",
-                    step_id, attempt, tool_name,
+                    step_id,
+                    attempt,
+                    tool_name,
                     function,
                     json.dumps(arguments, ensure_ascii=False)[:300],
                 )
@@ -738,12 +794,14 @@ class ActionRouter:
                         _summary_parts.append(
                             f"stderr={str(tool_exec_result['STDERR'])[:120]}"
                         )
-                    _result_summary = "  ".join(_summary_parts) or "(no summary fields)"
+                    _result_summary = (
+                        "   ".join(_summary_parts) or "(no summary fields)"
+                    )
                 else:
                     _result_summary = str(tool_exec_result)[:120]
 
                 logger.info(
-                    "step %d attempt %d tool_done ok=%s  %s",
+                    "step %d attempt %d tool_done ok=%s %s",
                     step_id,
                     attempt,
                     ok,
@@ -762,12 +820,9 @@ class ActionRouter:
                     logger.info("step %d success tool=%s", step_id, tool_name)
                     break
 
-                self.errors.add(
-                    tool_result=tool_exec_result,
-                    attempt=attempt,
-                )
+                self.errors.add(tool_result=tool_exec_result, attempt=attempt)
                 logger.warning(
-                    "step %d attempt %d tool_ok_false -> retry evidence=%r ",
+                    "step %d attempt %d tool_ok_false -> retry evidence=%r",
                     step_id,
                     attempt,
                     str(tool_exec_result)[:200],
@@ -775,18 +830,23 @@ class ActionRouter:
 
                 attempt += 1
 
-            # if the while loop exited because attempts were exhausted (no break from
-            # success/refusal/followup paths), record the step as failed now
+            # if the while loop exited because attempts were exhausted
             if str(step_id) not in step_execution_map:
-                last_error = str(tool_exec_result.get("ERROR") or tool_exec_result.get("STDERR") or "")[:200]
+                last_error = str(
+                    tool_exec_result.get("ERROR")
+                    or tool_exec_result.get("STDERR")
+                    or ""
+                )[:200]
                 step_execution_map[str(step_id)] = {
                     "tool": tool_name,
                     "goal": goal,
                     "status": "failed",
                     "error": {
                         "type": "max_attempts_exceeded",
-                        "message": f"Step failed after {self._max_step_attempts} attempt(s)."
-                        + (f" Last error: {last_error}" if last_error else ""),
+                        "message": (
+                            f"Step failed after {self._max_step_attempts} attempt(s)."
+                            + (f" Last error: {last_error}" if last_error else "")
+                        ),
                     },
                 }
                 logger.error(
@@ -800,6 +860,7 @@ class ActionRouter:
 
         if logger.isEnabledFor(10):  # DEBUG
             logger.debug("step_execution_map=%s", step_execution_map)
+
         return {
             "now_iso": now_iso,
             "timezone": timezone,
@@ -814,6 +875,7 @@ class ActionRouter:
     @staticmethod
     def _get_time_info() -> Tuple[str, str]:
         lt = time.localtime()
-        tz_name = time.tzname[1] if lt.tm_isdst > 0 else time.tzname[0]
+        # Fixed DST: tm_isdst can be -1 (unknown), 0 (no), or 1 (yes)
+        tz_name = time.tzname[1] if lt.tm_isdst == 1 else time.tzname[0]
         now = time.strftime("%Y-%m-%dT%H:%M:%S%z", lt)
         return now, tz_name

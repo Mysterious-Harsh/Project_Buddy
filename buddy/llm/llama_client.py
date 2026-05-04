@@ -48,10 +48,42 @@ if USE_ORJSON:
     def _sse_loads(b: bytes) -> Any:
         return orjson.loads(b)
 
+    def _json_dumps(obj: Any) -> bytes:
+        return orjson.dumps(obj)
+
+    def _json_loads(b: bytes) -> Any:
+        return orjson.loads(b)
+
+    def _json_try_load_fn(s: str) -> bool:
+        try:
+            orjson.loads(s)
+            return True
+        except Exception:
+            return False
+
 else:
 
     def _sse_loads(b: bytes) -> Any:
         return json.loads(b.decode("utf-8"))
+
+    def _json_dumps(obj: Any) -> bytes:
+        return json.dumps(obj, ensure_ascii=False).encode("utf-8")
+
+    def _json_loads(b: bytes) -> Any:
+        return json.loads(b.decode("utf-8", errors="replace"))
+
+    def _json_try_load_fn(s: str) -> bool:
+        try:
+            json.loads(s)
+            return True
+        except Exception:
+            return False
+
+
+# json_repair is optional; import once at module level so _json_try_repair
+# does not pay a sys.modules dict-lookup on every call.
+
+from buddy.llm.json_repair import repair_json as _repair_json  # type: ignore
 
 
 @dataclass(frozen=True)
@@ -116,9 +148,6 @@ class _JsonCapture:
         if self._root == "object":
             return ch == "{"
         return ch == "["
-
-    def _depth_total(self) -> int:
-        return self._depth_obj + self._depth_arr
 
     def started(self) -> bool:
         return self._started
@@ -256,7 +285,10 @@ def _iter_sse_data_lines(resp: requests.Response, *, chunk_size: int = 4096):
             if not line.startswith(b"data: "):
                 continue
 
-            yield line[5:].lstrip()
+            # We already confirmed the prefix is b"data: " (6 bytes including
+            # the mandatory space), so slice directly — avoids a second bytes
+            # allocation from lstrip().
+            yield line[6:]
 
         if len(buf) > MAX_BUF:
             buf.clear()
@@ -339,7 +371,7 @@ class LlamaClient:
         *,
         model: str = "local-model",
         base_url: str = "http://127.0.0.1:8080",
-        timeout: Union[float, Tuple[float, float]] = (3.0, 180.0),
+        timeout: Union[float, Tuple[float, float]] = (3.0, 300.0),
         max_retries: int = 3,
         backoff_base: float = 0.35,
         stream_idle_timeout: float = 120.0,
@@ -486,7 +518,10 @@ class LlamaClient:
         think_block = ""
         post_text = text
         if think:
-            _idx = text.find("</think>")
+            # Use rfind so that ALL </think> occurrences (including any the
+            # model emitted mid-thinking) remain inside the think block; only
+            # content after the LAST </think> is treated as real output.
+            _idx = text.rfind("</think>")
             if _idx != -1:
                 think_block = text[: _idx + len("</think>")]
                 post_text = text[_idx + len("</think>") :]
@@ -592,7 +627,10 @@ class LlamaClient:
         think_block = ""
         post_text = text
         if think:
-            _idx = text.find("</think>")
+            # Use rfind so that ALL </think> occurrences (including any the
+            # model emitted mid-thinking) remain inside the think block; only
+            # content after the LAST </think> is treated as real output.
+            _idx = text.rfind("</think>")
             if _idx != -1:
                 think_block = text[: _idx + len("</think>")]
                 post_text = text[_idx + len("</think>") :]
@@ -697,14 +735,10 @@ class LlamaClient:
         return payload
 
     def _dumps(self, payload: Dict[str, Any]) -> bytes:
-        if USE_ORJSON:
-            return orjson.dumps(payload)
-        return json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        return _json_dumps(payload)
 
     def _loads(self, b: bytes) -> Any:
-        if USE_ORJSON:
-            return orjson.loads(b)
-        return json.loads(b.decode("utf-8", errors="replace"))
+        return _json_loads(b)
 
     def _payload_summary(
         self, payload: Dict[str, Any], endpoint: str
@@ -778,20 +812,12 @@ class LlamaClient:
         return s if len(s) <= limit else s[:limit] + "…(truncated)"
 
     def _json_try_load(self, s: str) -> bool:
-        try:
-            if USE_ORJSON:
-                orjson.loads(s)
-            else:
-                json.loads(s)
-            return True
-        except Exception:
-            return False
+        return _json_try_load_fn(s)
 
     def _json_try_repair(self, s: str) -> Optional[str]:
-        try:
-            from buddy.llm.json_repair import repair_json
 
-            obj = repair_json(s, return_dict=True)
+        try:
+            obj = _repair_json(s, return_dict=True)
             if USE_ORJSON:
                 return orjson.dumps(obj).decode("utf-8")
             return json.dumps(obj, ensure_ascii=False)
@@ -980,7 +1006,11 @@ class LlamaClient:
         body = self._dumps(payload)
         resp: Optional[requests.Response] = None
         try:
-            resp = self._session.post(url, data=body, timeout=self._stream_timeout())
+            # Use the configured self.timeout (not _stream_timeout) so that
+            # the caller-specified read timeout is honoured for blocking calls.
+            # _stream_timeout() substitutes stream_idle_timeout as the read
+            # component, which can be much shorter than the intended timeout.
+            resp = self._session.post(url, data=body, timeout=self.timeout)
             self._log_http_response_debug(req_id, resp)
             if resp.status_code >= 400:
                 preview = self._preview_bytes(resp.content or b"", _ERR_BODY_PREVIEW)
@@ -1034,7 +1064,9 @@ class LlamaClient:
                 )
 
             _tb = ""
-            _ti = text.lower().find("</think>")
+            # rfind: if the model emitted multiple </think> tags (e.g. in
+            # multi-step reasoning), everything up to the LAST one is thinking.
+            _ti = text.lower().rfind("</think>")
             if _ti != -1:
                 _tb = text[: _ti + len("</think>")]
 
@@ -1183,7 +1215,12 @@ class LlamaClient:
                                 e,
                             )
 
-                if not think_block_sealed:
+                # think_block_parts is only consumed when cap is not None
+                # (json_extract=True path).  When cap is None the full text is
+                # already in out_parts and the caller splits it with rfind, so
+                # collecting it here too would duplicate the entire response in
+                # memory for every plain streaming call.
+                if cap is not None and not think_block_sealed:
                     think_block_parts.append(piece)
 
                 if cap is None or not gate_open:
@@ -1203,12 +1240,41 @@ class LlamaClient:
                                 else scan
                             )
                             continue
+                        # Advance to the LAST </think> within this chunk so
+                        # intermediate occurrences don't prematurely open the
+                        # JSON gate while more thinking is still arriving.
+                        while True:
+                            next_idx = scan.find(_THINK_END, idx + len(_THINK_END))
+                            if next_idx == -1:
+                                break
+                            idx = next_idx
                         think_passed = True
                         think_block_sealed = True
                         think_tail = ""
                         _json_piece = scan[idx + len(_THINK_END) :]
                         if gate_marker_str is None:
                             gate_open = True
+
+                    # Re-check: if the model emits another </think> AFTER we
+                    # declared thinking done (e.g. multi-step reasoning where
+                    # a later chunk still contains </think>), move that content
+                    # back into the think block and reset the JSON gate so we
+                    # don't feed </think> noise into the JSON capture.
+                    while think_passed and _json_piece:
+                        leaked = _json_piece.find(_THINK_END)
+                        if leaked == -1:
+                            break
+                        # Everything up to and including this extra </think>
+                        # belongs to the think block, not to the output.
+                        think_block_parts.append(
+                            _json_piece[: leaked + len(_THINK_END)]
+                        )
+                        _json_piece = _json_piece[leaked + len(_THINK_END) :]
+                        # Reset JSON capture — we were premature.
+                        if cap is not None:
+                            cap.reset()
+                        gate_open = gate_marker_str is None
+                        gate_tail = ""
 
                     if not gate_open and gate_marker_str is not None:
                         scan = gate_tail + _json_piece
@@ -1336,7 +1402,9 @@ class LlamaClient:
 
         if think_block_parts:
             _raw_think = "".join(think_block_parts)
-            _te = _raw_think.lower().find("</think>")
+            # rfind: capture everything up to the LAST </think> so that
+            # intermediate </think> occurrences don't truncate the block early.
+            _te = _raw_think.lower().rfind("</think>")
             think_blk = _raw_think[: _te + len("</think>")] if _te != -1 else ""
         else:
             think_blk = ""
@@ -1447,14 +1515,14 @@ if __name__ == "__main__":
         print("\n[stream completion w/ json_extract+validate]")
         think, out = client.generate(
             prompt=test_brain_prompt,
-            stream=True,
+            stream=False,
             temperature=0.4,
             top_p=0.96,
             repeat_last_n=64,
             repeat_penalty=1.0,
             on_delta=on_print,
-            json_extract=True,
-            json_validate=True,
+            json_extract=False,
+            json_validate=False,
             json_root="object",
             stop=["<|im_end|>"],
         )

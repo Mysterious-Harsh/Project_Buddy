@@ -65,7 +65,9 @@ class EmbeddingProvider:
         )
 
         self._model = SentenceTransformer(
-            self.model_name, device=self.device, local_files_only=True
+            self.model_name,
+            device=self.device,
+            cache_folder=os.getenv("BUDDY_MODEL_CACHE_DIR"),
         )
 
         dim = self._model.get_sentence_embedding_dimension()
@@ -146,7 +148,7 @@ class EmbeddingProvider:
 
     def embed_passages(self, texts: Sequence[str]) -> np.ndarray:
         """Batch embed passages. Returns (N, D) float32."""
-        items = [str(x or "").strip() for x in (texts or [])]
+        items = [str(x or "").strip() for x in texts or []]
         items = [x for x in items if x]
         if not items:
             raise ValueError("embed_passages: no non-empty texts")
@@ -154,7 +156,7 @@ class EmbeddingProvider:
 
     def embed_queries(self, texts: Sequence[str]) -> np.ndarray:
         """Batch embed queries. Returns (N, D) float32."""
-        items = [str(x or "").strip() for x in (texts or [])]
+        items = [str(x or "").strip() for x in texts or []]
         items = [x for x in items if x]
         if not items:
             raise ValueError("embed_queries: no non-empty texts")
