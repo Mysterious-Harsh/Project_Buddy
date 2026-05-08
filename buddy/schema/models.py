@@ -148,8 +148,7 @@ class PlannerStep(BuddyBaseModel):
     goal: str = Field(min_length=1)
     instruction: str = Field(min_length=1)
     hints: str = Field(default="")
-    input_steps: List[int] = Field(default_factory=list)
-    output: Optional[str] = Field(default=None)
+    depends_on: List[int] = Field(default_factory=list)
 
 
 class PlannerResult(BuddyBaseModel):
@@ -159,33 +158,30 @@ class PlannerResult(BuddyBaseModel):
     {
       "status": "success" | "followup" | "refusal",
       "message": "",        // followup question or refusal reason; "" on success
-      "responder_instruction": "", // briefing for Responder; populated on success only
       "steps": [ ... ]
     }
 
     Invariants:
-    - status="success"  => steps non-empty, message="", responder_instruction non-empty
-    - status="followup" => steps=[], message non-empty, responder_instruction=""
-    - status="refusal"  => steps=[], message non-empty, responder_instruction=""
+    - status="success"  => steps non-empty, message="",
+    - status="followup" => steps=[], message non-empty,
+    - status="refusal"  => steps=[], message non-empty,
     """
 
     status: Literal["success", "followup", "refusal"] = "success"
     message: str = ""
-    responder_instruction: str = ""
 
     steps: List[PlannerStep] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _validate_planner_contract(self) -> "PlannerResult":
         self.message = (self.message or "").strip()
-        self.responder_instruction = (self.responder_instruction or "").strip()
 
         if self.status == "followup":
             if not self.message:
                 raise ValueError("status=followup requires non-empty message")
             if self.steps:
                 raise ValueError("status=followup requires steps=[]")
-            self.responder_instruction = ""
+
             return self
 
         if self.status == "refusal":
@@ -193,22 +189,22 @@ class PlannerResult(BuddyBaseModel):
                 raise ValueError("status=refusal requires non-empty message")
             if self.steps:
                 raise ValueError("status=refusal requires steps=[]")
-            self.responder_instruction = ""
+
             return self
 
         # success branch
         self.message = ""
 
-        # validate input_steps reference earlier steps only
+        # validate depends_on reference earlier steps only
         seen = set()
         for step in self.steps:
             if step.step_id in seen:
                 raise ValueError(f"Duplicate step_id: {step.step_id}")
             seen.add(step.step_id)
-            for dep in step.input_steps:
+            for dep in step.depends_on:
                 if dep >= step.step_id:
                     raise ValueError(
-                        f"step {step.step_id} input_steps invalid step_id"
+                        f"step {step.step_id} depends_on invalid step_id"
                         f" {dep} (must reference earlier step)"
                     )
 

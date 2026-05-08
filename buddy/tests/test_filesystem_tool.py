@@ -71,7 +71,7 @@ class TestValidation:
 
     def test_rejects_relative_destination(self, fs):
         with pytest.raises(Exception, match="absolute"):
-            fs.parse_call({"action": "copy", "path": "/tmp/a", "destination": "relative/dest"})
+            fs.parse_call({"action": "copy", "paths": ["/tmp/a"], "destination_dir": "relative/dest"})
 
     def test_file_types_normalised(self, fs):
         call = fs.parse_call({"action": "search", "path": "/tmp", "file_types": [".PDF", "TXT"]})
@@ -290,19 +290,29 @@ class TestWriteDelete:
 
     def test_delete_file(self, fs, tmp_dir):
         path = str(tmp_dir / "notes.txt")
-        r = fs.execute(fs.parse_call({"action": "delete", "path": path}))
+        r = fs.execute(fs.parse_call({"action": "delete", "paths": [path], "confirmed": True}))
         assert r["OK"] is True
+        assert r["SUCCEEDED"] == 1
         assert not Path(path).exists()
+
+    def test_delete_multiple(self, fs, tmp_dir):
+        p1 = str(tmp_dir / "notes.txt")
+        p2 = str(tmp_dir / "subdir" / "report.txt")
+        r = fs.execute(fs.parse_call({"action": "delete", "paths": [p1, p2], "confirmed": True}))
+        assert r["OK"] is True
+        assert r["TOTAL"] == 2
+        assert not Path(p1).exists()
+        assert not Path(p2).exists()
 
     def test_delete_directory(self, fs, tmp_dir):
         path = str(tmp_dir / "subdir")
-        r = fs.execute(fs.parse_call({"action": "delete", "path": path}))
+        r = fs.execute(fs.parse_call({"action": "delete", "paths": [path], "confirmed": True}))
         assert r["OK"] is True
         assert not Path(path).exists()
 
     def test_delete_nonexistent(self, fs, tmp_dir):
-        r = fs.execute(fs.parse_call({"action": "delete", "path": str(tmp_dir / "ghost.txt")}))
-        assert r["OK"] is False
+        r = fs.execute(fs.parse_call({"action": "delete", "paths": [str(tmp_dir / "ghost.txt")], "confirmed": True}))
+        assert r["OK"] is True  # already absent counts as success
 
 
 # ===========================================================
@@ -312,24 +322,35 @@ class TestWriteDelete:
 class TestCopyMove:
     def test_copy_file(self, fs, tmp_dir):
         src = str(tmp_dir / "notes.txt")
-        dst = str(tmp_dir / "notes_copy.txt")
-        r = fs.execute(fs.parse_call({"action": "copy", "path": src, "destination": dst}))
+        dst_dir = str(tmp_dir / "copy_dest")
+        r = fs.execute(fs.parse_call({"action": "copy", "paths": [src], "destination_dir": dst_dir}))
         assert r["OK"] is True
+        assert r["SUCCEEDED"] == 1
         assert Path(src).exists()
-        assert Path(dst).exists()
+        assert Path(dst_dir, "notes.txt").exists()
+
+    def test_copy_multiple_files(self, fs, tmp_dir):
+        src1 = str(tmp_dir / "notes.txt")
+        src2 = str(tmp_dir / "subdir" / "report.txt")
+        dst_dir = str(tmp_dir / "copy_dest")
+        r = fs.execute(fs.parse_call({"action": "copy", "paths": [src1, src2], "destination_dir": dst_dir}))
+        assert r["OK"] is True
+        assert r["TOTAL"] == 2
+        assert r["SUCCEEDED"] == 2
 
     def test_move_file(self, fs, tmp_dir):
         src = str(tmp_dir / "notes.txt")
-        dst = str(tmp_dir / "notes_moved.txt")
-        r = fs.execute(fs.parse_call({"action": "move", "path": src, "destination": dst}))
+        dst_dir = str(tmp_dir / "move_dest")
+        r = fs.execute(fs.parse_call({"action": "move", "paths": [src], "destination_dir": dst_dir}))
         assert r["OK"] is True
+        assert r["SUCCEEDED"] == 1
         assert not Path(src).exists()
-        assert Path(dst).exists()
+        assert Path(dst_dir, "notes.txt").exists()
 
-    def test_copy_requires_destination(self, fs, tmp_dir):
-        r = fs.execute(fs.parse_call({"action": "copy", "path": str(tmp_dir / "notes.txt")}))
+    def test_copy_requires_destination_dir(self, fs, tmp_dir):
+        r = fs.execute(fs.parse_call({"action": "copy", "paths": [str(tmp_dir / "notes.txt")]}))
         assert r["OK"] is False
 
-    def test_move_requires_destination(self, fs, tmp_dir):
-        r = fs.execute(fs.parse_call({"action": "move", "path": str(tmp_dir / "notes.txt")}))
+    def test_move_requires_destination_dir(self, fs, tmp_dir):
+        r = fs.execute(fs.parse_call({"action": "move", "paths": [str(tmp_dir / "notes.txt")]}))
         assert r["OK"] is False

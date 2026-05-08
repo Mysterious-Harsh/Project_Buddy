@@ -15,7 +15,7 @@ logger = get_logger("action_router")
 # ==========================================================
 # Success output projection — lean responder-friendly output
 # ==========================================================
-_ALWAYS_STRIP = {"OK", "TOOL"}
+_ALWAYS_STRIP = {"STATUS", "TOOL"}
 
 # Precompute FS fields for O(1) lookup
 _FS_FIELDS = frozenset({
@@ -49,6 +49,7 @@ _FS_FIELDS = frozenset({
     "NOTE",
     "NEEDS_CONFIRMATION",
     "PREVIEW",
+    "GLOB_WARNINGS",
 })
 
 
@@ -111,6 +112,13 @@ def _project_success(tool_name: str, result: Dict[str, Any]) -> Dict[str, Any]:
     if tool_name == "clipboard":
         return {k: v for k, v in result.items() if k not in _ALWAYS_STRIP}
 
+    if tool_name == "analyzer":
+        if "ANALYSIS" in result:
+            return {"ANALYSIS": result["ANALYSIS"]}
+        if "SUMMARY" in result:
+            return {"SUMMARY": result["SUMMARY"]}
+        return {}
+
     # vision, unknown — strip OK/TOOL only
     return {k: v for k, v in result.items() if k not in _ALWAYS_STRIP}
 
@@ -125,6 +133,7 @@ _TOOL_VERB: Dict[str, str] = {
     "system_control": "Taking hold...",
     "browser": "Wandering through...",
     "clipboard": "Holding onto that...",
+    "analyzer": "Thinking it through...",
 }
 
 
@@ -334,8 +343,9 @@ class ActionRouter:
         # Registry loaded once at init
         self._registry = ToolRegistry()
         _tools = self._registry.available_tools()
-        # Removed indent=2 for smaller payloads & faster serialization
-        self._available_tools_str = json.dumps(_tools, ensure_ascii=False)
+        self._available_tools_str = "\n".join(
+            f"{t['name']}  –  {t['description']}" for t in _tools
+        )
         self._registry_tools: List[str] = [t["name"] for t in _tools]
 
         logger.debug("ActionRouter initialized with brain=%s", type(brain).__name__)
@@ -400,10 +410,6 @@ class ActionRouter:
                     "now_iso": now_iso,
                     "timezone": timezone,
                     "planner": {},
-                    "responder_instruction": (
-                        "Buddy's planning failed due to an internal error. "
-                        "Tell the user something went wrong and ask them to try again."
-                    ),
                     "step_execution_map": {},
                 }
 
@@ -467,9 +473,6 @@ class ActionRouter:
                 "planner returned no steps and no refusal/followup (%.2fs)", planner_dt
             )
 
-        responder_instruction = str(
-            planner_parsed.get("responder_instruction") or ""
-        ).strip()
         steps = (
             planner_parsed.get("steps") or []
             if isinstance(planner_parsed, dict)
@@ -477,23 +480,12 @@ class ActionRouter:
         )
 
         if not steps:
-            if _status == "refusal":
-                refusal_msg = str(planner_parsed.get("message") or "").strip()
-                responder_instruction = (
-                    f"Could not do this — capability not available: {refusal_msg}. Tell"
-                    " the user plainly what can't be done and suggest the nearest"
-                    " alternative."
-                )
-            elif _status not in ("followup",):
-                responder_instruction = (
-                    "Buddy failed to plan this action due to an internal error. "
-                    "Tell the user something went wrong and offer to retry."
-                )
+            refusal_msg = str(planner_parsed.get("message") or "").strip()
             return {
                 "now_iso": now_iso,
                 "timezone": timezone,
                 "planner": planner_parsed,
-                "responder_instruction": responder_instruction,
+                "refusal_msg": refusal_msg,
                 "step_execution_map": {},
             }
 
@@ -506,20 +498,20 @@ class ActionRouter:
         for step in steps:
             step_id = int(step.get("step_id") or 0)
             tool_name = str(step.get("tool") or "").strip()
-            output_name = str(step.get("output") or "").strip()
             goal = str(step.get("goal") or "").strip()
             instruction = str(step.get("instruction") or "").strip()
             hints = str(step.get("hints") or "").strip()
 
             instruction_dict = {
-                "Execution_Step_Id": step_id,
+                "Current_Step": step_id,
+                "Total_Steps": len(steps),
                 "Goal": goal,
                 "Instruction": instruction,
                 "Hints": hints,
             }
 
-            input_steps = step.get("input_steps", []) if isinstance(step, dict) else []
-            input_steps = input_steps if isinstance(input_steps, list) else []
+            depends_on = step.get("depends_on", []) if isinstance(step, dict) else []
+            depends_on = depends_on if isinstance(depends_on, list) else []
 
             # validate step
             if step_id < 1 or not tool_name or not instruction:
@@ -537,17 +529,14 @@ class ActionRouter:
                         ),
                     },
                 }
-                logger.error(
-                    "step invalid sid=%s tool=%s output=%s", sid, tool_name, output_name
-                )
+                logger.error("step invalid sid=%s tool=%s", sid, tool_name)
                 break
 
             logger.info(
-                "step %d start tool=%s output=%s deps=%s",
+                "step %d start tool=%s deps=%s",
                 step_id,
                 tool_name,
-                output_name,
-                input_steps,
+                depends_on,
             )
 
             # Show tool-mapped action verb in the spinner
@@ -559,14 +548,21 @@ class ActionRouter:
                     pass
 
             # Build prior_outputs (DATA FLOW)
+            # Each entry includes tool, goal, status, and output_data so the executor has
+            # full context about what ran and what it produced.
+            # If planner omitted depends_on, include all completed prior steps as a safety net.
             prior_outputs: Dict[str, Any] = {}
-            for dep_id in input_steps:
+            dep_ids = depends_on if depends_on else list(step_execution_map.keys())
+            for dep_id in dep_ids:
                 dep_key = str(dep_id)
                 dep_entry = step_execution_map.get(dep_key)
-                if dep_entry and dep_entry.get("output_name"):
-                    prior_outputs[str(dep_entry["output_name"])] = dep_entry.get(
-                        "output_data"
-                    )
+                if dep_entry:
+                    prior_outputs["Step_" + dep_key] = {
+                        "tool": dep_entry.get("tool"),
+                        "goal": dep_entry.get("goal"),
+                        "status": dep_entry.get("status"),
+                        "output": dep_entry.get("output_data"),
+                    }
 
             # Resolve tool
             tool = registry.get(tool_name)
@@ -640,7 +636,7 @@ class ActionRouter:
                     )
                     self.errors.add(
                         tool_result={
-                            "OK": False,
+                            "STATUS": "failed",
                             "ERROR": f"Executor LLM call raised: {exc}",
                         },
                         attempt=attempt,
@@ -765,47 +761,17 @@ class ActionRouter:
 
                 # 4) Evaluate tool result
                 ok = (
-                    bool(tool_exec_result.get("OK", False))
-                    if isinstance(tool_exec_result, dict)
-                    else False
+                    isinstance(tool_exec_result, dict)
+                    and tool_exec_result.get("STATUS") == "success"
                 )
 
-                # compact result summary for the log
-                if isinstance(tool_exec_result, dict):
-                    _summary_parts = []
-                    if "ACTION" in tool_exec_result:
-                        _summary_parts.append(f"action={tool_exec_result['ACTION']}")
-                    if "TOTAL_FOUND" in tool_exec_result:
-                        _summary_parts.append(
-                            f"found={tool_exec_result['TOTAL_FOUND']}"
-                        )
-                    if (
-                        "SIZE_BYTES" in tool_exec_result
-                        and tool_exec_result["SIZE_BYTES"] is not None
-                    ):
-                        _summary_parts.append(f"size={tool_exec_result['SIZE_BYTES']}B")
-                    if "EXIT_CODE" in tool_exec_result:
-                        _summary_parts.append(f"exit={tool_exec_result['EXIT_CODE']}")
-                    if not ok and tool_exec_result.get("ERROR"):
-                        _summary_parts.append(
-                            f"error={str(tool_exec_result['ERROR'])[:120]}"
-                        )
-                    elif not ok and tool_exec_result.get("STDERR"):
-                        _summary_parts.append(
-                            f"stderr={str(tool_exec_result['STDERR'])[:120]}"
-                        )
-                    _result_summary = (
-                        "   ".join(_summary_parts) or "(no summary fields)"
-                    )
-                else:
-                    _result_summary = str(tool_exec_result)[:120]
-
                 logger.info(
-                    "step %d attempt %d tool_done ok=%s %s",
+                    "step %d attempt %d tool_done status=%s error=%s",
                     step_id,
                     attempt,
-                    ok,
-                    _result_summary,
+                    tool_exec_result.get("STATUS") if isinstance(tool_exec_result, dict) else "unknown",
+                    str(tool_exec_result.get("ERROR") or tool_exec_result.get("STDERR") or "")[:120]
+                    if isinstance(tool_exec_result, dict) and not ok else "",
                 )
 
                 if ok:
@@ -814,7 +780,6 @@ class ActionRouter:
                         "tool": tool_name,
                         "goal": goal,
                         "status": "success",
-                        "output_name": output_name,
                         "output_data": _project_success(tool_name, tool_exec_result),
                     }
                     logger.info("step %d success tool=%s", step_id, tool_name)
@@ -865,7 +830,7 @@ class ActionRouter:
             "now_iso": now_iso,
             "timezone": timezone,
             "planner": planner_parsed,
-            "responder_instruction": responder_instruction,
+            "responder_instruction": planner_instructions,
             "step_execution_map": step_execution_map,
         }
 

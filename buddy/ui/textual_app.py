@@ -108,9 +108,6 @@ _STREAM_BUF_MAXLEN = 400
 _THINK_TAG = "</think>"
 _THINK_SUFFIX_LEN = len(_THINK_TAG) * 2  # small rolling window
 
-# Timeout (seconds) for pipeline_input() waiting for user follow-up (FIX-06).
-_PIPELINE_INPUT_TIMEOUT = 300.0
-
 
 # ──────────────────────────────────────────────────────────────────────────────
 # SplashScreen — full-screen logo + face animation, shown before boot log
@@ -805,28 +802,13 @@ class MainScreen(Screen):
                 self._start_spinner(current_label, "thinking")
 
             async def pipeline_input() -> str:
-                """
-                Wait for user follow-up input.
-
-                FIX-06: bounded wait (timeout) + quit-event awareness so the
-                coroutine never hangs forever on app exit or crash.
-                """
                 self._notify_activity()
                 with self._state_lock:
                     self._sys_state.pipeline_running = False
                 self._stop_spinner()
 
-                try:
-                    result = await asyncio.wait_for(
-                        self._iq.get(), timeout=_PIPELINE_INPUT_TIMEOUT
-                    )
-                except asyncio.TimeoutError:
-                    logger.info(
-                        "pipeline_input: timed out after %.0fs", _PIPELINE_INPUT_TIMEOUT
-                    )
-                    raise asyncio.CancelledError("pipeline_input timed out")
+                result = await self._iq.get()
 
-                # Also abort cleanly if the app is shutting down.
                 if self._quit_event.is_set():
                     raise asyncio.CancelledError("app is exiting")
 
@@ -854,12 +836,16 @@ class MainScreen(Screen):
                 logger.info(
                     "turn.cancelled id=%s reason=%r", turn_id, self._interrupt_reason
                 )
-                _convs = getattr(
-                    getattr(self._state, "artifacts", None), "conversations", None
-                )
-                if _convs is not None:
-                    _reason = self._interrupt_reason or "you interrupted me"
-                    _convs.add_buddy_if_unanswered(f"I got interrupted — {_reason}.")
+                if not self._quit_event.is_set():
+                    _convs = getattr(
+                        getattr(self._state, "artifacts", None), "conversations", None
+                    )
+                    if _convs is not None:
+                        _reason = self._interrupt_reason or "you interrupted me"
+                        _msg = f"I got interrupted — {_reason}."
+                        _convs.add_buddy_if_unanswered(_msg)
+                        if self._w_chat_log:
+                            await self._w_chat_log.add_message(_msg, "buddy")
             except Exception as ex:
                 logger.exception("turn.crash id=%s err=%r", turn_id, ex)
                 if self._w_status_bar:

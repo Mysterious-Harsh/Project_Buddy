@@ -1841,7 +1841,7 @@ language = "{language}"
     # Patch engine in existing [web_search] section, or append a new one
     if "[web_search]" in text:
         if _re.search(r"(?m)^engine\s*=", text):
-            text = _re.sub(r'(?m)^engine\s*=.*$', f'engine = "{web_engine}"', text)
+            text = _re.sub(r"(?m)^engine\s*=.*$", f'engine = "{web_engine}"', text)
         else:
             text = _re.sub(r"(\[web_search\])", f'\\1\nengine = "{web_engine}"', text)
     else:
@@ -2451,8 +2451,14 @@ def bootstrap(
                     _web_engine = "duckduckgo"
                 sp = _ui_step(opts.show_boot_ui, "Starting SearXNG")
 
-            if _web_engine == "searxng" and _auto_update and _searxng_installed(_searxng_dir):
-                _sp_sxng_upd = _ui_step(opts.show_boot_ui, "Checking SearXNG for updates")
+            if (
+                _web_engine == "searxng"
+                and _auto_update
+                and _searxng_installed(_searxng_dir)
+            ):
+                _sp_sxng_upd = _ui_step(
+                    opts.show_boot_ui, "Checking SearXNG for updates"
+                )
                 update_searxng(_searxng_dir, on_progress=lambda m, _d: _ui_info(m))
                 _sp_sxng_upd.stop()
 
@@ -2622,15 +2628,6 @@ def bootstrap(
                 str(host),
                 "--port",
                 str(int(port)),
-                "--n-gpu-layers",
-                "-1",
-                "--batch-size",
-                "1024",
-                "--threads",
-                "-1",
-                "--flash-attn",
-                "on",
-                "--mmap",
                 *clean,
             ]
 
@@ -2647,7 +2644,9 @@ def bootstrap(
             # ignore unknown kwargs so this is safe to inject always.
             if "--chat-template-kwargs" not in cmd:
                 cmd.extend(["--chat-template-kwargs", '{"enable_thinking":true}'])
-                logger.info("llama-server: injected --chat-template-kwargs enable_thinking=true")
+                logger.info(
+                    "llama-server: injected --chat-template-kwargs enable_thinking=true"
+                )
             # ─────────────────────────────────────────────────────────
 
             sp = _ui_step(opts.show_boot_ui, "Starting llama-server")
@@ -2803,8 +2802,8 @@ def bootstrap(
             _boot_cmd: List[str] = llama_info.get("cmd") or []
             _arg_pairs = {
                 "--n-gpu-layers": "n_gpu_layers",
-                "-ngl":           "n_gpu_layers",
-                "--flash-attn":   "_flash_attn_raw",
+                "-ngl": "n_gpu_layers",
+                "--flash-attn": "_flash_attn_raw",
                 "--cache-type-k": "_kv_k",
                 "--cache-type-v": "_kv_v",
             }

@@ -71,17 +71,43 @@ TOOL_DESCRIPTION: Read, write, search, and manage files and directories. All pat
   </function>
 
   <function>
-    <name>manage</name>
-    <description>Copy, move, delete, make directory, or diff two files.</description>
+    <name>diff</name>
+    <description>Show a unified diff between two text files.</description>
     <parameters>
-      - path (string, REQUIRED) — absolute source path
-      - action (string, REQUIRED) — "copy" | "move" | "delete" | "mkdir" | "diff"
-      - destination (string, OPTIONAL) — absolute destination; required for copy, move, diff
-      - confirmed (boolean, OPTIONAL, default: false) — must be true for delete, move, copy to existing destination
+      - path_a (string, REQUIRED) — absolute path to the first file
+      - path_b (string, REQUIRED) — absolute path to the second file
     </parameters>
-    <returns>OK, ACTION, PATH, DESTINATION, NOTE</returns>
+    <returns>OK, PATH_A, PATH_B, DIFF, TRUNCATED</returns>
+    <destructive>NO</destructive>
+    <confirmation_required>NO</confirmation_required>
+  </function>
+
+  <function>
+    <name>manage</name>
+    <description>Copy, move, delete, or make directories — operates on multiple paths in one call. Use transfers for copy/move to multiple destinations at once.</description>
+    <parameters>
+      - action (string, REQUIRED) — "copy" | "move" | "delete" | "mkdir"
+      - paths (array, OPTIONAL) — list of absolute source paths; glob patterns supported (e.g. "/dir/*.pdf"); not applicable to mkdir; required when transfers is absent
+      - destination_dir (string, OPTIONAL) — absolute target directory; required for copy/move when transfers is absent
+      - transfers (array, OPTIONAL) — batch copy/move to multiple destinations in one call; each entry: {paths: [...], destination_dir: "..."}; overrides paths + destination_dir
+      - permanent (boolean, OPTIONAL, default: false) — delete only: permanently deletes instead of moving to trash; use only when user explicitly asks for permanent deletion
+      - confirmed (boolean, OPTIONAL, default: false) — must be true for delete, and for copy/move when destinations already exist
+    </parameters>
+    <returns>OK, ACTION, TOTAL, SUCCEEDED, FAILED, RESULTS[]</returns>
     <destructive>CONDITIONAL — delete, move, copy over existing destination</destructive>
-    <confirmation_required>YES — delete, move, and copy when destination already exists</confirmation_required>
+    <confirmation_required>YES — delete always; copy/move when destination_dir contents would be overwritten</confirmation_required>
+  </function>
+
+  <function>
+    <name>rename</name>
+    <description>Rename one or more files or directories in place — does not move them to a different directory.</description>
+    <parameters>
+      - renames (array, REQUIRED) — list of {path, new_name} pairs; path is absolute; new_name is filename only (no slashes)
+      - confirmed (boolean, OPTIONAL, default: false) — must be true when new_name already exists at that location
+    </parameters>
+    <returns>OK, ACTION, TOTAL, SUCCEEDED, FAILED, RESULTS[]</returns>
+    <destructive>CONDITIONAL — when new_name already exists at that location</destructive>
+    <confirmation_required>YES — when new_name already exists</confirmation_required>
   </function>
 </functions>
 
@@ -113,21 +139,45 @@ TOOL_DESCRIPTION: Read, write, search, and manage files and directories. All pat
        If matched multiple times → expand old_str with surrounding lines until unique.
 
 5. SAFETY
-   5.1 Destructive actions: write create on existing file, delete, move, copy to existing destination.
+   5.1 Destructive actions: write create on existing file, delete, move, copy to existing destination_dir.
    5.2 THE GATE — NO EXCEPTIONS:
-       1. Check prior turns for explicit confirmation of this exact action on this exact path.
-       2. Not confirmed → status="followup". State what will be affected and whether it is reversible.
+       1. Check prior turns for explicit confirmation of this exact action on these exact paths.
+       2. Not confirmed → status="followup". State all paths affected and whether it is reversible.
        3. Confirmed → set confirmed=true and construct the call.
    5.3 Only an explicit YES in prior turns counts. Implied intent, goal necessity, or reasoning does not.
 
-6. CHECKLIST
+6. MANAGE — USAGE RULES
+   6.1 paths must always be a list, even for a single item: ["path/to/file"].
+   6.2 destination_dir must be a directory path — files are placed inside it by name.
+   6.3 For mkdir: paths is the list of directories to create; destination_dir is not used.
+   6.4 RESULTS[] in the response contains a per-path outcome — check FAILED count before reporting success.
+   6.5 Glob patterns in paths are expanded automatically (e.g. ["/dir/*.pdf"] moves all PDFs).
+       If a pattern matches nothing, GLOB_WARNINGS lists it. TOTAL reflects only the matched files.
+   6.6 USE transfers WHEN FILES GO TO MULTIPLE DESTINATIONS IN ONE STEP:
+       transfers: [
+         {"paths": ["/dir/a.pdf", "/dir/b.pdf"], "destination_dir": "/dest/pdf"},
+         {"paths": ["/dir/img.jpg"],              "destination_dir": "/dest/images"}
+       ]
+       When transfers is set, paths and destination_dir at the top level are ignored.
+
+7. RENAME — USAGE RULES
+   7.1 renames must always be a list, even for a single item.
+   7.2 new_name is a filename only — no directory separators allowed.
+       To move AND rename, use manage with action="move" instead.
+   7.3 Each rename happens in place — the file stays in the same directory.
+
+8. CHECKLIST
    □ Path is absolute and resolved from inputs — not constructed or guessed
    □ ls for directories, read for files — never mixed
    □ action is one of the exact allowed values for that function
    □ For read tabular: filter added if prior result showed NEEDS_CONFIRMATION or large row count
    □ For patch: old_str will match exactly once — if unsure, read the file first
    □ For write create on existing: confirmed=true and prior turn has explicit YES
-   □ For delete/move/copy to existing: confirmed=true and prior turn has explicit YES
+   □ For manage delete/move/copy to existing: confirmed=true and prior turn has explicit YES
+   □ For manage copy/move single destination: destination_dir is a directory path, paths is a list
+   □ For manage copy/move multiple destinations: use transfers array instead of paths + destination_dir
+   □ For rename: new_name has no slashes; confirmed=true only when target already exists
+   □ For diff: both path_a and path_b must be existing files, not directories
 
 </tool_rules>
 
@@ -144,7 +194,10 @@ Read only when <errors> is present in context.
    G. BINARY FILE — returns NEEDS_CONFIRMATION. Call again with confirmed=true to open with system app.
    H. TABULAR TOO LARGE — add pandas_query, columns, or search_pattern to reduce output size.
    I. ENCODING ERROR — retry with encoding="latin-1".
-   J. UNCLASSIFIED — status="followup" with the exact error and one specific question.
+   J. MANAGE PARTIAL FAILURE — check RESULTS[] for per-path errors; fix and retry only the failed paths.
+   K. RENAME TARGET EXISTS — not confirmed → status="followup". Confirmed → set confirmed=true.
+   L. RENAME new_name HAS SLASHES — remove directory separators; use manage move if relocation is needed.
+   M. UNCLASSIFIED — status="followup" with the exact error and one specific question.
 
 2. RETRY RULES
    2.1 Never repeat the identical call that already failed.

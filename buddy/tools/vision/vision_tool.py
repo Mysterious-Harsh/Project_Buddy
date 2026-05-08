@@ -147,14 +147,14 @@ class VisionTool:
         try:
             call = self.parse_call(arguments)
         except Exception as e:
-            return {"OK": False, "ACTION": "", "PATHS": [], "ERROR": str(e)}
+            return {"STATUS": "failed", "ACTION": "", "PATHS": [], "ERROR": str(e)}
 
         if brain is None:
             logger.error(
                 "vision_tool.execute called without brain — cannot analyze image"
             )
             return {
-                "OK": False,
+                "STATUS": "failed",
                 "ACTION": call.action,
                 "PATHS": call.paths,
                 "ERROR": (
@@ -173,7 +173,7 @@ class VisionTool:
             except Exception as exc:
                 logger.warning("vision_tool screenshot capture failed: %r", exc)
                 return {
-                    "OK": False,
+                    "STATUS": "failed",
                     "ACTION": "screenshot",
                     "PATHS": [],
                     "ERROR": f"Screenshot capture failed: {exc}",
@@ -216,7 +216,7 @@ class VisionTool:
                 result["error"],
             )
             return {
-                "OK": False,
+                "STATUS": "failed",
                 "ACTION": call.action,
                 "PATHS": call.paths,
                 "ERROR": result["error"],
@@ -237,7 +237,7 @@ class VisionTool:
         )
 
         result_dict: Dict[str, Any] = {
-            "OK": True,
+            "STATUS": "success",
             "ACTION": call.action,
             "PATHS": call.paths,
             "DESCRIPTION": description,

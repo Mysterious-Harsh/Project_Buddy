@@ -56,6 +56,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import threading
 import time
 import zipfile
 from pathlib import Path
@@ -468,6 +469,33 @@ engines:
 # ═══════════════════════════════════════════════════════════
 
 
+def _is_online(timeout: float = 6.0) -> bool:
+    """Return True if any well-known host is reachable — quick offline guard."""
+    # Mix of DNS (53), HTTPS (443), and HTTP (80) so at least one port gets
+    # through on networks that block raw outbound DNS to public resolvers.
+    hosts = [
+        ("8.8.8.8",   53),
+        ("1.1.1.1",   53),
+        ("8.8.8.8",  443),
+        ("1.1.1.1",  443),
+        ("8.8.4.4",   80),
+    ]
+    result = threading.Event()
+
+    def _probe(host: tuple) -> None:
+        try:
+            with socket.create_connection(host, timeout=timeout):
+                result.set()
+        except Exception:
+            pass
+
+    threads = [threading.Thread(target=_probe, args=(h,), daemon=True) for h in hosts]
+    for t in threads:
+        t.start()
+    result.wait(timeout=timeout + 0.5)
+    return result.is_set()
+
+
 def _run(
     cmd: list[str],
     *,
@@ -477,7 +505,12 @@ def _run(
     on_progress: Optional[Callable] = None,
     label: str = "",
 ) -> bool:
-    """Run a subprocess, stream output lines to on_progress. Returns success."""
+    """
+    Run a subprocess and stream output lines to on_progress.
+
+    Uses a reader thread so the timeout is enforced even when the subprocess
+    produces no output (e.g. git fetch hanging on a dropped network).
+    """
     try:
         proc = subprocess.Popen(
             cmd,
@@ -487,20 +520,27 @@ def _run(
             stderr=subprocess.STDOUT,
             text=True,
         )
-        t0 = time.time()
-        while True:
-            line = proc.stdout.readline() if proc.stdout else ""
-            if line:
-                stripped = line.rstrip()
-                logger.debug("%s: %s", label or cmd[0], stripped)
-                if on_progress and stripped:
-                    on_progress(f"  {stripped}", False)
-            elif proc.poll() is not None:
-                break
-            if time.time() - t0 > timeout:
-                proc.kill()
-                logger.error("%s timed out after %.0fs", label, timeout)
-                return False
+
+        def _reader() -> None:
+            try:
+                for line in proc.stdout:
+                    stripped = line.rstrip()
+                    if stripped:
+                        logger.debug("%s: %s", label or cmd[0], stripped)
+                        if on_progress:
+                            on_progress(f"  {stripped}", False)
+            except Exception:
+                pass
+
+        t = threading.Thread(target=_reader, daemon=True)
+        t.start()
+        t.join(timeout=timeout)
+
+        if t.is_alive():
+            proc.kill()
+            t.join(2.0)
+            logger.error("%s timed out after %.0fs", label, timeout)
+            return False
 
         return proc.returncode == 0
     except Exception as ex:
@@ -645,6 +685,12 @@ def update_searxng(
     Always returns True (update is best-effort).
     """
     if not is_installed(searxng_dir):
+        return True
+
+    if not _is_online():
+        logger.info("SearXNG update check skipped — offline")
+        if on_progress:
+            on_progress("SearXNG update check skipped (offline)", True)
         return True
 
     p        = _paths(searxng_dir)

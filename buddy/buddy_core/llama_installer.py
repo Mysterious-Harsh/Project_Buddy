@@ -28,6 +28,7 @@ from __future__ import annotations
 import os
 import platform
 import shutil
+import socket
 import stat
 import sys
 import tarfile
@@ -48,6 +49,15 @@ _TIMEOUT_READ = 30.0   # read timeout for API calls
 _CHUNK        = 65536  # download chunk size
 _VERSION_FILE    = "llama_version.txt"    # tracks installed release tag in bin_dir
 _LAST_CHECK_FILE = "llama_last_check.txt" # epoch timestamp of last update check
+
+
+def _is_online(timeout: float = 2.0) -> bool:
+    """Return True if we can reach a well-known host — quick offline guard."""
+    try:
+        socket.create_connection(("8.8.8.8", 53), timeout=timeout)
+        return True
+    except Exception:
+        return False
 
 
 # ═══════════════════════════════════════════════════════════
@@ -469,6 +479,13 @@ def check_and_update_llama(
 
     if not find_existing_binary(bin_dir):
         return True  # not installed yet — ensure_llama_binary() handles first install
+
+    # Fast offline guard — skip network round-trip immediately
+    if not _is_online():
+        logger.info("llama.cpp update check skipped — offline")
+        if on_progress:
+            on_progress("llama.cpp update check skipped (offline)", True)
+        return True
 
     # Cooldown guard — skip if checked recently
     last_check = _get_last_check_time(bin_dir)

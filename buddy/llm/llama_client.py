@@ -1127,6 +1127,7 @@ class LlamaClient:
         think_tail = ""
         think_block_parts: List[str] = []
         think_block_sealed = not think
+        post_think_parts: List[str] = []
 
         gate_marker_str = gate_marker
         gate_open = think_passed and (gate_marker_str is None)
@@ -1276,6 +1277,11 @@ class LlamaClient:
                         gate_open = gate_marker_str is None
                         gate_tail = ""
 
+                    # Always capture raw post-think output so it is never lost
+                    # when JSON extraction fails — enables retry with real content
+                    if think_passed:
+                        post_think_parts.append(_json_piece)
+
                     if not gate_open and gate_marker_str is not None:
                         scan = gate_tail + _json_piece
                         idx = scan.find(gate_marker_str)
@@ -1381,9 +1387,16 @@ class LlamaClient:
             except Exception:
                 pass
 
+        if not have_valid_json and post_think_parts and self.debug:
+            logger.debug(
+                "llama post_think_fallback: req_id=%s post_think_len=%d",
+                req_id,
+                sum(len(p) for p in post_think_parts),
+            )
         text = (
             valid_json_text
             if (have_valid_json and valid_json_text)
+            else "".join(post_think_parts) if post_think_parts
             else "".join(out_parts)
         )
         dt = perf() - t0
@@ -1492,6 +1505,7 @@ class LlamaClient:
 if __name__ == "__main__":
     import sys
     from buddy.tests.test_brain_prompt import test_brain_prompt
+    from buddy.tests.test_planner_prompt import test_planner_prompt
 
     client = LlamaClient(
         model="local-model",
@@ -1514,15 +1528,15 @@ if __name__ == "__main__":
     try:
         print("\n[stream completion w/ json_extract+validate]")
         think, out = client.generate(
-            prompt=test_brain_prompt,
-            stream=False,
+            prompt=test_planner_prompt,
+            stream=True,
             temperature=0.4,
             top_p=0.96,
             repeat_last_n=64,
-            repeat_penalty=1.0,
+            repeat_penalty=1.06,
             on_delta=on_print,
-            json_extract=False,
-            json_validate=False,
+            json_extract=True,
+            json_validate=True,
             json_root="object",
             stop=["<|im_end|>"],
         )

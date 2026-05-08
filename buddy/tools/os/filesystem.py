@@ -78,7 +78,7 @@ def _truncate(text: str, limit: int) -> tuple[str, bool]:
 
 
 def _ok(path: str = "", **extra: Any) -> Dict[str, Any]:
-    r: Dict[str, Any] = {"OK": True, "TOOL": _TOOL}
+    r: Dict[str, Any] = {"STATUS": "success", "TOOL": _TOOL}
     if path:
         r["PATH"] = path
     r.update(extra)
@@ -86,7 +86,7 @@ def _ok(path: str = "", **extra: Any) -> Dict[str, Any]:
 
 
 def _err(path: str = "", action: str = "", msg: str = "") -> Dict[str, Any]:
-    r: Dict[str, Any] = {"OK": False, "TOOL": _TOOL}
+    r: Dict[str, Any] = {"STATUS": "failed", "TOOL": _TOOL}
     if action:
         r["ACTION"] = action
     if path:
@@ -97,7 +97,7 @@ def _err(path: str = "", action: str = "", msg: str = "") -> Dict[str, Any]:
 
 def _needs_confirm(path: str, preview: str) -> Dict[str, Any]:
     return {
-        "OK": False, "TOOL": _TOOL, "PATH": path,
+        "STATUS": "failed", "TOOL": _TOOL, "PATH": path,
         "NEEDS_CONFIRMATION": True,
         "PREVIEW": preview,
         "NOTE": "Call again with confirmed=true after user approves.",
@@ -173,7 +173,9 @@ class Filesystem:
                 "read   — file content (text/PDF/DOCX/tabular/binary) or metadata\n"
                 "write  — create / append / patch files\n"
                 "find   — files by name glob or content search\n"
-                "manage — copy / move / delete / mkdir / diff"
+                "manage — copy / move / delete / mkdir (batch, multiple paths; transfers for multi-destination)\n"
+                "rename — rename files or directories in place (batch)\n"
+                "diff   — unified diff between two files"
             ),
             "prompt": FILESYSTEM_TOOL_PROMPT,
         }
@@ -198,7 +200,11 @@ class Filesystem:
             return self._find(arguments)
         if fn == "manage":
             return self._manage(arguments)
-        return _err(msg=f"Unknown function: {function!r}. Must be ls, read, write, find, or manage.")
+        if fn == "rename":
+            return self._rename(arguments)
+        if fn == "diff":
+            return self._diff(arguments)
+        return _err(msg=f"Unknown function: {function!r}. Must be ls, read, write, find, manage, rename, or diff.")
 
     # ── ls ───────────────────────────────────────────────────────────────────
 
@@ -478,7 +484,7 @@ class Filesystem:
         if len(rendered) > max_chars:
             preview = self._render_df(df.head(2))
             r: Dict[str, Any] = {
-                "OK": False, "TOOL": _TOOL, "PATH": str(p),
+                "STATUS": "failed", "TOOL": _TOOL, "PATH": str(p),
                 "NEEDS_CONFIRMATION": True,
                 "FORMAT": "table",
                 "ROWS_TOTAL": rows_total,
@@ -751,23 +757,192 @@ class Filesystem:
 
         return _ok(path=path, TYPE="content", PATTERN=pattern, RESULTS=results, TOTAL_FOUND=len(results))
 
+    # ── diff ─────────────────────────────────────────────────────────────────
+
+    def _diff(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        raw_a = str(args.get("path_a") or "").strip()
+        raw_b = str(args.get("path_b") or "").strip()
+        if not raw_a:
+            return _err(msg="path_a is required")
+        if not raw_b:
+            return _err(msg="path_b is required")
+        path_a = _resolve(raw_a)
+        path_b = _resolve(raw_b)
+        pa, pb = Path(path_a), Path(path_b)
+        if not pa.is_file():
+            return _err(path=path_a, msg="path_a must be an existing file")
+        if not pb.is_file():
+            return _err(path=path_b, msg="path_b must be an existing file")
+        import difflib
+        a = pa.read_text(encoding="utf-8", errors="replace").splitlines(keepends=True)
+        b = pb.read_text(encoding="utf-8", errors="replace").splitlines(keepends=True)
+        diff = "".join(difflib.unified_diff(a, b, fromfile=path_a, tofile=path_b))
+        diff, truncated = _truncate(diff or "(files are identical)", _MAX_CHARS)
+        r = _ok(PATH_A=path_a, PATH_B=path_b, DIFF=diff)
+        if truncated:
+            r["TRUNCATED"] = True
+        return r
+
     # ── manage ───────────────────────────────────────────────────────────────
 
+    def _expand_globs(self, path_list: List[str], warnings: List[str]) -> List[str]:
+        if not any("*" in p or "?" in p or "[" in p for p in path_list):
+            return path_list
+        expanded: List[str] = []
+        for p_str in path_list:
+            if "*" in p_str or "?" in p_str or "[" in p_str:
+                matches = sorted(str(m) for m in Path(p_str).parent.glob(Path(p_str).name))
+                if not matches:
+                    warnings.append(f"Pattern '{p_str}' matched no files")
+                else:
+                    expanded.extend(matches)
+            else:
+                expanded.append(p_str)
+        return expanded
+
     def _manage(self, args: Dict[str, Any]) -> Dict[str, Any]:
-        raw = str(args.get("path") or "").strip()
         action = str(args.get("action") or "").strip().lower()
-        if not raw:
-            return _err(msg="path is required")
-        valid = ("copy", "move", "delete", "mkdir", "diff")
+        valid = ("copy", "move", "delete", "mkdir")
         if action not in valid:
             return _err(action=action, msg=f"Invalid action {action!r}. Must be: {', '.join(valid)}")
 
-        path = _resolve(raw)
-        p = Path(path)
         confirmed = bool(args.get("confirmed", False))
-        dest_raw = str(args.get("destination") or "").strip()
-        destination = _resolve(dest_raw) if dest_raw else None
+        permanent = bool(args.get("permanent", False))
 
+        # ── batch transfers (copy/move only) ──────────────────────────────────
+        transfers_raw = args.get("transfers")
+        if transfers_raw and action in ("copy", "move"):
+            if not isinstance(transfers_raw, list):
+                return _err(action=action, msg="transfers must be a list of {paths, destination_dir} objects")
+
+            # Resolve and expand all transfers first
+            transfers: List[Dict[str, Any]] = []
+            for t in transfers_raw:
+                paths_raw = t.get("paths") or []
+                dest_raw = str(t.get("destination_dir") or "").strip()
+                if not paths_raw or not dest_raw:
+                    return _err(action=action, msg="Each transfer must have paths and destination_dir")
+                path_list = [_resolve(str(r).strip()) for r in paths_raw if str(r).strip()]
+                glob_warnings: List[str] = []
+                path_list = self._expand_globs(path_list, glob_warnings)
+                transfers.append({
+                    "paths": path_list,
+                    "destination_dir": _resolve(dest_raw),
+                    "glob_warnings": glob_warnings,
+                })
+
+            # Upfront destructive gate across all transfers
+            if not confirmed:
+                all_conflicts: List[str] = []
+                for t in transfers:
+                    dest_p = Path(t["destination_dir"])
+                    if dest_p.is_dir():
+                        all_conflicts.extend(
+                            str(dest_p / Path(p).name)
+                            for p in t["paths"]
+                            if (dest_p / Path(p).name).exists()
+                        )
+                if all_conflicts:
+                    preview = (
+                        f"Will {action} files to multiple destinations.\n"
+                        f"{len(all_conflicts)} destination(s) already exist and will be overwritten:\n"
+                        + "\n".join(f"  {c}" for c in all_conflicts)
+                    )
+                    return _needs_confirm("(batch transfer)", preview)
+
+            results: List[Dict[str, Any]] = []
+            all_warnings: List[str] = []
+            for t in transfers:
+                all_warnings.extend(t.get("glob_warnings", []))
+                for p_str in t["paths"]:
+                    results.append(self._manage_one(p_str, action, destination_dir=t["destination_dir"], permanent=permanent))
+
+            succeeded = sum(1 for r in results if r.get("STATUS") == "success")
+            out: Dict[str, Any] = {
+                "STATUS": "success" if succeeded == len(results) else "failed",
+                "TOOL": _TOOL,
+                "ACTION": action,
+                "TOTAL": len(results),
+                "SUCCEEDED": succeeded,
+                "FAILED": len(results) - succeeded,
+                "RESULTS": results,
+            }
+            if all_warnings:
+                out["GLOB_WARNINGS"] = all_warnings
+            return out
+
+        # ── single destination (original behaviour) ───────────────────────────
+        paths_raw: Optional[List[Any]] = args.get("paths")
+        if not paths_raw or not isinstance(paths_raw, list):
+            return _err(msg="paths is required and must be a non-empty list of strings")
+
+        path_list = [_resolve(str(r).strip()) for r in paths_raw if str(r).strip()]
+        if not path_list:
+            return _err(msg="paths resolved to an empty list")
+
+        glob_warnings = []
+        if action != "mkdir":
+            path_list = self._expand_globs(path_list, glob_warnings)
+            if not path_list:
+                msg = "No files matched the given pattern(s)"
+                if glob_warnings:
+                    msg += ": " + "; ".join(glob_warnings)
+                return _err(msg=msg)
+
+        dest_raw = str(args.get("destination_dir") or "").strip()
+        destination_dir = _resolve(dest_raw) if dest_raw else None
+
+        if action in ("copy", "move") and not destination_dir:
+            return _err(action=action, msg="destination_dir is required for copy/move")
+
+        if not confirmed and action != "mkdir":
+            if action == "delete":
+                targets = [p for p in path_list if Path(p).exists()]
+                if targets:
+                    dest = "permanently delete" if permanent else "move to trash"
+                    preview = (
+                        f"Will {dest} {len(targets)} item(s):\n"
+                        + "\n".join(f"  {p}" for p in targets)
+                    )
+                    return _needs_confirm("(multiple paths)", preview)
+            elif action in ("copy", "move") and destination_dir:
+                dest_p = Path(destination_dir)
+                if dest_p.is_dir():
+                    conflicts = [
+                        str(dest_p / Path(p).name)
+                        for p in path_list
+                        if (dest_p / Path(p).name).exists()
+                    ]
+                else:
+                    conflicts = [destination_dir] if dest_p.exists() else []
+                if conflicts:
+                    preview = (
+                        f"Will {action} {len(path_list)} item(s) → {destination_dir}\n"
+                        f"{len(conflicts)} destination(s) already exist and will be overwritten:\n"
+                        + "\n".join(f"  {c}" for c in conflicts)
+                    )
+                    return _needs_confirm("(multiple paths)", preview)
+
+        results = []
+        for p_str in path_list:
+            results.append(self._manage_one(p_str, action, destination_dir=destination_dir, permanent=permanent))
+
+        succeeded = sum(1 for r in results if r.get("STATUS") == "success")
+        out = {
+            "STATUS": "success" if succeeded == len(results) else "failed",
+            "TOOL": _TOOL,
+            "ACTION": action,
+            "TOTAL": len(results),
+            "SUCCEEDED": succeeded,
+            "FAILED": len(results) - succeeded,
+            "RESULTS": results,
+        }
+        if glob_warnings:
+            out["GLOB_WARNINGS"] = glob_warnings
+        return out
+
+    def _manage_one(self, path: str, action: str, destination_dir: Optional[str], permanent: bool = False) -> Dict[str, Any]:
+        p = Path(path)
         try:
             if action == "mkdir":
                 p.mkdir(parents=True, exist_ok=True)
@@ -776,42 +951,27 @@ class Filesystem:
             if action == "delete":
                 if not p.exists():
                     return _ok(path=path, ACTION=action, NOTE="Already absent — nothing to delete.")
-                if not confirmed:
-                    return _err(path=path, action=action,
-                                msg="Delete requires confirmed=true after user confirmation. Cannot be undone.")
-                shutil.rmtree(path) if p.is_dir() else p.unlink()
-                return _ok(path=path, ACTION=action)
+                if permanent:
+                    shutil.rmtree(path) if p.is_dir() else p.unlink()
+                else:
+                    try:
+                        import send2trash
+                        send2trash.send2trash(path)
+                    except ImportError:
+                        shutil.rmtree(path) if p.is_dir() else p.unlink()
+                return _ok(path=path, ACTION=action, PERMANENT=permanent)
 
             if action in ("copy", "move"):
-                if not destination:
-                    return _err(path=path, action=action, msg="destination is required")
-                dest = Path(destination)
-                if dest.exists() and not confirmed:
-                    return _err(path=path, action=action,
-                                msg="Destination already exists. Set confirmed=true after user confirmation.")
-                dest.parent.mkdir(parents=True, exist_ok=True)
+                if not destination_dir:
+                    return _err(path=path, action=action, msg="destination_dir is required")
+                dest = Path(destination_dir)
+                actual_dest = dest / p.name if dest.is_dir() else dest
+                actual_dest.parent.mkdir(parents=True, exist_ok=True)
                 if action == "copy":
-                    shutil.copytree(path, destination, dirs_exist_ok=True) if p.is_dir() else shutil.copy2(path, destination)
+                    shutil.copytree(path, str(actual_dest), dirs_exist_ok=True) if p.is_dir() else shutil.copy2(path, str(actual_dest))
                 else:
-                    shutil.move(path, destination)
-                return _ok(path=path, ACTION=action, DESTINATION=destination)
-
-            if action == "diff":
-                if not destination:
-                    return _err(path=path, action=action, msg="destination (second file) is required")
-                if not p.is_file():
-                    return _err(path=path, action=action, msg="path must be a file")
-                if not Path(destination).is_file():
-                    return _err(path=destination, action=action, msg="destination must be a file")
-                import difflib
-                a = p.read_text(encoding="utf-8", errors="replace").splitlines(keepends=True)
-                b = Path(destination).read_text(encoding="utf-8", errors="replace").splitlines(keepends=True)
-                diff = "".join(difflib.unified_diff(a, b, fromfile=path, tofile=destination))
-                diff, truncated = _truncate(diff or "(files are identical)", _MAX_CHARS)
-                r = _ok(path=path, ACTION=action, DESTINATION=destination, DIFF=diff)
-                if truncated:
-                    r["TRUNCATED"] = True
-                return r
+                    shutil.move(path, str(actual_dest))
+                return _ok(path=path, ACTION=action, DESTINATION=str(actual_dest))
 
         except PermissionError:
             return _err(path=path, action=action, msg="Permission denied")
@@ -819,6 +979,66 @@ class Filesystem:
             return _err(path=path, action=action, msg=str(e))
 
         return _err(path=path, action=action, msg="Unreachable")
+
+    # ── rename ────────────────────────────────────────────────────────────────
+
+    def _rename(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        renames_raw = args.get("renames")
+        if not renames_raw or not isinstance(renames_raw, list):
+            return _err(action="rename", msg="renames is required and must be a non-empty list")
+
+        confirmed = bool(args.get("confirmed", False))
+
+        items: List[Dict[str, Any]] = []
+        for r in renames_raw:
+            path_raw = str(r.get("path") or "").strip()
+            new_name = str(r.get("new_name") or "").strip()
+            if not path_raw or not new_name:
+                return _err(action="rename", msg="Each rename entry must have path and new_name")
+            if "/" in new_name or "\\" in new_name:
+                return _err(action="rename", msg=f"new_name must be a filename only, not a path: {new_name!r}")
+            items.append({"path": _resolve(path_raw), "new_name": new_name})
+
+        # Upfront destructive gate
+        if not confirmed:
+            conflicts = [
+                str(Path(item["path"]).parent / item["new_name"])
+                for item in items
+                if (Path(item["path"]).parent / item["new_name"]).exists()
+            ]
+            if conflicts:
+                preview = (
+                    f"Will rename {len(items)} item(s). "
+                    f"{len(conflicts)} target(s) already exist and will be overwritten:\n"
+                    + "\n".join(f"  {c}" for c in conflicts)
+                )
+                return _needs_confirm("(multiple renames)", preview)
+
+        results: List[Dict[str, Any]] = []
+        for item in items:
+            p = Path(item["path"])
+            target = p.parent / item["new_name"]
+            try:
+                if not p.exists():
+                    results.append(_err(path=str(p), action="rename", msg="Path not found"))
+                    continue
+                p.rename(target)
+                results.append(_ok(path=str(p), ACTION="rename", DESTINATION=str(target)))
+            except PermissionError:
+                results.append(_err(path=str(p), action="rename", msg="Permission denied"))
+            except Exception as e:
+                results.append(_err(path=str(p), action="rename", msg=str(e)))
+
+        succeeded = sum(1 for r in results if r.get("STATUS") == "success")
+        return {
+            "STATUS": "success" if succeeded == len(results) else "failed",
+            "TOOL": _TOOL,
+            "ACTION": "rename",
+            "TOTAL": len(results),
+            "SUCCEEDED": succeeded,
+            "FAILED": len(results) - succeeded,
+            "RESULTS": results,
+        }
 
 
 # ── registry ─────────────────────────────────────────────────────────────────

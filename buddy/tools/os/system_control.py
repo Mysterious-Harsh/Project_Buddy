@@ -69,7 +69,7 @@ class SystemControlTool:
         try:
             call = self.parse_call(arguments)
         except Exception as e:
-            return {"OK": False, "ACTION": "", "ERROR": str(e)}
+            return {"STATUS": "failed", "ACTION": "", "ERROR": str(e)}
 
         from buddy.brain.intent_interceptor import interceptor, normalize
 
@@ -82,7 +82,7 @@ class SystemControlTool:
         if quick is None:
             logger.warning("system_control no match | raw=%r normalized=%r", call.action, normalized)
             return {
-                "OK": False,
+                "STATUS": "failed",
                 "ACTION": call.action,
                 "ERROR": f"Could not interpret command: {call.action!r}",
             }
@@ -91,8 +91,8 @@ class SystemControlTool:
         logger.info("system_control | action=%r quick=%s ok=%s reply=%r", call.action, quick.name, success, reply)
 
         if success:
-            return {"OK": True, "ACTION": call.action, "REPLY": reply}
-        return {"OK": False, "ACTION": call.action, "ERROR": reply}
+            return {"STATUS": "success", "ACTION": call.action, "REPLY": reply}
+        return {"STATUS": "failed", "ACTION": call.action, "ERROR": reply}
 
 
 # ==========================================================

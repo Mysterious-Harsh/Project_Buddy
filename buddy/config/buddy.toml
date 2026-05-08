@@ -61,9 +61,9 @@ server_args = [
   "--ctx-size", "16384",
   "--threads", "8",
   "--threads-batch", "8",
-  "--batch-size", "512",
+  "--batch-size", "1024",
   "--mmap",
-  "--no-webui"
+  "--no-webui",
 ]
 
 

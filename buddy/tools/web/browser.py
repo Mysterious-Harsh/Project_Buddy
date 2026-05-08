@@ -122,7 +122,7 @@ _JS_FILL_SEARCH = """(text) => {
 
 def _playwright_not_installed() -> Dict[str, Any]:
     return {
-        "OK": False,
+        "STATUS": "failed",
         "ERROR": (
             "playwright not installed — run: pip install playwright && playwright"
             " install chromium"
@@ -218,7 +218,7 @@ class BrowserTool:
             return self._manage_session(arguments)
 
         return {
-            "OK": False,
+            "STATUS": "failed",
             "ERROR": (
                 f"Unknown function: {fn!r}. Must be run_task, fill_form,"
                 " screenshot_query, check_page, or manage_session."
@@ -244,9 +244,9 @@ class BrowserTool:
         max_actions = max(1, int(args.get("max_actions", _MAX_ACTIONS)))
 
         if not task:
-            return {"OK": False, "ERROR": "task is required"}
+            return {"STATUS": "failed", "ERROR": "task is required"}
         if brain is None:
-            return {"OK": False, "ERROR": "brain is required for run_task"}
+            return {"STATUS": "failed", "ERROR": "brain is required for run_task"}
 
         try:
             from playwright.async_api import async_playwright
@@ -271,7 +271,7 @@ class BrowserTool:
         self._ctx = await _make_context(self._browser, url)
         page = await _new_page(self._ctx)
 
-        result: Dict[str, Any] = {"OK": False, "ERROR": "unexpected exit"}
+        result: Dict[str, Any] = {"STATUS": "failed", "ERROR": "unexpected exit"}
         try:
             result = await self._run_loop(
                 page=page,
@@ -286,10 +286,10 @@ class BrowserTool:
                 max_actions=max_actions,
             )
         except Exception as exc:
-            result = {"OK": False, "ERROR": str(exc)}
+            result = {"STATUS": "failed", "ERROR": str(exc)}
 
         keep_open = result.pop("_keep_open", False)
-        run_ok = result.get("OK", False)
+        run_ok = result.get("STATUS") == "success"
 
         _ie = getattr(brain, "_interrupt_event", None) if brain else None
         interrupted = _ie is not None and _ie.is_set()
@@ -342,7 +342,7 @@ class BrowserTool:
         if url:
             nav_err = await _navigate(page, url)
             if nav_err:
-                return {"OK": False, "ERROR": nav_err}
+                return {"STATUS": "failed", "ERROR": nav_err}
             await _wait_for_interactive(page)
 
         _register_dialog_handler(page)
@@ -371,7 +371,7 @@ class BrowserTool:
             if _ie is not None and _ie.is_set():
                 logger.info("browser: interrupted at step=%d — exiting loop", step)
                 return {
-                    "OK": False,
+                    "STATUS": "failed",
                     "ACTION": "run_task",
                     "ERROR": "Interrupted",
                     "STEPS": step,
@@ -399,7 +399,7 @@ class BrowserTool:
                     url_visit_count[page_url],
                 )
                 return {
-                    "OK": False,
+                    "STATUS": "failed",
                     "ACTION": "run_task",
                     "ERROR": (
                         f"Stuck oscillating — returned to {page_url!r}"
@@ -449,7 +449,7 @@ class BrowserTool:
                 )
                 if consecutive_errors >= _MAX_RETRIES:
                     return {
-                        "OK": False,
+                        "STATUS": "failed",
                         "ACTION": "run_task",
                         "ERROR": (
                             f"Brain failed {_MAX_RETRIES}× consecutively. Last: {exc}"
@@ -487,7 +487,7 @@ class BrowserTool:
                     "browser: infinite loop detected at step=%d fn=%s", step, fn
                 )
                 return {
-                    "OK": False,
+                    "STATUS": "failed",
                     "ACTION": "run_task",
                     "ERROR": f"Stuck in a loop repeating {fn!r} — cannot proceed.",
                     "STEPS": step,
@@ -505,7 +505,7 @@ class BrowserTool:
                     )
                     keep_open = not _parse_close_intent(answer)
                 return {
-                    "OK": True,
+                    "STATUS": "success",
                     "ACTION": "run_task",
                     "TASK": task,
                     "STEPS": step,
@@ -527,7 +527,7 @@ class BrowserTool:
                 )
                 if consecutive_errors >= _MAX_RETRIES:
                     return {
-                        "OK": False,
+                        "STATUS": "failed",
                         "ACTION": "run_task",
                         "ERROR": (
                             f"Micro-planner failed {_MAX_RETRIES}× consecutively."
@@ -598,7 +598,7 @@ class BrowserTool:
                 )
                 if consecutive_errors >= _MAX_RETRIES:
                     return {
-                        "OK": False,
+                        "STATUS": "failed",
                         "ACTION": "run_task",
                         "ERROR": f"Failed {_MAX_RETRIES}× consecutively. Last: {err}",
                         "STEPS": step,
@@ -636,7 +636,7 @@ class BrowserTool:
                 )
 
         return {
-            "OK": False,
+            "STATUS": "failed",
             "ACTION": "run_task",
             "ERROR": f"Reached max {max_actions} actions without completing task",
             "STEPS": max_actions,
@@ -656,9 +656,9 @@ class BrowserTool:
         submit = bool(args.get("submit", True))
 
         if not url:
-            return {"OK": False, "ERROR": "url is required"}
+            return {"STATUS": "failed", "ERROR": "url is required"}
         if not fields:
-            return {"OK": False, "ERROR": "fields dict is required"}
+            return {"STATUS": "failed", "ERROR": "fields dict is required"}
 
         if on_progress:
             on_progress("Filling form…", False)
@@ -670,7 +670,7 @@ class BrowserTool:
             async with _headless_page(url) as page:
                 nav_err = await _navigate(page, url)
                 if nav_err:
-                    return {"OK": False, "ERROR": nav_err}
+                    return {"STATUS": "failed", "ERROR": nav_err}
 
                 for label, value in fields.items():
                     err = await _do_fill(page, label, str(value))
@@ -686,7 +686,7 @@ class BrowserTool:
             return _playwright_not_installed()
 
         return {
-            "OK": len(failed) == 0,
+            "STATUS": "success" if len(failed) == 0 else "failed",
             "ACTION": "fill_form",
             "URL": url,
             "FILLED": filled,
@@ -707,11 +707,11 @@ class BrowserTool:
         query = str(args.get("query") or "").strip()
 
         if not url:
-            return {"OK": False, "ERROR": "url is required"}
+            return {"STATUS": "failed", "ERROR": "url is required"}
         if not query:
-            return {"OK": False, "ERROR": "query is required"}
+            return {"STATUS": "failed", "ERROR": "query is required"}
         if brain is None:
-            return {"OK": False, "ERROR": "brain is required"}
+            return {"STATUS": "failed", "ERROR": "brain is required"}
 
         if on_progress:
             on_progress("Navigating…", False)
@@ -720,7 +720,7 @@ class BrowserTool:
             async with _headless_page(url) as page:
                 nav_err = await _navigate(page, url)
                 if nav_err:
-                    return {"OK": False, "ERROR": nav_err}
+                    return {"STATUS": "failed", "ERROR": nav_err}
                 if on_progress:
                     on_progress("Analysing…", False)
                 screenshot_uri = await _screenshot(page)
@@ -733,14 +733,14 @@ class BrowserTool:
 
         if "error" in result:
             return {
-                "OK": False,
+                "STATUS": "failed",
                 "ACTION": "screenshot_query",
                 "URL": url,
                 "ERROR": result["error"],
             }
 
         return {
-            "OK": True,
+            "STATUS": "success",
             "ACTION": "screenshot_query",
             "URL": url,
             "DESCRIPTION": result.get("description", ""),
@@ -759,29 +759,29 @@ class BrowserTool:
         if action == "list":
             _SESSION_DIR.mkdir(parents=True, exist_ok=True)
             sessions = [f.stem for f in _SESSION_DIR.glob("*.json")]
-            return {"OK": True, "ACTION": "list", "SESSIONS": sessions}
+            return {"STATUS": "success", "ACTION": "list", "SESSIONS": sessions}
 
         if not action:
-            return {"OK": False, "ERROR": "action required (list/load/clear)"}
+            return {"STATUS": "failed", "ERROR": "action required (list/load/clear)"}
         if not domain:
-            return {"OK": False, "ERROR": "domain required"}
+            return {"STATUS": "failed", "ERROR": "domain required"}
 
         sf = _session_path(domain)
 
         if action == "clear":
             sf.unlink(missing_ok=True)
-            return {"OK": True, "ACTION": "clear", "DOMAIN": domain}
+            return {"STATUS": "success", "ACTION": "clear", "DOMAIN": domain}
 
         if action == "load":
             return {
-                "OK": True,
+                "STATUS": "success",
                 "ACTION": "load",
                 "DOMAIN": domain,
                 "EXISTS": sf.exists(),
             }
 
         return {
-            "OK": False,
+            "STATUS": "failed",
             "ERROR": f"Unknown session action: {action!r}. Use list/load/clear",
         }
 
@@ -796,7 +796,7 @@ class BrowserTool:
     ) -> Dict[str, Any]:
         url = _normalize_url(str(args.get("url") or "").strip())
         if not url:
-            return {"OK": False, "ERROR": "url is required"}
+            return {"STATUS": "failed", "ERROR": "url is required"}
 
         if on_progress:
             on_progress("Checking page…", False)
@@ -805,7 +805,7 @@ class BrowserTool:
             async with _headless_page(url) as page:
                 nav_err = await _navigate(page, url)
                 if nav_err:
-                    return {"OK": False, "ERROR": nav_err}
+                    return {"STATUS": "failed", "ERROR": nav_err}
 
                 title = await page.title()
                 final_url = page.url
@@ -827,7 +827,7 @@ class BrowserTool:
             return _playwright_not_installed()
 
         return {
-            "OK": True,
+            "STATUS": "success",
             "ACTION": "check_page",
             "URL": final_url,
             "TITLE": title,

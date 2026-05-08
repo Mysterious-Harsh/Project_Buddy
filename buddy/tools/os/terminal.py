@@ -54,16 +54,12 @@ class TerminalResult(BaseModel):
     """
     Aggregated result for ONE planner step (LOCKED v1).
 
-    - ok: overall success (stops at first failure)
-    - outputs: per-command results in the order executed
-    - ms: total duration for the tool call
-
     v1.1 additions (both default — fully backward-compatible):
     - IS_DAEMON : True when the process is running in the background
     - PID       : PID of the background process; None for normal commands
     """
 
-    OK: bool
+    STATUS: str  # "success" | "failed"
     CWD: str
     COMMAND: str
     EXIT_CODE: int
@@ -361,7 +357,7 @@ class Terminal:
 
         if not cmd:
             result = TerminalResult(
-                OK=False,
+                STATUS="failed",
                 CWD=cwd or "",
                 COMMAND=cmd,
                 EXIT_CODE=2,
@@ -428,7 +424,7 @@ class Terminal:
                 except Exception:
                     stdout, stderr = "", ""
                 return TerminalResult(
-                    OK=False,
+                    STATUS="failed",
                     CWD=cwd or "",
                     COMMAND=cmd,
                     EXIT_CODE=124,
@@ -445,9 +441,8 @@ class Terminal:
             else:
                 stdout = _truncate(stdout)
 
-            ok = proc.returncode == 0
             return TerminalResult(
-                OK=ok,
+                STATUS="success" if proc.returncode == 0 else "failed",
                 CWD=cwd or "",
                 COMMAND=cmd,
                 EXIT_CODE=int(proc.returncode),
@@ -460,7 +455,7 @@ class Terminal:
             if proc is not None:
                 _kill_process(proc)
             return TerminalResult(
-                OK=False,
+                STATUS="failed",
                 CWD=cwd or "",
                 COMMAND=cmd,
                 EXIT_CODE=1,
@@ -486,7 +481,7 @@ class Terminal:
         The process is launched with Popen (non-blocking).  Two reader threads
         collect stdout/stderr for _DAEMON_STARTUP_WAIT seconds so that:
           • Boot messages and listening-port lines are captured and returned.
-          • Immediate crashes are detected and surfaced (OK=False, EXIT_CODE set).
+          • Immediate crashes are detected and surfaced (STATUS="failed", EXIT_CODE set).
 
         The *timeout* field is intentionally ignored for daemon commands — they
         run until explicitly killed via Terminal.daemons.kill_by_pid(pid) or
@@ -506,7 +501,7 @@ class Terminal:
             )
         except Exception as e:
             return TerminalResult(
-                OK=False,
+                STATUS="failed",
                 CWD=cwd or "",
                 COMMAND=cmd,
                 EXIT_CODE=1,
@@ -560,7 +555,7 @@ class Terminal:
         exit_code = proc.poll()
         if exit_code is not None:
             return TerminalResult(
-                OK=False,
+                STATUS="failed",
                 CWD=cwd or "",
                 COMMAND=cmd,
                 EXIT_CODE=int(exit_code),
@@ -573,7 +568,7 @@ class Terminal:
 
         # Still alive — running in background
         return TerminalResult(
-            OK=True,
+            STATUS="success",
             CWD=cwd or "",
             COMMAND=cmd,
             EXIT_CODE=0,

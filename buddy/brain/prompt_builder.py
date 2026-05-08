@@ -158,7 +158,7 @@ def build_planner_prompt(
 
     Final token layout the model sees:
       [SYSTEM]   /think + system
-      [USER]     <context><datetime>...</datetime><available_tools>...</available_tools></context>
+      [TOOL]     <context><datetime>...</datetime><available_tools>...</available_tools></context>
       [ASST]     <memories>...</memories>
                  I know the user's context. Reading the task now.   ← closed
       [USER]     <task>{planner_instructions}</task>
@@ -169,7 +169,7 @@ def build_planner_prompt(
     sys_block = f"<|im_start|>system\n/think\n{system}\n<|im_end|>"
 
     ctx_block = (
-        "<|im_start|>user\n"
+        "<|im_start|>tool\n"
         "<context>\n"
         f"<datetime>\n{datetime_block}\n</datetime>\n"
         f"<available_tools>\n{available_tools}\n</available_tools>\n"
@@ -178,15 +178,10 @@ def build_planner_prompt(
     )
 
     memory_block = (
-        "<|im_start|>assistant\n"
-        f"<memories>\n{memories}\n</memories>\n"
-        "I know the user's context. Reading the task now.\n"
-        "<|im_end|>"
+        f"<|im_start|>assistant\n<memories>\n{memories}\n</memories>\n<|im_end|>"
     )
 
-    task_block = (
-        f"<|im_start|>user\n<task>\n{planner_instructions}\n</task>\n<|im_end|>"
-    )
+    task_block = f"<|im_start|>user\n<task>\n{planner_instructions}\n</task>\n<|im_end|>"
 
     prefill = f"<|im_start|>assistant\n{think_tag}\n"
 
@@ -217,17 +212,16 @@ def build_responder_prompt(
 
     Final token layout the model sees:
       [SYSTEM]   /think + system
-      [USER]     <context><datetime>...</datetime></context>
+      [TOOL]     <context><datetime>...</datetime></context>
       [ASST]     <memories>...</memories>
-                 I know who I'm talking to. Reading the execution results now.
       [TOOL]     {execution_results JSON}
-      [USER]     <task>{responder_instruction}</task>
+      [TOOL]     <task>{responder_instruction}</task>
       [ASST]     <think>     ← open prefill, model continues from here
     """
     sys_block = f"<|im_start|>system\n/think\n{system}\n<|im_end|>"
 
     ctx_block = (
-        "<|im_start|>user\n"
+        "<|im_start|>tool\n"
         "<context>\n"
         f"<datetime>\n{datetime_block}\n</datetime>\n"
         "</context>\n"
@@ -241,7 +235,7 @@ def build_responder_prompt(
     tool_block = f"<|im_start|>tool\n<execution_result_map>\n{execution_results}\n</execution_result_map>\n<|im_end|>"
 
     task_block = (
-        f"<|im_start|>user\n<task>\n{responder_instruction}\n</task>\n<|im_end|>"
+        f"<|im_start|>tool\n<task>\n{responder_instruction}\n</task>\n<|im_end|>"
     )
 
     prefill = f"<|im_start|>assistant\n{think_tag}\n"
@@ -337,6 +331,7 @@ def build_opener_prompt(
       [ASST]     <think>   ← open prefill
     """
     import datetime as _dt
+
     sys_block = f"<|im_start|>system\n/think\n{system}\n<|im_end|>"
 
     now = _dt.datetime.now()
@@ -378,17 +373,17 @@ def build_executor_prompt(
 
     Final token layout the model sees:
       [SYSTEM]   /think + system
-      [USER]     <context> datetime + tool_instructions + prior_outputs </context>
+      [TOOL]     <context> datetime + prior_outputs </context>
       [TOOL]     {step_errors}          ← failed tool results as ground truth
-      [USER]     <step>{instruction}</step>
+      [TOOL]     <current_step>{instruction}</current_step>
       [ASST]     {followup question}    ← real ChatML turns if followup happened
-      [USER]     {user answer}
+      [USER]     {user answer}          ← actual user input, stays [USER]
       [ASST]     <think>                ← open prefill
     """
     sys_block = f"<|im_start|>system\n/think\n{system}\n<|im_end|>"
 
     ctx_parts = [
-        "<|im_start|>user",
+        "<|im_start|>tool",
         "<context>",
         f"<datetime>\n{datetime_block}\n</datetime>",
     ]
@@ -399,7 +394,9 @@ def build_executor_prompt(
     ctx_parts += ["</context>", "<|im_end|>"]
     ctx_block = "\n".join(ctx_parts)
 
-    step_block = f"<|im_start|>user\n<step_instruction>\n{instruction}\n</step_instruction>\n<|im_end|>"
+    step_block = (
+        f"<|im_start|>tool\n<current_step>\n{instruction}\n</current_step>\n<|im_end|>"
+    )
 
     prefill = f"<|im_start|>assistant\n{think_tag}\n"
 

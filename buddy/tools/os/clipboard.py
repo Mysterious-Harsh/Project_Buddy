@@ -11,11 +11,11 @@ _TOOL = "clipboard"
 
 
 def _ok(**extra: Any) -> Dict[str, Any]:
-    return {"OK": True, "TOOL": _TOOL, **extra}
+    return {"STATUS": "success", "TOOL": _TOOL, **extra}
 
 
 def _err(msg: str) -> Dict[str, Any]:
-    return {"OK": False, "TOOL": _TOOL, "ERROR": msg}
+    return {"STATUS": "failed", "TOOL": _TOOL, "ERROR": msg}
 
 
 # ── platform helpers ─────────────────────────────────────────────────────────

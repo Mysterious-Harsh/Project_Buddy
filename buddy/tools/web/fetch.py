@@ -127,7 +127,7 @@ class WebFetch:
         try:
             call = self.parse_call(arguments)
         except Exception as e:
-            return {"OK": False, "RESULTS": [], "TOTAL_FETCHED": 0, "ERROR": str(e)}
+            return {"STATUS": "failed", "RESULTS": [], "TOTAL_FETCHED": 0, "ERROR": str(e)}
 
         from buddy.brain.text_reader import maybe_read
 
@@ -151,10 +151,10 @@ class WebFetch:
                 fetched += 1
 
         return {
-            "OK": fetched > 0,
+            "STATUS": "success" if fetched > 0 else "failed",
             "RESULTS": results,
             "TOTAL_FETCHED": fetched,
-            "ERROR": None if fetched > 0 else "All URLs failed to fetch",
+            **({"ERROR": "All URLs failed to fetch"} if fetched == 0 else {}),
         }
 
     # ── download ──────────────────────────────────────────
@@ -168,11 +168,10 @@ class WebFetch:
             call = WebDownloadCall.model_validate(arguments)
         except Exception as e:
             return {
-                "OK": False,
+                "STATUS": "failed",
                 "URL": arguments.get("url", ""),
                 "DEST_PATH": "",
                 "SIZE_BYTES": 0,
-                "CONTENT_TYPE": None,
                 "ERROR": str(e),
             }
         return await asyncio.to_thread(self._download_one, call, on_progress)
@@ -229,12 +228,11 @@ class WebFetch:
             return _dl_err(call.url, dest, f"Write error: {e}")
 
         return {
-            "OK": True,
+            "STATUS": "success",
             "URL": call.url,
             "DEST_PATH": str(dest),
             "SIZE_BYTES": size,
             "CONTENT_TYPE": content_type,
-            "ERROR": None,
         }
 
     # ── Single URL ────────────────────────────────────────
@@ -289,7 +287,7 @@ def _err(url: str, msg: str) -> Dict[str, Any]:
 
 def _dl_err(url: str, dest: "Path", msg: str) -> Dict[str, Any]:
     logger.warning("web_download error [%s]: %s", url, msg)
-    return {"OK": False, "URL": url, "DEST_PATH": str(dest), "SIZE_BYTES": 0, "CONTENT_TYPE": None, "ERROR": msg}
+    return {"STATUS": "failed", "URL": url, "DEST_PATH": str(dest), "SIZE_BYTES": 0, "ERROR": msg}
 
 
 def _extract(html: str, url: str) -> tuple[str, str]:

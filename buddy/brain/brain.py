@@ -244,6 +244,9 @@ class Brain:
     def set_on_token(self, on_token: Callable[[str], None]):
         self._on_token = on_token
 
+    def _is_interrupted(self) -> bool:
+        return self._interrupt_event is not None and self._interrupt_event.is_set()
+
     def run_memory_gate(
         self,
         *,
@@ -286,7 +289,7 @@ class Brain:
         )
 
         parsed = self.parser.parse_retrieval_gate(raw)
-        if not parsed and think_block:
+        if not parsed and not self._is_interrupted():
             raw = self._retry_with_think(
                 prompt=prompt,
                 system=None,
@@ -296,7 +299,7 @@ class Brain:
                 top_p=top_p,
                 repeat_penalty=repeat_penalty,
                 repeat_last_n=repeat_last_n,
-                n_predict=None,
+                n_predict=-1,
                 opts=llm_options if isinstance(llm_options, dict) else {},
             )
             parsed = self.parser.parse_retrieval_gate(raw)
@@ -312,7 +315,7 @@ class Brain:
         active_task: str,
         recent_turns: str,
         memories: str,
-        temperature: float = 0.5,
+        temperature: float = 0.4,
         top_p: float = 0.94,
         repeat_penalty: float = 1.06,
         repeat_last_n: int = 64,
@@ -350,7 +353,7 @@ class Brain:
         )
 
         parsed = self.parser.parse_brain(raw)
-        if not parsed and think_block:
+        if not parsed and not self._is_interrupted():
             raw = self._retry_with_think(
                 prompt=prompt,
                 system=None,
@@ -360,7 +363,7 @@ class Brain:
                 top_p=top_p,
                 repeat_penalty=repeat_penalty,
                 repeat_last_n=repeat_last_n,
-                n_predict=None,
+                n_predict=-1,
                 opts=llm_options if isinstance(llm_options, dict) else {},
             )
             parsed = self.parser.parse_brain(raw)
@@ -415,7 +418,7 @@ class Brain:
         )
 
         parsed = self.parser.parse_planner(raw)
-        if not parsed and think_block:
+        if not parsed and not self._is_interrupted():
             raw = self._retry_with_think(
                 prompt=prompt,
                 system=None,
@@ -425,7 +428,7 @@ class Brain:
                 top_p=top_p,
                 repeat_penalty=repeat_penalty,
                 repeat_last_n=repeat_last_n,
-                n_predict=None,
+                n_predict=-1,
                 opts=llm_options if isinstance(llm_options, dict) else {},
             )
             parsed = self.parser.parse_planner(raw)
@@ -481,7 +484,7 @@ class Brain:
         )
 
         parsed = self.parser.parse_executor(raw)
-        if not parsed and think_block:
+        if not parsed and not self._is_interrupted():
             raw = self._retry_with_think(
                 prompt=prompt,
                 system=None,
@@ -491,7 +494,7 @@ class Brain:
                 top_p=top_p,
                 repeat_penalty=repeat_penalty,
                 repeat_last_n=repeat_last_n,
-                n_predict=None,
+                n_predict=-1,
                 opts=llm_options if isinstance(llm_options, dict) else {},
             )
             parsed = self.parser.parse_executor(raw)
@@ -545,7 +548,7 @@ class Brain:
         )
 
         parsed = self.parser.parse_memory_summary(raw)
-        if not parsed and think_block:
+        if not parsed and not self._is_interrupted():
             raw = self._retry_with_think(
                 prompt=prompt,
                 system=None,
@@ -555,7 +558,7 @@ class Brain:
                 top_p=top_p,
                 repeat_penalty=repeat_penalty,
                 repeat_last_n=repeat_last_n,
-                n_predict=None,
+                n_predict=-1,
                 opts=llm_options if isinstance(llm_options, dict) else {},
             )
             parsed = self.parser.parse_memory_summary(raw)
@@ -608,7 +611,7 @@ class Brain:
         )
 
         parsed = self.parser.parse_respond(raw)
-        if not parsed and think_block:
+        if not parsed and not self._is_interrupted():
             raw = self._retry_with_think(
                 prompt=prompt,
                 system=None,
@@ -618,7 +621,7 @@ class Brain:
                 top_p=top_p,
                 repeat_penalty=repeat_penalty,
                 repeat_last_n=repeat_last_n,
-                n_predict=None,
+                n_predict=-1,
                 opts=llm_options if isinstance(llm_options, dict) else {},
             )
             parsed = self.parser.parse_respond(raw)
@@ -677,7 +680,7 @@ class Brain:
         )
 
         result = self.parser.parse_reader(raw)
-        if not result and think_block:
+        if not result and not self._is_interrupted():
             raw = self._retry_with_think(
                 prompt=prompt,
                 system=None,
@@ -687,7 +690,7 @@ class Brain:
                 top_p=top_p,
                 repeat_penalty=repeat_penalty,
                 repeat_last_n=repeat_last_n,
-                n_predict=None,
+                n_predict=-1,
                 opts=llm_options if isinstance(llm_options, dict) else {},
             )
             result = self.parser.parse_reader(raw)
@@ -939,7 +942,7 @@ class Brain:
 
         _, text = self._call_llm_generate(
             prompt=prompt,
-            temperature=0.6,
+            temperature=0.4,
             stream=False,
             json_mode=False,
             options={},
@@ -966,6 +969,7 @@ class Brain:
 
         # Normalize options for predictable downstream handling
         opts: Dict[str, Any] = options if isinstance(options, dict) else {}
+        n_predict = n_predict if n_predict is not None else -1
 
         if self.debug:
             logger.debug(
@@ -986,7 +990,7 @@ class Brain:
             top_p=float(top_p),
             repeat_penalty=float(repeat_penalty),
             repeat_last_n=int(repeat_last_n),
-            n_predict=n_predict,
+            n_predict=n_predict if n_predict is not None else -1,
             options=opts,
             on_delta=(self._on_token if self._on_token and stream else None),
             json_extract=bool(json_mode),
@@ -1013,11 +1017,15 @@ class Brain:
                 except Exception:
                     _need_retry = True
 
-        if _need_retry and think_block:
+        if _need_retry and not self._is_interrupted():
+            # think_block is empty when </think> was never received (stream cut early).
+            # text still contains the raw thinking content in that case — use it as seed
+            # so the retry has the model's reasoning even without the closing tag.
+            think_seed = think_block or text
             text = self._retry_with_think(
                 prompt=prompt,
                 system=system,
-                think_block=think_block,
+                think_block=think_seed,
                 stream=bool(stream),
                 temperature=float(temperature),
                 top_p=float(top_p),
@@ -1028,7 +1036,7 @@ class Brain:
             )
 
         if self.debug:
-            logger.debug(f"LLM output: \n{think_block} \n {text}")
+            logger.debug(f"LLM output: \nTHINKING:\n{think_block} OUTPUT:\n {text}")
 
         return think_block, text
 
@@ -1046,7 +1054,10 @@ class Brain:
         n_predict: Optional[int],
         opts: Dict[str, Any],
     ) -> str:
-        """Retry JSON generation by seeding with the model's own think block."""
+        """Retry JSON generation by seeding with the model's own think block.
+        If think_block is empty (stream was cut before </think>), falls back to
+        prompt + "{" directly — the original prompt already has all the context needed.
+        """
         retry_prompt = prompt + f"\n{think_block}\n" + "{"
         _, text = self.llm.generate(
             prompt=retry_prompt,

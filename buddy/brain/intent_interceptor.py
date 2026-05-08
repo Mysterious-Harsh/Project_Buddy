@@ -841,6 +841,9 @@ def _build_patterns() -> list[tuple]:
         (P(r"^play\s+(?P<song>.+?)\s+on\s+(?P<app>\w+)$", re.I), play_on_app),
 
         # ── Media: play / pause / resume / toggle / next / prev ──────────────
+        # Specific "play X" forms must come before the generic ^play.* catch-all.
+        (P(r"^(play\s*pause|toggle\s+(music|playback))$", re.I), media_toggle),
+        (P(r"^(next|play\s+next)(\s+(track|song))?$", re.I), media_next),
         (P(r"^play\s*(?P<after>.*)$", re.I), media_play),
         (
             P(r"^(pause|stop(\s+(music|playing|playback|the\s+music))?)$", re.I),
@@ -849,8 +852,6 @@ def _build_patterns() -> list[tuple]:
         # FIX: dedicated builder — media_play builder calls m.group("after") which
         # only exists in the ^play pattern above, not in resume/continue patterns.
         (P(r"^(resume|continue\s+music|continue\s+playing)$", re.I), media_resume),
-        (P(r"^(play\s*pause|toggle\s+(music|playback))$", re.I), media_toggle),
-        (P(r"^(next|play\s+next)(\s+(track|song))?$", re.I), media_next),
         (P(r"^go\s+(to\s+)?(next|forward)(\s+(track|song))?$", re.I), media_next),
         (P(r"^(previous|prev)(\s+(track|song))?$", re.I), media_prev),
         (P(r"^go\s+(to\s+)?(previous|prev|back)(\s+(track|song))?$", re.I), media_prev),

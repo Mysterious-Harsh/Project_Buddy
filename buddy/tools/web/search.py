@@ -121,7 +121,7 @@ class WebSearch:
         try:
             call = self.parse_call(arguments)
         except Exception as e:
-            return {"OK": False, "ENGINE": "unknown", "QUERY": "", "RESULTS": [], "TOTAL_FOUND": 0, "ERROR": str(e)}
+            return {"STATUS": "failed", "ENGINE": "unknown", "QUERY": "", "RESULTS": [], "TOTAL_FOUND": 0, "ERROR": str(e)}
 
         if on_progress:
             on_progress(f"Searching: {call.query}", False)
@@ -166,12 +166,11 @@ class WebSearch:
             for item in raw[: call.max_results]
         ]
         return {
-            "OK": True,
+            "STATUS": "success",
             "ENGINE": "searxng",
             "QUERY": call.query,
             "RESULTS": results,
             "TOTAL_FOUND": len(results),
-            "ERROR": None,
         }
 
     # ── DuckDuckGo ────────────────────────────────────────
@@ -191,7 +190,7 @@ class WebSearch:
                 )
         except Exception as e:
             return {
-                "OK": False,
+                "STATUS": "failed",
                 "ENGINE": "duckduckgo",
                 "QUERY": call.query,
                 "RESULTS": [],
@@ -208,12 +207,11 @@ class WebSearch:
             for item in raw
         ]
         return {
-            "OK": True,
+            "STATUS": "success",
             "ENGINE": "duckduckgo",
             "QUERY": call.query,
             "RESULTS": results,
             "TOTAL_FOUND": len(results),
-            "ERROR": None,
         }
 
 
