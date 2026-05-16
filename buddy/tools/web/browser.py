@@ -176,14 +176,23 @@ class BrowserTool:
             "name": TOOL_NAME,
             "version": "1.2.0",
             "description": (
-                " Use this tool to complete web tasks autonomously. It runs a"
-                " self-contained ReAct loop that handles navigation, clicking, form"
-                " filling, login, and all other browser interactions internally — do"
-                " NOT break a single web task into multiple steps. Always pass the full"
-                " end-to-end goal with all necessary instructions in single browser"
-                " step. The only exception: if the request contains multiple clearly"
-                " separate web goals, you may make one execution step per distinct"
-                " goal."
+                "WHEN: the web task requires navigation, clicking, form filling, login, or any multi-step page interaction.\n\n"
+                "HOW IT WORKS: browser runs an internal ReAct loop (Reason → Act → Observe → Reason ...) — "
+                "it thinks about what to do, takes an action (click, type, scroll, navigate), observes the result, "
+                "and repeats until the goal is complete. You never manage these sub-steps — the browser handles the entire sequence autonomously.\n\n"
+                "FUNCTIONS:\n"
+                "  run_task(goal, url?)               — primary function; pass the full end-to-end goal as a single instruction; browser navigates, clicks, fills forms, logs in, and extracts results on its own\n"
+                "  fill_form(url, fields{})            — navigate to a page and fill a specific form with given field values\n"
+                "  screenshot_query(url, query)        — load a page and answer a visual question about what is on it\n"
+                "  manage_session(action)              — resume, clear, or inspect the current browser session\n"
+                "  check_page(url, condition)          — verify a condition is true on a live page\n\n"
+                "ONE STEP = ONE COMPLETE WEB GOAL — this is a hard rule:\n"
+                "  ✓ CORRECT: one step — 'Log in to github.com with user X, open repo Y, create issue titled Z with body W'\n"
+                "  ✗ WRONG:   step 1 'navigate to github', step 2 'log in', step 3 'create issue' — never do this\n"
+                "  The browser's internal ReAct loop handles every sub-interaction. Your job is to write the goal clearly, not break it into clicks.\n"
+                "  Exception: two clearly separate web goals (different sites, unrelated outcomes) may be two steps.\n\n"
+                "CHAIN: browser output (extracted text, data, confirmation) feeds analyzer for structured extraction, or responder directly.\n"
+                "NOT: simple URL read with no interaction → web_fetch | only discovering URLs → web_search"
             ),
             "prompt": BROWSER_TOOL_PROMPT,
         }
@@ -244,9 +253,9 @@ class BrowserTool:
         max_actions = max(1, int(args.get("max_actions", _MAX_ACTIONS)))
 
         if not task:
-            return {"STATUS": "failed", "ERROR": "task is required"}
+            return {"STATUS": "failed", "ERROR": "browser.run_task: 'task' is required — provide the full end-to-end goal as a string"}
         if brain is None:
-            return {"STATUS": "failed", "ERROR": "brain is required for run_task"}
+            return {"STATUS": "failed", "ERROR": "browser.run_task: brain not available — this is a configuration error"}
 
         try:
             from playwright.async_api import async_playwright
@@ -656,9 +665,9 @@ class BrowserTool:
         submit = bool(args.get("submit", True))
 
         if not url:
-            return {"STATUS": "failed", "ERROR": "url is required"}
+            return {"STATUS": "failed", "ERROR": "browser.fill_form: 'url' is required — provide the full page URL"}
         if not fields:
-            return {"STATUS": "failed", "ERROR": "fields dict is required"}
+            return {"STATUS": "failed", "ERROR": "browser.fill_form: 'fields' is required — provide a dict of {label: value} pairs to fill"}
 
         if on_progress:
             on_progress("Filling form…", False)
@@ -707,11 +716,11 @@ class BrowserTool:
         query = str(args.get("query") or "").strip()
 
         if not url:
-            return {"STATUS": "failed", "ERROR": "url is required"}
+            return {"STATUS": "failed", "ERROR": "browser.screenshot_query: 'url' is required — provide the full page URL"}
         if not query:
-            return {"STATUS": "failed", "ERROR": "query is required"}
+            return {"STATUS": "failed", "ERROR": "browser.screenshot_query: 'query' is required — describe what to analyze on the page"}
         if brain is None:
-            return {"STATUS": "failed", "ERROR": "brain is required"}
+            return {"STATUS": "failed", "ERROR": "browser.screenshot_query: brain not available — this is a configuration error"}
 
         if on_progress:
             on_progress("Navigating…", False)
@@ -762,9 +771,9 @@ class BrowserTool:
             return {"STATUS": "success", "ACTION": "list", "SESSIONS": sessions}
 
         if not action:
-            return {"STATUS": "failed", "ERROR": "action required (list/load/clear)"}
+            return {"STATUS": "failed", "ERROR": "browser.manage_session: 'action' is required — use list, load, or clear"}
         if not domain:
-            return {"STATUS": "failed", "ERROR": "domain required"}
+            return {"STATUS": "failed", "ERROR": f"browser.manage_session: 'domain' is required for action={action!r}"}
 
         sf = _session_path(domain)
 
@@ -796,7 +805,7 @@ class BrowserTool:
     ) -> Dict[str, Any]:
         url = _normalize_url(str(args.get("url") or "").strip())
         if not url:
-            return {"STATUS": "failed", "ERROR": "url is required"}
+            return {"STATUS": "failed", "ERROR": "browser.check_page: 'url' is required — provide the full page URL"}
 
         if on_progress:
             on_progress("Checking page…", False)

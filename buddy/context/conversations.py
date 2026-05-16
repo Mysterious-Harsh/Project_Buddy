@@ -177,6 +177,32 @@ class Conversations:
 
         return "\n".join(blocks)
 
+    def get_opener_context(self, max_messages: int = 4, max_chars: int = 150) -> str:
+        """
+        Returns a brief, clipped version of recent conversation for the session opener.
+
+        Only the last `max_messages` messages are included, each truncated to
+        `max_chars` characters. Code blocks and script content are stripped so
+        the model sees topic summaries, not task content to continue.
+        """
+        if not self._messages:
+            return ""
+
+        tail = self._messages[-max_messages:]
+        lines: List[str] = []
+        for m in tail:
+            role_label = "Buddy" if m.role == "Buddy" else "You"
+            text = m.text.strip()
+            # Strip fenced code blocks to just a placeholder.
+            import re as _re
+            text = _re.sub(r"```[\s\S]*?```", "[code block]", text)
+            text = _re.sub(r"`[^`]+`", "[code]", text)
+            if len(text) > max_chars:
+                text = text[:max_chars].rstrip() + "…"
+            lines.append(f"{role_label}: {text}")
+
+        return "\n".join(lines)
+
     # ==========================================================
     # Snapshot (STRICT v1)
     # ==========================================================

@@ -43,7 +43,18 @@ class SystemControlTool:
         return {
             "name": TOOL_NAME,
             "version": "1.1.0",
-            "description": "Control media playback, volume, app launching, and system state (lock/sleep).",
+            "description": (
+                "WHEN: controlling system-level state — media playback, volume, brightness, applications, or machine power state.\n\n"
+                "FUNCTIONS:\n"
+                "  action(command)   — execute a system command. Valid commands:\n"
+                "    media:  play, pause, next, prev, stop\n"
+                "    volume: set_volume(0–100), mute, unmute\n"
+                "    screen: set_brightness(0–100)\n"
+                "    apps:   open_app(name), close_app(name), focus_app(name)\n"
+                "    power:  lock, sleep\n\n"
+                "CHAIN: typically a terminal step — output is a confirmation; no downstream step needs it.\n"
+                "NOT: files → fs_browse/fs_read/fs_write/fs_manage | clipboard text → clipboard | web → web_fetch/browser"
+            ),
             "prompt": SYSTEM_CONTROL_TOOL_PROMPT,
         }
 

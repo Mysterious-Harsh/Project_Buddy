@@ -524,7 +524,10 @@ class MemoryManager:
                 str(memory.get("memory_type", "discard") or "discard").strip().lower()
             )
             mem_text = str(memory.get("memory_text", "") or "").strip()
-            if not mem_text or mem_type == "discard":
+            if (
+                mem_text in ["", "None", "null", "none", "...", None]
+                or mem_type == "discard"
+            ):
                 return None
 
             imp = _clamp01(memory.get("salience", 0.0))
@@ -544,7 +547,9 @@ class MemoryManager:
             e.memory_type = mem_type
             e.importance = imp
             e.protection_tier = pt
-            e.encoding_arousal = float(max(0.0, min(1.0, float((md.pop("encoding_arousal", None) or 0.0)))))
+            e.encoding_arousal = float(
+                max(0.0, min(1.0, float((md.pop("encoding_arousal", None) or 0.0))))
+            )
             e.metadata = md
             if source_turn is not None:
                 e.source_turn = int(source_turn)
@@ -552,7 +557,7 @@ class MemoryManager:
 
         # ── raw text path ─────────────────────────────────────────────
         t = (text or "").strip()
-        if not t:
+        if t in ["", "None", "null", "none", "...", None]:
             return None
         if normalize_text_lower:
             t = t.lower()
@@ -564,7 +569,9 @@ class MemoryManager:
         e2.role = role if role is not None else "user"
         e2.memory_type = (memory_type or "flash").strip().lower() or "flash"
         e2.importance = _clamp01(importance)
-        e2.encoding_arousal = float(max(0.0, min(1.0, float((md2.pop("encoding_arousal", None) or 0.0)))))
+        e2.encoding_arousal = float(
+            max(0.0, min(1.0, float((md2.pop("encoding_arousal", None) or 0.0))))
+        )
         e2.metadata = md2
         if source_turn is not None:
             e2.source_turn = int(source_turn)
@@ -607,7 +614,7 @@ class MemoryManager:
             False only when the discard gate fires.
         """
         txt = getattr(entry, "text", "")
-        if not txt:
+        if txt in ["", "None", "null", "none", "...", None]:
             logger.error("Memory Entry Without text can not be stored")
 
         if not getattr(entry, "created_at", None):
@@ -663,9 +670,7 @@ class MemoryManager:
         """X5: If encoding_arousal >= 0.7, boost semantic neighbors' consolidation_strength."""
         if self.vector is None or self.embedder is None:
             return
-        arousal = float(
-            float(getattr(entry, "encoding_arousal", 0.0) or 0.0)
-        )
+        arousal = float(float(getattr(entry, "encoding_arousal", 0.0) or 0.0))
         if arousal < 0.7:
             return
         emb = getattr(entry, "embedding", None)
@@ -833,9 +838,7 @@ class MemoryManager:
 
             # P14/P15: composite score using sleep-persisted consolidation_strength
             strength = float(getattr(e, "consolidation_strength", 0.0) or 0.0)
-            arousal = float(
-                float(getattr(e, "encoding_arousal", 0.0) or 0.0)
-            )
+            arousal = float(float(getattr(e, "encoding_arousal", 0.0) or 0.0))
             final = _composite_score(
                 semantic=float(sc),
                 rerank=rerank_score,

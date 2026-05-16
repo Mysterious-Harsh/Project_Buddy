@@ -311,22 +311,14 @@ class Terminal:
             "name": self.tool_name,
             "version": self.version,
             "description": (
-                "Runs shell commands. SCRIPTING AND EXECUTION ONLY.\n"
-                "USE FOR:\n"
-                "  • Run code/scripts — python, node, go run, cargo run, java -jar, ruby, bash\n"
-                "  • Tests — pytest, jest, go test, cargo test, rspec\n"
-                "  • Compilers/builders — gcc, make, tsc, mvn, gradle\n"
-                "  • Package managers — pip, npm, yarn, brew, apt, cargo\n"
-                "  • Git and version control\n"
-                "  • System utilities, network commands (curl, ping, ssh)\n"
-                "  • Process management and installs\n"
-                "NEVER USE FOR:\n"
-                "  • Summarizing, compiling, or processing outputs from prior steps —"
-                " the Responder stage does this automatically after all steps finish.\n"
-                "  • Read/write/search/manage files — use the filesystem tool instead.\n"
-                "PREFER structured tools over terminal when available; terminal returns raw text.\n"
-                "DAEMON AWARE: servers/watchers (uvicorn, npm start, tail -f, etc.) are"
-                " auto-detected, launched in background, and tracked in Terminal.daemons."
+                "⚠ LAST RESORT — only when no structured tool covers the task. Always check other tools first.\n\n"
+                "WHEN: running code, scripts, compilers, test suites, package managers, git operations, or system utilities with no dedicated tool.\n\n"
+                "FUNCTIONS:\n"
+                "  run(command, cwd?, timeout?, stdin?)   — execute a shell command; returns stdout, stderr, exit_code, success\n"
+                "  daemon(command, cwd?)                  — launch a long-running process in background (servers, watchers); returns PID\n\n"
+                "VALID USES: python/node/ruby/bash scripts, pytest/jest/go test, gcc/make/tsc/gradle, pip/npm/brew/apt/cargo installs, git commands, curl/ping/ssh.\n\n"
+                "CHAIN: terminal stdout/stderr feeds analyzer to extract structured results, or fs_browse to locate generated files.\n"
+                "NOT: files → fs_browse/fs_read/fs_write/fs_manage | .xlsx → excel | .docx → word | .pdf → pdf | web → web_fetch/browser | reasoning → analyzer | summarizing results → Responder handles that automatically"
             ),
             "prompt": TERMINAL_TOOL_PROMPT,
         }
@@ -436,7 +428,8 @@ class Terminal:
             # Large STDOUT: use TextReader to extract relevant content.
             # STDERR is kept verbatim — error messages must never be filtered.
             stdout = stdout or ""
-            if brain and goal and len(stdout) > CHAR_THRESHOLD:
+            _threshold = getattr(brain, "char_threshold", CHAR_THRESHOLD)
+            if brain and goal and len(stdout) > _threshold:
                 stdout = maybe_read(stdout, goal, brain, on_progress)
             else:
                 stdout = _truncate(stdout)

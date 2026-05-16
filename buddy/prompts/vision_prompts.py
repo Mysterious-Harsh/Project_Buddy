@@ -12,7 +12,6 @@ TOOL_DESCRIPTION: Analyze image files or capture the current screen. Returns des
       - query     (string,  REQUIRED) — what to find, answer, or reason about
       - save_path (string,  OPTIONAL) — absolute path to save the screenshot PNG; action="screenshot" only
     </parameters>
-    <returns>OK, ACTION, PATHS, DESCRIPTION, OBJECTS, TEXT_FOUND, KEY_FINDING, [SAVED_PATH], ERROR</returns>
     <destructive>YES — if save_path is provided, writes a PNG file to disk</destructive>
     <confirmation_required>YES — if save_path is provided and the file already exists</confirmation_required>
   </function>
@@ -27,7 +26,7 @@ TOOL_DESCRIPTION: Analyze image files or capture the current screen. Returns des
        paths is required.
    1.3 Do NOT use if:
        - No image path provided and user did NOT ask for a screenshot.
-       - File is not an image (use filesystem tool for documents, code, etc.).
+       - File is not an image (use fs_read for documents and code files).
 
 2. PATHS
    2.1 All paths must be absolute. Resolve ~ before passing.
@@ -41,6 +40,8 @@ TOOL_DESCRIPTION: Analyze image files or capture the current screen. Returns des
 
 </tool_rules>
 
+"""
+VISION_TOOL_ERROR_PROMPT = """
 <error_recovery>
 Read only when <errors> is present in context.
 
@@ -63,8 +64,8 @@ Read only when <errors> is present in context.
    2.1 Never retry a path that does not exist — it will not appear on retry.
    2.2 After 2 failures → status="followup".
 
-</error_recovery>
-"""
+</error_recovery>"""
+
 
 # ---------------------------------------------------------------------------
 # System prompt injected when brain.run_vision() is called.

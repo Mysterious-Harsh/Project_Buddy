@@ -72,6 +72,32 @@ server_args = [
 # Voice & Audio
 # speech_trigger_mult: raise for noisy rooms, lower for quiet ones.
 # beam_size: 1 = fastest, 5 = more accurate.
+#
+# stt_backend:
+#   "parakeet_onnx"  → Parakeet TDT (default). Falls back to faster-whisper if onnx-asr
+#                      is not installed; boot installs it automatically.
+#   "faster_whisper" → always use faster-whisper (skip Parakeet entirely)
+#   "auto"           → legacy alias for "parakeet_onnx"
+#
+# parakeet_model: which Parakeet model to load (English-only or multilingual)
+#   "nemo-parakeet-tdt-0.6b-v3"  → 25 European languages, best multilingual accuracy
+#   "nemo-parakeet-tdt-0.6b-v2"  → English only, high accuracy (default)
+#
+# Noise / far-field rejection  (raise all three for lunch rooms / open offices)
+# ─────────────────────────────────────────────────────────────────────────────
+# min_clip_snr:
+#   Clip energy must be ≥ this × noise baseline to be sent to STT.
+#   0.0 = disabled (default).
+#   Quiet office: 4–6.  Noisy lunch room: 8–12.
+#   Your voice at ~30 cm typically scores 50–200×; far-field speech 2–6×.
+#
+# silero_thresh_start:
+#   Silero speech probability required per chunk to start recording.
+#   Default 0.65. Raise to 0.75–0.85 if Silero still triggers on nearby speech.
+#
+# silero_onset_chunks:
+#   Consecutive voiced chunks (each 32 ms) before recording opens.
+#   Default 5. Raise to 7–8 to require longer sustained speech at onset.
 # -----------------------------------------
 [voice]
 enabled = true
@@ -85,6 +111,25 @@ whisper_vad_filter = true
 use_silero_vad = true
 enable_beep = true
 beam_size = 4
+stt_backend = "parakeet_onnx"
+parakeet_model = "nemo-parakeet-tdt-0.6b-v2"
+min_clip_snr = 0.0
+silero_thresh_start = 0.65
+silero_onset_chunks = 5
+
+# -----------------------------------------
+# TTS (Text-to-Speech)
+# -----------------------------------------
+# engine:   "kokoro" (default, companion-quality) | "pyttsx3" (system fallback)
+# voice:    Kokoro voice name. Warm options: af_heart, af_sky, am_adam, am_michael
+# speed:    Speech rate multiplier. 1.0 = natural pace.
+# language: Kokoro lang_code. "a" = American English, "b" = British English.
+# -----------------------------------------
+[tts]
+engine = "kokoro"
+voice = "af_heart"
+speed = 1.0
+language = "a"
 
 # -----------------------------------------
 # Memory
@@ -169,7 +214,7 @@ enabled = true
 method = "qwen3"
 qwen_model = "Qwen/Qwen3-Reranker-0.6B"
 dense_threshold = 0.24
-rerank_threshold = 0.24
+rerank_threshold = 0.20
 rerank_min_keep = 0
 
 # -----------------------------------------

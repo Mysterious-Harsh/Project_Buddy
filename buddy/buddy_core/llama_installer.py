@@ -225,13 +225,54 @@ def _download(url: str, dest: Path, on_progress: Optional[Callable]) -> None:
                     on_progress(downloaded, total)
 
 
+def _extract_zip(archive: Path, extract_dir: Path) -> bool:
+    """
+    Extract a zip archive into extract_dir.
+
+    macOS release zips use symlinks (libfoo.0.dylib → libfoo.0.0.NNNN.dylib).
+    Python's zipfile silently skips them, leaving stale unversioned dylibs in
+    bin_dir after an update.  Strategy:
+      1. On Unix, prefer system `unzip` — handles symlinks natively, battle-tested.
+      2. Fall back to Python zipfile with two-pass symlink resolution: extract
+         regular files first, then copy symlink targets to their link paths.
+    """
+    import subprocess as _sp
+
+    if sys.platform != "win32":
+        unzip = shutil.which("unzip")
+        if unzip:
+            result = _sp.run(
+                [unzip, "-o", str(archive), "-d", str(extract_dir)],
+                capture_output=True,
+            )
+            if result.returncode == 0:
+                return True
+            logger.warning(
+                "system unzip failed (rc=%d), falling back to zipfile",
+                result.returncode,
+            )
+
+    with zipfile.ZipFile(archive, "r") as zf:
+        symlink_entries = []
+        for zi in zf.infolist():
+            if stat.S_ISLNK((zi.external_attr >> 16) & 0xFFFF):
+                symlink_entries.append(zi)
+            else:
+                zf.extract(zi, extract_dir)
+        for zi in symlink_entries:
+            target = zf.read(zi.filename).decode().strip()
+            link_path = extract_dir / zi.filename
+            target_path = link_path.parent / target
+            if target_path.exists():
+                shutil.copy2(target_path, link_path)
+    return True
+
+
 def _extract_archive(archive: Path, extract_dir: Path) -> bool:
     """Extract the full archive into extract_dir. Returns True on success."""
     extract_dir.mkdir(parents=True, exist_ok=True)
     if archive.suffix == ".zip":
-        with zipfile.ZipFile(archive, "r") as zf:
-            zf.extractall(extract_dir)
-        return True
+        return _extract_zip(archive, extract_dir)
     if archive.name.endswith(".tar.gz") or archive.name.endswith(".tgz"):
         with tarfile.open(archive, "r:gz") as tf:
             tf.extractall(extract_dir)

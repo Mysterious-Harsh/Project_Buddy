@@ -15,6 +15,10 @@ _IMAGE_EXTENSIONS = frozenset(
     {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tiff", ".tif"}
 )
 _MAX_SIZE_BYTES = 20 * 1024 * 1024  # 20 MB guard
+_URL_USER_AGENT = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+)
 
 
 def _space_norm(s: str) -> str:
@@ -149,6 +153,85 @@ def encode_image_to_data_uri(path: str) -> str:
 
     b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
     return f"data:image/png;base64,{b64}"
+
+
+def is_image_url(url: str) -> bool:
+    """
+    Quick check: does this URL point directly to an image file?
+    Checks file extension only — no network request.
+    """
+    if not url or not isinstance(url, str):
+        return False
+    if not url.startswith(("http://", "https://")):
+        return False
+    from urllib.parse import urlparse
+    path = urlparse(url).path.lower()
+    return Path(path).suffix in _IMAGE_EXTENSIONS
+
+
+def encode_url_to_data_uri(url: str) -> str:
+    """
+    Download an image from a URL and return a data URI for /v1/chat/completions.
+
+    JPEG/PNG  → pass bytes through directly.
+    WebP/GIF/BMP/TIFF/unknown → convert to PNG via Pillow.
+
+    Raises:
+        requests.HTTPError  — non-2xx HTTP response
+        ValueError          — empty body or image exceeds 20 MB
+        ImportError         — non-JPEG/PNG but Pillow not installed
+    """
+    import io
+
+    import requests as _requests
+
+    resp = _requests.get(
+        url,
+        timeout=15,
+        headers={"User-Agent": _URL_USER_AGENT},
+        allow_redirects=True,
+    )
+    resp.raise_for_status()
+
+    data = resp.content
+    if not data:
+        raise ValueError(f"Empty response from {url}")
+    if len(data) > _MAX_SIZE_BYTES:
+        raise ValueError(
+            f"Image too large ({len(data) / 1_048_576:.1f} MB). Max: 20 MB."
+        )
+
+    ct = resp.headers.get("content-type", "").split(";")[0].strip().lower()
+
+    if ct in ("image/jpeg", "image/jpg"):
+        return f"data:image/jpeg;base64,{base64.b64encode(data).decode()}"
+    if ct == "image/png":
+        return f"data:image/png;base64,{base64.b64encode(data).decode()}"
+
+    # WebP, GIF, BMP, TIFF, or unknown content-type — convert via Pillow
+    try:
+        from PIL import Image  # type: ignore
+    except ImportError:
+        raise ImportError(
+            f"Pillow is required to convert remote images (content-type: {ct!r}). "
+            "Install with: pip install Pillow"
+        )
+
+    with Image.open(io.BytesIO(data)) as img:
+        try:
+            img.seek(0)
+        except EOFError:
+            pass
+        has_alpha = img.mode in ("RGBA", "LA", "PA") or (
+            img.mode == "P" and "transparency" in img.info
+        )
+        target_mode = "RGBA" if has_alpha else "RGB"
+        if img.mode != target_mode:
+            img = img.convert(target_mode)
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+
+    return f"data:image/png;base64,{base64.b64encode(buf.getvalue()).decode()}"
 
 
 def extract_image_paths(text: str) -> List[str]:

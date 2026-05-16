@@ -11,7 +11,7 @@ _TOOL = "clipboard"
 
 
 def _ok(**extra: Any) -> Dict[str, Any]:
-    return {"STATUS": "success", "TOOL": _TOOL, **extra}
+    return {"STATUS": "success", **extra}
 
 
 def _err(msg: str) -> Dict[str, Any]:
@@ -136,7 +136,15 @@ class Clipboard:
         return {
             "name": self.tool_name,
             "version": self.version,
-            "description": "Read from or write to the system clipboard.",
+            "description": (
+                "WHEN: reading what is currently copied on the system clipboard, or placing text onto it.\n\n"
+                "FUNCTIONS:\n"
+                "  read()          — returns the current clipboard text content\n"
+                "  write(text)     — sets the clipboard to the given text string\n\n"
+                "CHAIN: clipboard read output feeds any downstream step that needs the currently copied value. "
+                "clipboard write is typically a final step — places a result where the user can paste it.\n"
+                "NOT: reading files → fs_read | fetching web content → web_fetch"
+            ),
             "prompt": CLIPBOARD_TOOL_PROMPT,
         }
 
@@ -170,7 +178,7 @@ class Clipboard:
         text = str(text)
         try:
             _set(text)
-            return _ok(LENGTH=len(text))
+            return _ok()
         except RuntimeError as e:
             return _err(str(e))
         except Exception as e:

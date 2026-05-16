@@ -265,7 +265,7 @@ class BrowserAction(BuddyBaseModel):
 
 class ReaderResult(BuddyBaseModel):
     relevant: bool = Field(default=False)
-    content: str = Field(default="")
+    findings: str = Field(default="")
 
 
 class VisionResult(BuddyBaseModel):

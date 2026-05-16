@@ -1,14 +1,13 @@
 from __future__ import annotations
 
 # ==========================================================
-# smart_truncator.py  —  v1.0.0
+# smart_truncator.py
 #
-# Three truncation strategies for Buddy's context inputs.
-# No LLM calls — pure string manipulation, zero latency.
-#
-# truncate_middle()       — file contents: keep head + tail, cut middle
+# truncate_middle()       — file/tool output: keep head + tail, cut middle
 # truncate_proportional() — execution results: each step gets equal share
-# truncate_history()      — conversation history: drop oldest turn-by-turn
+#
+# History and memory trimming moved to prompt_builder._fit_soft_context()
+# which measures token budgets instead of char estimates.
 # ==========================================================
 
 import json
@@ -116,54 +115,3 @@ def truncate_proportional(
     return result
 
 
-# ==========================================================
-# 3. History trim — for conversation turns
-# ==========================================================
-
-
-def truncate_history(text: str, max_chars: int) -> str:
-    """
-    Trim conversation history to max_chars by dropping the oldest turns first.
-
-    Assumptions about format produced by conversations.py:
-      - Each turn is separated by a blank line OR starts with a role prefix
-        like "User:" / "Buddy:" / "[timestamp]".
-      - We split on double-newline as the turn boundary.
-
-    Rules:
-      - Always keep at least the last 2 turns (floor).
-      - Drop oldest turns one at a time — never cut in half.
-      - If even the last 2 turns exceed max_chars, middle-cut the whole string.
-    """
-    if not text or len(text) <= max_chars:
-        return text
-
-    # Split into turns on blank lines
-    turns = [t.strip() for t in text.split("\n") if t.strip()]
-
-    if len(turns) <= 2:
-        # Can't drop any turns — fall back to middle-cut
-        return truncate_middle(text, max_chars)
-
-    # Drop oldest turns until it fits, keeping at least 2
-    while len(turns) > 2:
-        candidate = "\n".join(turns)
-        if len(candidate) <= max_chars:
-            return candidate
-        turns.pop(0)  # drop oldest
-
-    # Still too long with only 2 turns — middle-cut as last resort
-    return truncate_middle("\n".join(turns), max_chars)
-
-
-def truncate_memory(text: str, max_chars: int) -> str:
-    """
-    Alias for truncate_history — used for memory trimming in responder input.
-    """
-    mem = text.split("\n")
-    while len(text) > max_chars:
-
-        mem.pop(0)  # drop oldest line
-        text = "\n".join(mem)
-
-    return text

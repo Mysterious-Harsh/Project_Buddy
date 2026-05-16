@@ -63,7 +63,16 @@ class VisionTool:
         return {
             "name": TOOL_NAME,
             "version": "1.2.0",
-            "description": "Analyze image files or capture the current screen. Returns description, objects, visible text, and a direct answer.",
+            "description": (
+                "WHEN: analyzing an image file, or capturing and analyzing the current screen to answer a visual question.\n\n"
+                "FUNCTIONS:\n"
+                "  analyze(path, query)          — analyze a single image file; returns description, objects, visible text, key finding\n"
+                "  analyze(paths[], query)        — analyze multiple images in one call; same return fields\n"
+                "  screenshot(query)             — capture the current screen and analyze it; pass action='screenshot'\n\n"
+                "INPUT: absolute file paths only. Supported formats: jpg/png/gif/bmp — WebP is NOT supported (convert first).\n\n"
+                "CHAIN: vision output (description, text_found, objects, key_finding) feeds analyzer for structured extraction, or responder directly.\n"
+                "NOT: reading text or data files → fs_read | automated web page interaction → browser"
+            ),
             "prompt": VISION_TOOL_PROMPT,
         }
 
@@ -115,10 +124,15 @@ class VisionTool:
         if not raw_paths:
             raise ValueError("'path' or 'paths' is required for action='analyze'")
 
-        # Validate and resolve each path (resolve_image_path handles ~ and
-        # macOS narrow no-break space in screenshot filenames)
+        # Validate and resolve each path.
+        # URLs (http/https) are passed through — downloaded at vision time.
+        # Local paths are resolved via resolve_image_path (handles ~ and macOS
+        # narrow no-break space in screenshot filenames).
         resolved: List[str] = []
         for p in raw_paths:
+            if p.startswith(("http://", "https://")):
+                resolved.append(p)
+                continue
             r = resolve_image_path(p)
             if r is None:
                 raise ValueError(f"Image file not found: {p}")

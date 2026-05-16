@@ -9,7 +9,6 @@ TOOL_DESCRIPTION: Control media playback, volume, app launching, and system stat
     <parameters>
       - action (string, REQUIRED) — plain command; see allowed formats in rule 2
     </parameters>
-    <returns>OK, ACTION, REPLY, ERROR</returns>
     <destructive>NO</destructive>
     <confirmation_required>NO</confirmation_required>
   </function>
@@ -38,7 +37,9 @@ TOOL_DESCRIPTION: Control media playback, volume, app launching, and system stat
 
 </tool_rules>
 
-<error_recovery>
+
+"""
+SYSTEM_CONTROL_TOOL_ERROR_PROMPT = """<error_recovery>
 Read only when <errors> is present in context.
 
 1. ERROR CATEGORIES
@@ -55,5 +56,4 @@ Read only when <errors> is present in context.
    2.1 Never repeat the identical action string that already failed.
    2.2 After 2 failures → status="followup".
 
-</error_recovery>
-"""
+</error_recovery>"""

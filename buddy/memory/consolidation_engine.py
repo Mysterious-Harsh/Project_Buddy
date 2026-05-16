@@ -168,30 +168,30 @@ _AROUSAL_KEYWORDS: frozenset = frozenset([
     "blessed",
     # v5-X1: Hindi / Hinglish high-arousal terms
     # Validated against ANEW Hindi word-norms (Bhatt & Bhatt 2020)
-    "dard",       # pain
-    "maut",       # death
-    "pyaar",      # love
-    "mohabbat",   # deep love
-    "nafrat",     # hate
-    "dukh",       # sorrow/grief
-    "khushi",     # joy
-    "gussa",      # anger
-    "darr",       # fear
-    "pareshan",   # troubled/anxious
-    "takleef",    # pain/trouble
-    "ghabrana",   # to panic
-    "ghabrao",    # panic (imperative)
-    "mushkil",    # difficult/trouble
-    "toota",      # broken
-    "rona",       # crying
-    "zyada",      # too much (arousal booster)
-    "tension",    # Hinglish: stress/worry
-    "chakkar",    # Hinglish: trouble/dizziness
-    "dimag",      # mind — "dimag kharab" = troubled mind
-    "taqleef",    # alternate spelling: pain/trouble
-    "gam",        # grief/sorrow
-    "fikar",      # worry/concern
-    "bechaini",   # restlessness/anxiety
+    "dard",  # pain
+    "maut",  # death
+    "pyaar",  # love
+    "mohabbat",  # deep love
+    "nafrat",  # hate
+    "dukh",  # sorrow/grief
+    "khushi",  # joy
+    "gussa",  # anger
+    "darr",  # fear
+    "pareshan",  # troubled/anxious
+    "takleef",  # pain/trouble
+    "ghabrana",  # to panic
+    "ghabrao",  # panic (imperative)
+    "mushkil",  # difficult/trouble
+    "toota",  # broken
+    "rona",  # crying
+    "zyada",  # too much (arousal booster)
+    "tension",  # Hinglish: stress/worry
+    "chakkar",  # Hinglish: trouble/dizziness
+    "dimag",  # mind — "dimag kharab" = troubled mind
+    "taqleef",  # alternate spelling: pain/trouble
+    "gam",  # grief/sorrow
+    "fikar",  # worry/concern
+    "bechaini",  # restlessness/anxiety
 ])
 
 # ── v4.1-patch: ALL-CAPS emotional emphasis detector (PATCH-3) ───────────────
@@ -202,11 +202,38 @@ _CAPS_RE = re.compile(r"\b[A-Z]{3,}\b")
 # discounted.  This prevents "not in pain" or "no longer desperate" from
 # falsely boosting arousal.
 _NEGATION_WORDS: frozenset = frozenset([
-    "not", "no", "never", "neither", "nor", "without", "hardly", "barely",
-    "scarcely", "none", "nothing", "nobody", "nowhere", "cannot", "can't",
-    "won't", "don't", "doesn't", "didn't", "isn't", "aren't", "wasn't",
-    "weren't", "hasn't", "haven't", "hadn't", "shouldn't", "wouldn't",
-    "couldn't", "no longer", "not really", "not at all",
+    "not",
+    "no",
+    "never",
+    "neither",
+    "nor",
+    "without",
+    "hardly",
+    "barely",
+    "scarcely",
+    "none",
+    "nothing",
+    "nobody",
+    "nowhere",
+    "cannot",
+    "can't",
+    "won't",
+    "don't",
+    "doesn't",
+    "didn't",
+    "isn't",
+    "aren't",
+    "wasn't",
+    "weren't",
+    "hasn't",
+    "haven't",
+    "hadn't",
+    "shouldn't",
+    "wouldn't",
+    "couldn't",
+    "no longer",
+    "not really",
+    "not at all",
 ])
 
 # ── v4.1-patch: importance threshold for hard-delete protection (PATCH-1) ────
@@ -254,7 +281,9 @@ _PI_DECAY_RATE: float = 0.03 / 30.0  # per day for new memory
 class SleepBudget:
     # Scan limits
     max_candidates: int = 300
-    consolidation_cooldown_sec: float = 86400.0
+    consolidation_cooldown_sec: float = (
+        21600.0  # 6h — was 24h; 24h was too long for active sessions
+    )
     top_k_neighbors: int = 20
     tau_dup: float = 0.80
 
@@ -265,7 +294,9 @@ class SleepBudget:
 
     # Tier update limits
     max_tier_updates: int = 200
-    min_flash_age_sec: float = 10800.0  # v5-P5: 1h → 3h (reduce noisy flash→short churn)
+    min_flash_age_sec: float = (
+        10800.0  # v5-P5: 1h → 3h (reduce noisy flash→short churn)
+    )
 
     # Deletion budgets
     max_hard_deletes: int = 50
@@ -386,6 +417,8 @@ class Cluster:
     # v5-P10: temporal coherence — schema clusters span > 14 days
     is_schema: bool = False
     time_span_days: float = 0.0
+    # max pairwise similarity among cluster members (from dup_similarities)
+    max_member_sim: float = 0.0
 
 
 # =============================================================================
@@ -512,7 +545,7 @@ def _compute_arousal(m: MemoryEntry) -> float:
                     kw_hits += 1
                 break
             # Multi-token keyword (e.g. compound phrases)
-            if i + kw_len <= len(tokens) and tokens[i: i + kw_len] == kw_tokens:
+            if i + kw_len <= len(tokens) and tokens[i : i + kw_len] == kw_tokens:
                 if not _negation_window(tokens, i):
                     kw_hits += 1
                 break
@@ -1030,11 +1063,19 @@ def _build_clusters(
         if len(component) > budget.max_cluster_size:
             component = sorted(
                 component,
-                key=lambda cid: _compute_strength(
-                    id_map[cid], now=now, budget=budget,
-                    neighbor_map=neighbor_map, raw_bla_scores=raw_bla_scores,
-                    dynamic_importances=dynamic_importances, id_map=id_map,
-                ) if cid in id_map else 0.0,
+                key=lambda cid: (
+                    _compute_strength(
+                        id_map[cid],
+                        now=now,
+                        budget=budget,
+                        neighbor_map=neighbor_map,
+                        raw_bla_scores=raw_bla_scores,
+                        dynamic_importances=dynamic_importances,
+                        id_map=id_map,
+                    )
+                    if cid in id_map
+                    else 0.0
+                ),
                 reverse=True,
             )[: budget.max_cluster_size]
 
@@ -1044,8 +1085,7 @@ def _build_clusters(
 
         # P10: temporal coherence
         timestamps = [
-            float(getattr(id_map[cid], "created_at", now) or now)
-            for cid in ids
+            float(getattr(id_map[cid], "created_at", now) or now) for cid in ids
         ]
         time_span_sec = max(timestamps) - min(timestamps)
         time_span_days = time_span_sec / 86400.0
@@ -1053,17 +1093,29 @@ def _build_clusters(
 
         strengths = [
             _compute_strength(
-                id_map[cid], now=now, budget=budget,
-                neighbor_map=neighbor_map, raw_bla_scores=raw_bla_scores,
-                dynamic_importances=dynamic_importances, id_map=id_map,
+                id_map[cid],
+                now=now,
+                budget=budget,
+                neighbor_map=neighbor_map,
+                raw_bla_scores=raw_bla_scores,
+                dynamic_importances=dynamic_importances,
+                id_map=id_map,
             )
             for cid in ids
         ]
         dyn_imps = [dynamic_importances.get(cid, 0.0) for cid in ids]
         texts = [getattr(id_map[cid], "text", "") or "" for cid in ids]
-        max_arousal = max(
-            (_compute_arousal(id_map[cid]) for cid in ids), default=0.0
-        )
+        max_arousal = max((_compute_arousal(id_map[cid]) for cid in ids), default=0.0)
+
+        # Max pairwise similarity within cluster — used to gate deduplication
+        ids_set = set(ids)
+        max_member_sim = 0.0
+        for cid in ids:
+            info = neighbor_map.get(cid)
+            if info:
+                for nid, sim in info.dup_similarities.items():
+                    if nid in ids_set:
+                        max_member_sim = max(max_member_sim, sim)
 
         clusters.append(
             Cluster(
@@ -1078,6 +1130,7 @@ def _build_clusters(
                 max_arousal=max_arousal,
                 is_schema=is_schema,
                 time_span_days=time_span_days,
+                max_member_sim=max_member_sim,
             )
         )
 
@@ -1112,6 +1165,13 @@ def _pick_summary_clusters(
         if c.avg_importance >= budget.min_avg_importance_for_summary:
             eligible.append(c)
         elif c.total_chars >= budget.min_total_chars_for_summary:
+            eligible.append(c)
+        elif c.max_member_sim >= budget.tau_dup:
+            # Near-exact duplicate cluster — always consolidate regardless of
+            # importance or length. Any cluster formed from dup_ids already has
+            # max_member_sim >= tau_dup, but this path makes the intent explicit:
+            # genuine duplicates must be merged even when they are short or
+            # low-importance (e.g., repeated flash observations).
             eligible.append(c)
     eligible.sort(key=lambda c: _cluster_priority_score(c, budget=budget), reverse=True)
     return eligible[: budget.max_summaries]
@@ -1175,9 +1235,7 @@ def _apply_summary_cluster(
     # temporal gradient boost when the newest member happened to be ~24h old.
     # The centroid better represents "when did this cluster of knowledge form?"
     centroid_creation: float = (
-        sum(all_creation_times) / len(all_creation_times)
-        if all_creation_times
-        else now
+        sum(all_creation_times) / len(all_creation_times) if all_creation_times else now
     )
 
     if not items:
@@ -1186,8 +1244,12 @@ def _apply_summary_cluster(
     # P9: consolidation_depth cap — track summarization depth; require high
     # confidence for deep re-summarizations to prevent semantic drift.
     max_source_depth: int = max(
-        int((getattr(id_map.get(mid), "metadata", {}) or {}).get(
-            "consolidation_depth", 0) or 0)
+        int(
+            (getattr(id_map.get(mid), "metadata", {}) or {}).get(
+                "consolidation_depth", 0
+            )
+            or 0
+        )
         for mid in cluster.ids
         if id_map.get(mid) is not None
     )
@@ -1200,7 +1262,9 @@ def _apply_summary_cluster(
         f"{_iso(ts)} | {tier} | imp={imp:.2f} | {text}"
         for (ts, text, tier, imp) in items
     ]
-    parsed = brain.run_memory_summary(memories="\n".join(memories), now=now).get("parsed")
+    parsed = brain.run_memory_summary(memories="\n".join(memories), now=now).get(
+        "parsed"
+    )
     summary_text = str(parsed.get("memory_summary", "") or "").strip()
     salience = float(parsed.get("salience", 0.0) or 0.0)
     confidence = float(parsed.get("confidence", 0.0) or 0.0)
@@ -1219,7 +1283,7 @@ def _apply_summary_cluster(
             len(cluster.ids),
         )
 
-    if not summary_text:
+    if summary_text in ["", "None", "null", "none", "...", None]:
         raise ValueError("empty summary_text from summarizer")
 
     is_provisional = confidence < budget.reflective_confidence_min
@@ -1235,7 +1299,9 @@ def _apply_summary_cluster(
         min(1.0, 0.6 * max(0.0, min(1.0, salience)) + 0.4 * cluster.avg_importance),
     )
 
-    prov_expires = now + budget.provisional_window_days * 86400 if is_provisional else None
+    prov_expires = (
+        now + budget.provisional_window_days * 86400 if is_provisional else None
+    )
 
     summary_mem = MemoryEntry(
         text=summary_text,
@@ -1283,7 +1349,10 @@ def _apply_summary_cluster(
                         )
                         conn.commit()
                 except Exception:
-                    logger.exception("p7.provisional_protect_failed cluster_size=%d", len(cluster.ids))
+                    logger.exception(
+                        "p7.provisional_protect_failed cluster_size=%d",
+                        len(cluster.ids),
+                    )
     else:
         soft_deleted_count = len(cluster.ids)
 
@@ -1311,8 +1380,9 @@ def _increment_cycle_counts(
             for mid in survivor_ids:
                 try:
                     conn.execute(
-                        "UPDATE memories SET consolidation_cycles = consolidation_cycles + 1,"
-                        " last_consolidated_at = ? WHERE id=?",
+                        "UPDATE memories SET consolidation_cycles ="
+                        " consolidation_cycles + 1, last_consolidated_at = ? WHERE"
+                        " id=?",
                         (now_ts, mid),
                     )
                     updated += 1
@@ -1628,7 +1698,8 @@ def _plan_hard_deletes(
             # least one dup is NOT already scheduled for deletion.
             surviving_dup = next(
                 (
-                    nid for nid in (info.dup_ids if info else [])
+                    nid
+                    for nid in (info.dup_ids if info else [])
                     if nid not in dels_set
                     and id_map.get(nid) is not None
                     and int(getattr(id_map[nid], "deleted", 0) or 0) == 0
@@ -1705,7 +1776,11 @@ def _hard_delete(
                     (str(memory_id),),
                 ).fetchone()
                 if row:
-                    audit_text, audit_type, audit_imp = row[0] or "", row[1] or "flash", float(row[2] or 0.0)
+                    audit_text, audit_type, audit_imp = (
+                        row[0] or "",
+                        row[1] or "flash",
+                        float(row[2] or 0.0),
+                    )
         except Exception:
             pass
 
@@ -1889,7 +1964,7 @@ def run_consolidation(
                     id_map.get(nid)
                     and float(getattr(id_map[nid], "created_at", now))
                     > float(getattr(m, "created_at", now))
-                    for nid in (neighbor_map[m.id].dup_ids or [])
+                    for nid in neighbor_map[m.id].dup_ids or []
                 )
             )
         )
@@ -2177,7 +2252,7 @@ def _print_dry_run(
         print(
             f"\n  Cluster #{i}  [{phase}]  size={len(cl.ids)}  "
             f"avg_M={cl.avg_strength:.2f}  avg_dyn_imp={cl.avg_importance:.2f}  "
-            f"max_arousal={cl.max_arousal:.2f}"
+            f"max_arousal={cl.max_arousal:.2f}  max_sim={cl.max_member_sim:.3f}"
         )
         for mid in cl.ids[:5]:
             m = id_map.get(mid)

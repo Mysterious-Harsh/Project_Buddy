@@ -1070,6 +1070,13 @@ class ChatLog(ScrollableContainer):
         self.scroll_end(animate=False)
         return bubble
 
+    def get_last_buddy_text(self) -> str | None:
+        """Return the raw text of the most recent Buddy bubble, or None."""
+        for bubble in reversed(list(self.query(ChatBubble))):
+            if bubble._kind == "buddy" and bubble._text:
+                return bubble._text
+        return None
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # SleepView — two independent timers, progress bars, Esc hint
@@ -1239,6 +1246,9 @@ class MicIndicator(Static):
     MicIndicator.muted {{
         color: {_DIM};
     }}
+    MicIndicator.speaking {{
+        color: {_GREEN};
+    }}
     """
 
     _state: reactive[str] = reactive("idle")
@@ -1248,15 +1258,19 @@ class MicIndicator(Static):
             return "[dim]🔇[/]" if _USE_UNICODE else "[dim]M[/]"
         if self._state == "active":
             return f"[{_CYAN}]◎[/]" if _USE_UNICODE else f"[{_CYAN}]O[/]"
+        if self._state == "speaking":
+            return f"[{_GREEN}]🔊[/]" if _USE_UNICODE else f"[{_GREEN}]S[/]"
         return f"[dim {_DIM}]◎[/]" if _USE_UNICODE else f"[dim {_DIM}]o[/]"
 
     def set_state(self, state: str) -> None:
         self._state = state
-        self.remove_class("active", "muted")
+        self.remove_class("active", "muted", "speaking")
         if state == "active":
             self.add_class("active")
         elif state == "muted":
             self.add_class("muted")
+        elif state == "speaking":
+            self.add_class("speaking")
 
 
 class BuddyInput(TextArea):

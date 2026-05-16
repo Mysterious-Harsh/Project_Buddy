@@ -1,16 +1,17 @@
 WEB_FETCH_TOOL_PROMPT = """
 TOOL_NAME: web_fetch
-TOOL_DESCRIPTION: Fetch full readable text from URLs, or download binary files to disk. Use after web_search — pass URLs from search results as input.
+TOOL_DESCRIPTION: Fetch full readable text from URLs, or download binary files to disk. Use after web_search by passing URLs from search results — or use directly when a URL is already known from the task, memory, or prior step (no search needed in that case). Set visual_analysis=true when the task involves charts, graphs, diagrams, or visual data.
 
 <functions>
   <function>
     <name>fetch</name>
-    <description>Download and extract plain text from one or more URLs.</description>
+    <description>Download and extract plain text from one or more URLs. Optionally extracts and analyses images found on the page.</description>
     <parameters>
-      - urls      (array,   REQUIRED) — 1 to 5 URL strings; must start with http:// or https://
-      - max_chars (integer, OPTIONAL, default: 8000, max: 20000) — per-URL content cap
+      - urls            (array,   REQUIRED) — 1 to 4 URL strings; must start with http:// or https://
+      - max_chars       (integer, OPTIONAL, default: 8000, max: 20000) — per-URL text content cap
+      - visual_analysis (boolean, OPTIONAL, default: false) — extract and analyse images found on the page; set true when charts, graphs, diagrams, or visual data are relevant
+      - max_images      (integer, OPTIONAL, default: 3, max: 8) — max images to analyse per URL; raise only when the user explicitly needs comprehensive visual coverage
     </parameters>
-    <returns>OK, RESULTS [{url, title, content, size_chars, error}], TOTAL_FETCHED, ERROR</returns>
     <destructive>NO</destructive>
     <confirmation_required>NO</confirmation_required>
   </function>
@@ -23,7 +24,6 @@ TOOL_DESCRIPTION: Fetch full readable text from URLs, or download binary files t
       - dest_path (string,  REQUIRED) — destination file or directory path; if a directory, filename is inferred from the URL
       - overwrite (boolean, OPTIONAL, default: false) — allow overwriting an existing file
     </parameters>
-    <returns>OK, URL, DEST_PATH, SIZE_BYTES, CONTENT_TYPE, ERROR</returns>
     <destructive>YES — writes a file to disk</destructive>
     <confirmation_required>YES — if dest_path already exists and overwrite=false</confirmation_required>
   </function>
@@ -31,37 +31,61 @@ TOOL_DESCRIPTION: Fetch full readable text from URLs, or download binary files t
 
 <tool_rules>
 
-1. URL SOURCES
-   1.1 Only use URLs from prior web_search RESULTS. Never construct or invent URLs.
-   1.2 Read the title and snippet of each result before choosing — pick the best match for the user's question.
-   1.3 Prefer authoritative domains (official docs, reputable publications) when results look equally relevant.
-   1.4 Avoid: social media, maps, weather widgets, login-gated pages, aggregator spam sites.
+1. VISUAL ANALYSIS — WHEN TO SET visual_analysis=true
+   Do NOT wait for the user to explicitly ask for image analysis. Set visual_analysis=true
+   whenever the task domain naturally involves visual content:
 
-2. HOW MANY URLs (fetch only)
+   ALWAYS true for:
+   - Stock prices, technical analysis, trading charts, candlestick patterns
+   - Weather forecasts, climate data, satellite imagery
+   - Scientific figures, research papers with graphs
+   - Architecture, engineering, or system diagrams
+   - Medical imaging, lab results, scan reports
+   - Product comparisons where appearance matters
+   - Data dashboards, analytics reports, infographics
+   - Any query containing: "chart", "graph", "diagram", "plot", "figure",
+     "screenshot", "image", "visual", "trend", "pattern", "look like"
+
+   If the URL itself ends in .jpg/.png/.gif/.webp — it IS an image.
+   visual_analysis=true is set automatically; the page is skipped and
+   the image is analysed directly.
+
+   If search used categories="images" — the img_src URLs in results are
+   direct image files. Pass them in urls[] with visual_analysis=true.
+
+2. URL SOURCES
+   2.1 Only use URLs from prior web_search RESULTS. Never construct or invent URLs.
+   2.2 Read the title and snippet of each result before choosing — pick the best match for the user's question.
+   2.3 Prefer authoritative domains (official docs, reputable publications) when results look equally relevant.
+   2.4 Avoid: social media, maps, weather widgets, login-gated pages, aggregator spam sites.
+
+3. HOW MANY URLs (fetch only) (MAX 4)
    Quick fact, single topic                                  → 1–2 URLs
    Comparisons, tutorials, moderate depth                   → 2–3 URLs
-   Comprehensive research, multiple perspectives requested  → 3–5 URLs
+   Comprehensive research, multiple perspectives requested  → 3–4 URLs
    Default to 1–2 unless the user explicitly asks for more.
 
-3. WHEN NOT TO FETCH
-   3.1 JavaScript-rendered pages (maps, weather, dashboards, social media) → return empty or broken content. Use search snippets instead.
-   3.2 If the answer is fully contained in search snippets → skip this step entirely.
+4. WHEN NOT TO FETCH
+   4.1 JavaScript-rendered pages (maps, weather, dashboards, social media) → return empty or broken content. Use search snippets instead.
+   4.2 If the answer is fully contained in search snippets → skip this step entirely.
 
-4. PER-URL ERRORS (fetch only)
-   4.1 Each result in RESULTS has its own error field. A partial fetch (some URLs succeeded) is still OK=true.
-   4.2 Read each result's error field individually before deciding whether to retry.
+5. PER-URL ERRORS (fetch only)
+   5.1 Each result in RESULTS has its own error field. A partial fetch (some URLs succeeded) is still OK=true.
+   5.2 Read each result's error field individually before deciding whether to retry.
 
-5. FETCH vs DOWNLOAD
-   5.1 Use fetch for: HTML pages, documentation, articles — content the LLM needs to read.
-   5.2 Use download for: binary files (ZIPs, PDFs, images, executables, datasets) to be saved to disk.
-   5.3 Never use download to read text content — use fetch instead.
+6. FETCH vs DOWNLOAD
+   6.1 Use fetch for: HTML pages, documentation, articles — content the LLM needs to read.
+   6.2 Use download for: binary files (ZIPs, PDFs, images, executables, datasets) to be saved to disk.
+   6.3 Never use download to read text content — use fetch instead.
 
-6. DOWNLOAD SAFETY
-   6.1 If dest_path already exists and overwrite=false → stop. Report the path and ask the user to confirm.
-   6.2 Always use the exact dest_path the user specified. Never invent a path.
+7. DOWNLOAD SAFETY
+   7.1 If dest_path already exists and overwrite=false → stop. Report the path and ask the user to confirm.
+   7.2 Always use the exact dest_path the user specified. Never invent a path.
 
 </tool_rules>
 
+"""
+WEB_FETCH_TOOL_ERROR_PROMPT = """
 <error_recovery>
 Read only when <errors> is present in context.
 
@@ -91,5 +115,4 @@ Read only when <errors> is present in context.
    3.2 Never retry a download where the file already exists (category 2A) or permission was denied (category 2B).
    3.3 After 3 failures total → status="followup".
 
-</error_recovery>
-"""
+</error_recovery>"""

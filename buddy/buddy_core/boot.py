@@ -288,6 +288,58 @@ def _run(cmd: List[str], *, timeout: float = 3.0) -> Optional[str]:
         return None
 
 
+def _is_importable(module: str) -> bool:
+    """Return True if a module can be found without actually importing it."""
+    import importlib.util
+    return importlib.util.find_spec(module) is not None
+
+
+def _onnxruntime_has_cuda() -> bool:
+    """True if the installed onnxruntime was built with CUDA support."""
+    try:
+        import onnxruntime as _ort  # type: ignore
+        return "CUDAExecutionProvider" in _ort.get_available_providers()
+    except Exception:
+        return False
+
+
+def _pip_install_packages(
+    packages: List[str],
+    *,
+    uninstall_first: Optional[List[str]] = None,
+    timeout: int = 300,
+) -> bool:
+    """
+    Install pip packages using the current interpreter (conda/venv-aware).
+    Returns True on success. Never raises.
+    """
+    try:
+        if uninstall_first:
+            subprocess.run(
+                [sys.executable, "-m", "pip", "uninstall", "-y"] + uninstall_first,
+                capture_output=True,
+                timeout=60,
+                check=False,
+            )
+        result = subprocess.run(
+            [sys.executable, "-m", "pip", "install"] + packages,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+        if result.returncode != 0:
+            logger.warning(
+                "pip install %s failed: %s",
+                packages,
+                (result.stderr or "")[-500:],
+            )
+        return result.returncode == 0
+    except Exception as ex:
+        logger.warning("pip install %s exception: %r", packages, ex)
+        return False
+
+
 # ═══════════════════════════════════════════════════════════
 # §5  OS profile collection
 #     Five collectors — each returns one section of the profile dict.
@@ -841,6 +893,88 @@ def _ensure_llm_gguf(
         print(f"\n  ✗  LLM download failed: {ex}\n")
         integrity.violations.append(f"llm_gguf_download_failed:{ex!r}")
         return {"path": None, "downloaded": False, "ok": False}
+
+
+# ── 8c · Parakeet TDT dependency check / install ─────────────────────────
+
+
+def _ensure_parakeet_deps(
+    *,
+    gpu_backend: str,
+    voice_enabled: bool,
+    stt_backend: str,
+    show_ui: bool,
+    integrity: BootstrapIntegrity,
+) -> bool:
+    """
+    Ensure onnx-asr and the correct onnxruntime variant are installed.
+
+    Decision table:
+      stt_backend = "faster_whisper"  → skip entirely, return False
+      stt_backend = "auto"            → install onnx-asr; pick best onnxruntime
+      stt_backend = "parakeet_onnx"  → same as auto
+
+    onnxruntime variant:
+      NVIDIA (cuda)   → upgrade CPU onnxruntime → onnxruntime-gpu if not already CUDA
+      Apple  (metal)  → CoreML is built into the stock onnxruntime on macOS; no change
+      CPU/other       → stock onnxruntime already installed; no change
+
+    Returns True if onnx-asr will be importable after this call.
+    """
+    if not voice_enabled or stt_backend == "faster_whisper":
+        return False
+
+    # ── 1. onnx-asr ──────────────────────────────────────────────────────────
+    if not _is_importable("onnx_asr"):
+        sp = _ui_step(show_ui, "Installing Parakeet TDT (onnx-asr)")
+        ok = _pip_install_packages(["onnx-asr"])
+        sp.stop()
+        if not ok:
+            _ui_warn("Parakeet TDT: onnx-asr install failed — will use faster-whisper")
+            integrity.warnings.append("parakeet_onnx_asr_install_failed")
+            return False
+        _ui_ok("Parakeet TDT: onnx-asr installed")
+    else:
+        _ui_ok("Parakeet TDT: onnx-asr ready")
+
+    # ── 2. onnxruntime variant ────────────────────────────────────────────────
+    if gpu_backend == "cuda":
+        if _onnxruntime_has_cuda():
+            _ui_ok("Parakeet TDT: onnxruntime-gpu (CUDA) already active")
+        else:
+            sp = _ui_step(show_ui, "Upgrading onnxruntime → onnxruntime-gpu (CUDA)")
+            ok = _pip_install_packages(
+                ["onnxruntime-gpu"],
+                uninstall_first=["onnxruntime"],
+            )
+            sp.stop()
+            if ok and _onnxruntime_has_cuda():
+                _ui_ok("Parakeet TDT: onnxruntime-gpu ready (CUDA)")
+            else:
+                _ui_warn(
+                    "Parakeet TDT: CUDA upgrade failed — will use CPU "
+                    "inference (~26x real-time, still faster than Whisper)"
+                )
+                integrity.warnings.append("parakeet_onnxruntime_gpu_upgrade_failed")
+    elif gpu_backend == "metal":
+        # CoreML EP is included in the stock onnxruntime macOS wheel — no action needed.
+        _ui_ok("Parakeet TDT: onnxruntime CoreML (Apple Silicon) ready")
+    elif gpu_backend == "rocm":
+        sp = _ui_step(show_ui, "Installing onnxruntime-rocm (AMD GPU)")
+        ok = _pip_install_packages(
+            ["onnxruntime-rocm"],
+            uninstall_first=["onnxruntime"],
+        )
+        sp.stop()
+        if ok:
+            _ui_ok("Parakeet TDT: onnxruntime-rocm ready")
+        else:
+            _ui_warn("Parakeet TDT: ROCm install failed — will use CPU inference")
+            integrity.warnings.append("parakeet_onnxruntime_rocm_failed")
+    else:
+        _ui_ok("Parakeet TDT: onnxruntime CPU ready")
+
+    return True
 
 
 # ═══════════════════════════════════════════════════════════
@@ -2353,6 +2487,25 @@ def bootstrap(
         f"Reranker {'ready' if reranker_path else 'unavailable'}: {reranker_model}",
         "ok" if reranker_path else "warn",
     )
+
+    # ── STEP 9.5 · Parakeet TDT dependency check / install ───────────────────
+    _voice_cfg_boot = _sec(buddy_cfg, "voice")
+    _stt_backend_cfg = str(_voice_cfg_boot.get("stt_backend", "parakeet_onnx"))
+    _stt_enabled = bool(_sec(buddy_cfg, "features").get("enable_audio_stt", False))
+    _gpu_backend = str(gpu_info.get("backend") or "")
+    if _stt_enabled and _stt_backend_cfg != "faster_whisper":
+        _pcb("Checking Parakeet TDT dependencies", "running")
+        _parakeet_ready = _ensure_parakeet_deps(
+            gpu_backend=_gpu_backend,
+            voice_enabled=_stt_enabled,
+            stt_backend=_stt_backend_cfg,
+            show_ui=opts.show_boot_ui,
+            integrity=integrity,
+        )
+        _pcb(
+            f"Parakeet TDT {'ready' if _parakeet_ready else 'unavailable — using faster-whisper'}",
+            "ok" if _parakeet_ready else "warn",
+        )
 
     # ── STEP 10 · Set env vars BEFORE first instantiation ────────────────────
     # EmbeddingProvider singleton reads BUDDY_EMBED_MODEL on first __new__().

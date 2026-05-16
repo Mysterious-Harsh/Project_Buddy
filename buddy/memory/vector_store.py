@@ -570,7 +570,7 @@ class RerankConfig:
     cross_encoder_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 
     dense_threshold: float = 0.25
-    rerank_threshold: float = 0.40
+    rerank_threshold: float = 0.20
     rerank_min_keep: int = 0
 
     # ACC-2: MMR diversity post-processing (opt-in, off by default)
@@ -994,7 +994,7 @@ class VectorStore:
                 )
             ),
             dense_threshold=rr_cfg.get("dense_threshold", 0.25),
-            rerank_threshold=rr_cfg.get("rerank_threshold", 0.40),
+            rerank_threshold=rr_cfg.get("rerank_threshold", 0.20),
             rerank_min_keep=rr_cfg.get("rerank_min_keep", 0),
             use_mmr=bool(rr_cfg.get("use_mmr", False)),
             mmr_lambda=float(rr_cfg.get("mmr_lambda", 0.7) or 0.7),
@@ -2230,8 +2230,8 @@ if __name__ == "__main__":
         "max_length": 2048,
         "qwen_model": "Qwen/Qwen3-Reranker-0.6B",
         "cross_encoder_model": "cross-encoder/ms-marco-MiniLM-L-6-v2",
-        "dense_threshold": 0.25,
-        "rerank_threshold": 0.4,
+        "dense_threshold": 0.24,
+        "rerank_threshold": 0.20,
         "rerank_min_keep": 0,
         "use_mmr": False,  # opt-in, off by default
         "mmr_lambda": 0.7,

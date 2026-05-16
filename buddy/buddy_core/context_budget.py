@@ -21,15 +21,13 @@ _RESERVED_RAM = 0.20
 _RESERVED_VRAM = 0.25
 _RESERVED_METAL = 0.35  # unified memory needs a larger buffer
 
-# Fraction of total context chars held back as a system safety margin
-_RESERVE = 0.30
+# Fraction of n_ctx reserved for the model's response (LLM output tokens)
+_RESPONSE_PCT = 0.20
 
-# Slot allocations — intentionally allowed to sum > 1.0 because slots
-# rarely fill simultaneously. If you need strict non-overlap, enforce
-# it at call-site by dividing each by their sum (1.20).
+# Slot allocations as fractions of n_ctx — intentionally allowed to sum > 1.0
+# because slots rarely fill simultaneously.
 _ALLOC_HISTORY = 0.35
 _ALLOC_MEMORY = 0.20
-_ALLOC_TOOL = 0.25
 _ALLOC_EXEC = 0.40
 
 # Runtime pressure thresholds (fraction of free memory)
@@ -51,7 +49,7 @@ _PRESSURE_SCALE: dict[str, float] = {
 }
 
 _FLOOR_TURNS = 3
-_MIN_CHARS = 256  # absolute floor for any single char slot
+_MIN_TOKENS = 64  # absolute floor for any single token slot
 
 
 # ==========================================================
@@ -118,10 +116,9 @@ class ContextBudget:
     recent_turns: int
     top_k_memories: int
     pre_rerank_k: int
-    # -- character budgets --
+    # -- character budgets (derived from token budgets × chars_per_token) --
     max_history_chars: int
     max_memory_chars: int
-    max_tool_chars: int
     max_exec_chars: int
     # -- provenance --
     backend: str
@@ -129,6 +126,15 @@ class ContextBudget:
     pressure_level: str = "nominal"
     # -- token estimation --
     chars_per_token: float = _DEFAULT_CHARS_PER_TOKEN
+    # -- token budgets (percentages of n_ctx, computed in _build) --
+    # max_tool_tokens is intentionally absent: the tools description in the
+    # planner prompt is fixed and cannot be trimmed — having a slot for it
+    # implies it can be evicted, which it cannot.
+    response_tokens: int = 0
+    max_prompt_tokens: int = 0
+    max_history_tokens: int = 0
+    max_memory_tokens: int = 0
+    max_exec_tokens: int = 0
 
     # ===========================================================
     # FACTORY — from_hardware
@@ -278,59 +284,82 @@ class ContextBudget:
             min(turns_ceiling, int(current_turns * scale)),
         )
 
-        # char limits: scale from base, enforce per-slot floor
-        def _scaled(base_val: int) -> int:
-            return max(_MIN_CHARS, int(base_val * scale))
+        # Token limits: scale from base, enforce per-slot floor
+        def _scaled_tok(base_val: int) -> int:
+            return max(_MIN_TOKENS, int(base_val * scale))
 
         # Skip rebuild if nothing changes
         if level == base.pressure_level and new_turns == base.recent_turns:
             return base
 
+        new_hist_tok = _scaled_tok(base.max_history_tokens)
+        new_mem_tok  = _scaled_tok(base.max_memory_tokens)
+        new_exec_tok = _scaled_tok(base.max_exec_tokens)
+        cpt = base.chars_per_token
+
         adjusted = replace(
             base,
             recent_turns=new_turns,
-            max_history_chars=_scaled(base.max_history_chars),
-            max_memory_chars=_scaled(base.max_memory_chars),
-            max_tool_chars=_scaled(base.max_tool_chars),
-            max_exec_chars=_scaled(base.max_exec_chars),
+            max_history_tokens=new_hist_tok,
+            max_memory_tokens=new_mem_tok,
+            max_exec_tokens=new_exec_tok,
+            max_history_chars=int(new_hist_tok * cpt),
+            max_memory_chars=int(new_mem_tok * cpt),
+            max_exec_chars=int(new_exec_tok * cpt),
             pressure_level=level,
         )
 
         if level != base.pressure_level:
             logger.info(
                 "context_budget | pressure %s→%s (free=%.0f%%) scale=%.2f "
-                "turns=%d→%d history=%d memory=%d tool=%d exec=%d",
+                "turns=%d→%d history=%d tok memory=%d tok exec=%d tok",
                 base.pressure_level,
                 level,
                 free * 100,
                 scale,
                 base.recent_turns,
                 new_turns,
-                adjusted.max_history_chars,
-                adjusted.max_memory_chars,
-                adjusted.max_tool_chars,
-                adjusted.max_exec_chars,
+                new_hist_tok,
+                new_mem_tok,
+                new_exec_tok,
             )
 
         return adjusted
+
+    def adjusted_for_pressure(self, *, current_turns: int) -> "ContextBudget":
+        """Instance-method wrapper around the classmethod — fixes pipeline call-site."""
+        return ContextBudget.adjust_for_pressure(self, current_turns=current_turns)
 
     # ===========================================================
     # TOKEN ESTIMATION & CALIBRATION
     # ===========================================================
 
     def estimate_tokens(self, text: str) -> int:
-        return max(1, int(len(text) / self.chars_per_token))
+        """
+        Estimate BPE token count using the pure-heuristic calculator.
+        Accounts for language, code blocks, emojis, URLs, and numbers.
+        Always >= actual token count.
+        """
+        from buddy.context.token_calculator import count_tokens
+        return count_tokens(text)
 
-    def calibrate(self, estimated: int, actual: int) -> "ContextBudget":
-        """EMA update of chars_per_token from a real tokenizer observation."""
-        if estimated <= 0 or actual <= 0:
+    def calibrate(self, char_count: int, actual_tokens: int) -> "ContextBudget":
+        """
+        EMA update of chars_per_token from a real tokenizer observation.
+        Refreshes all char ceilings so they stay in sync with observed CPT.
+        """
+        if char_count <= 0 or actual_tokens <= 0:
             return self
-        # observed cpt = chars that produced `estimated` tokens / actual tokens
-        observed_cpt = (estimated * self.chars_per_token) / actual
+        observed_cpt = char_count / actual_tokens
         new_cpt = self.chars_per_token * 0.85 + observed_cpt * 0.15
-        # guard against drift from a single bad sample
         new_cpt = max(1.5, min(8.0, new_cpt))
-        return replace(self, chars_per_token=new_cpt)
+        return replace(
+            self,
+            chars_per_token=new_cpt,
+            max_history_chars=int(self.max_history_tokens * new_cpt),
+            max_memory_chars=int(self.max_memory_tokens * new_cpt),
+            max_exec_chars=int(self.max_exec_tokens * new_cpt),
+        )
 
     # ===========================================================
     # BUDGET UTILISATION SNAPSHOT
@@ -341,7 +370,6 @@ class ContextBudget:
         *,
         history_chars: int = 0,
         memory_chars: int = 0,
-        tool_chars: int = 0,
         exec_chars: int = 0,
     ) -> Dict[str, Any]:
         """
@@ -352,11 +380,10 @@ class ContextBudget:
         def _pct(used: int, cap: int) -> float:
             return round(used / cap, 3) if cap else 0.0
 
-        total_used = history_chars + memory_chars + tool_chars + exec_chars
+        total_used = history_chars + memory_chars + exec_chars
         total_cap = (
             self.max_history_chars
             + self.max_memory_chars
-            + self.max_tool_chars
             + self.max_exec_chars
         )
         return {
@@ -372,11 +399,6 @@ class ContextBudget:
                 "used": memory_chars,
                 "cap": self.max_memory_chars,
                 "pct": _pct(memory_chars, self.max_memory_chars),
-            },
-            "tool": {
-                "used": tool_chars,
-                "cap": self.max_tool_chars,
-                "pct": _pct(tool_chars, self.max_tool_chars),
             },
             "exec": {
                 "used": exec_chars,
@@ -405,21 +427,31 @@ class ContextBudget:
         backend: str,
         tier: str,
     ) -> "ContextBudget":
-        total_chars = int(n_ctx * _DEFAULT_CHARS_PER_TOKEN)
-        usable = int(total_chars * (1 - _RESERVE))
+        cpt = _DEFAULT_CHARS_PER_TOKEN
+
+        # Token budgets — direct percentages of n_ctx
+        response_tokens    = max(_MIN_TOKENS, int(n_ctx * _RESPONSE_PCT))
+        max_prompt_tokens  = n_ctx - response_tokens
+        max_history_tokens = max(_MIN_TOKENS, int(n_ctx * _ALLOC_HISTORY))
+        max_memory_tokens  = max(_MIN_TOKENS, int(n_ctx * _ALLOC_MEMORY))
+        max_exec_tokens    = max(_MIN_TOKENS, int(n_ctx * _ALLOC_EXEC))
 
         return cls(
             n_ctx=n_ctx,
             recent_turns=recent_turns,
             top_k_memories=top_k_memories,
             pre_rerank_k=pre_rerank_k,
-            max_history_chars=max(_MIN_CHARS, int(usable * _ALLOC_HISTORY)),
-            max_memory_chars=max(_MIN_CHARS, int(usable * _ALLOC_MEMORY)),
-            max_tool_chars=max(_MIN_CHARS, int(usable * _ALLOC_TOOL)),
-            max_exec_chars=max(_MIN_CHARS, int(usable * _ALLOC_EXEC)),
+            max_history_chars=int(max_history_tokens * cpt),
+            max_memory_chars=int(max_memory_tokens * cpt),
+            max_exec_chars=int(max_exec_tokens * cpt),
             backend=backend,
             tier=tier,
             pressure_level="nominal",
+            response_tokens=response_tokens,
+            max_prompt_tokens=max_prompt_tokens,
+            max_history_tokens=max_history_tokens,
+            max_memory_tokens=max_memory_tokens,
+            max_exec_tokens=max_exec_tokens,
         )
 
 

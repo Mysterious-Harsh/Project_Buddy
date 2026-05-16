@@ -332,6 +332,8 @@ class MainScreen(Screen):
         ("f2", "toggle_mute", "Mic On/Off"),
         ("f3", "toggle_sleep", "Sleep/Wake"),
         ("f4", "select_mic", "Mic"),
+        ("f5", "toggle_tts_mute", "Voice Out On/Off"),
+        ("ctrl+y", "copy_last", "Copy last"),
         ("ctrl+c", "quit_request", "Quit"),
     ]
 
@@ -373,6 +375,7 @@ class MainScreen(Screen):
         self._interrupt_reason: str = ""
         self._main_loop: asyncio.AbstractEventLoop | None = None
         self._stt: Any = None
+        self._tts: Any = None
         self._idle_timeout_s: float = 20 * 60
         self._last_activity_ts: float = time.monotonic()
         self._turn_count: int = 0
@@ -492,6 +495,9 @@ class MainScreen(Screen):
     # ── Interrupt / quit ──────────────────────────────────────────────────────
 
     def _handle_escape(self) -> None:
+        if self._tts is not None and self._tts.is_speaking():
+            self._stop_tts()
+            return
         self._request_interrupt("you pressed Escape")
 
     def _request_interrupt(self, reason: str = "you interrupted me") -> None:
@@ -517,6 +523,9 @@ class MainScreen(Screen):
 
     def action_toggle_mute(self) -> None:
         self._toggle_voice_mute()
+
+    def action_toggle_tts_mute(self) -> None:
+        self._toggle_tts_mute()
 
     def action_toggle_sleep(self) -> None:
         self._toggle_sleep()
@@ -579,6 +588,27 @@ class MainScreen(Screen):
                     )
             except Exception:
                 logger.debug("action_quit_request: hint failed", exc_info=True)
+
+    def action_copy_last(self) -> None:
+        """Ctrl+Y — copy the last Buddy response to the system clipboard."""
+        chat = self._w_chat_log
+        if chat is None:
+            return
+        text = chat.get_last_buddy_text()
+        if not text:
+            if self._w_status_bar:
+                self._w_status_bar.set_hint(f"[{_DIM}]nothing to copy[/]", 2.0)
+            return
+        try:
+            from buddy.tools.os.clipboard import _set as _clip_set
+            _clip_set(text)
+            if self._w_status_bar:
+                self._w_status_bar.set_hint(f"[{_GREEN}]copied to clipboard[/]", 2.0)
+        except Exception as ex:
+            if self._w_status_bar:
+                self._w_status_bar.set_hint(
+                    f"[{_RED}]copy failed: {markup_escape(str(ex))}[/]", 3.0
+                )
 
     # ── Input handling ────────────────────────────────────────────────────────
 
@@ -800,6 +830,8 @@ class MainScreen(Screen):
                 if self._w_chat_log:
                     await self._w_chat_log.add_message(text, "buddy")
                 self._start_spinner(current_label, "thinking")
+                if self._tts is not None:
+                    self._tts.speak(text)
 
             async def pipeline_input() -> str:
                 self._notify_activity()
@@ -996,8 +1028,37 @@ class MainScreen(Screen):
             muted = not self._sys_state.mic_off
         self._set_voice_mute(muted)
 
+    # ── TTS mute ──────────────────────────────────────────────────────────────
+
+    def _set_tts_mute(self, muted: bool) -> None:
+        if self._tts is None:
+            return
+        is_muted = self._tts.is_muted()
+        if is_muted == muted:
+            return
+        if muted:
+            self._tts.mute()
+            hint = f"[{_DIM}]🔇 Voice Out Off[/]" if _USE_UNICODE else f"[{_DIM}]Voice Out Off[/]"
+        else:
+            self._tts.unmute()
+            hint = f"[{_GREEN}]🔊 Voice Out On[/]" if _USE_UNICODE else f"[{_GREEN}]Voice Out On[/]"
+        try:
+            sb = self._w_status_bar or self.query_one(StatusBar)
+            sb.set_hint(hint)
+        except Exception:
+            logger.debug("_set_tts_mute: StatusBar hint failed", exc_info=True)
+        self._refresh_info_bar()
+
+    def _toggle_tts_mute(self) -> None:
+        if self._tts is None:
+            return
+        self._set_tts_mute(not self._tts.is_muted())
+
     def set_stt_engine(self, stt: Any) -> None:
         self._stt = stt
+
+    def set_tts_engine(self, tts: Any) -> None:
+        self._tts = tts
 
     def set_mic_active(self) -> None:
         try:
@@ -1034,15 +1095,35 @@ class MainScreen(Screen):
         except Exception:
             logger.debug("set_mic_idle failed", exc_info=True)
 
-    def _stop_tts(self) -> None:
-        """
-        Stop TTS voice output immediately.
+    def set_tts_speaking(self) -> None:
+        try:
+            mic = self._w_mic_indicator or self.query_one(MicIndicator)
+            mic.set_state("speaking")
+        except Exception:
+            logger.debug("set_tts_speaking: MicIndicator failed", exc_info=True)
+        try:
+            sb = self._w_status_bar or self.query_one(StatusBar)
+            icon = "🔊 " if _USE_UNICODE else ""
+            sb.set_hint(f"[{_GREEN}]{icon}Speaking...[/]", clear_after=0)
+        except Exception:
+            logger.debug("set_tts_speaking: StatusBar failed", exc_info=True)
 
-        FIX-12: TTS is not yet wired — log a warning so callers are aware the
-        interrupt had no effect, rather than silently doing nothing.
-        Wire up: self._tts.interrupt() once TextToSpeech is initialised here.
-        """
-        logger.warning("_stop_tts called but TTS is not yet wired into the app — no-op")
+    def set_tts_idle(self) -> None:
+        try:
+            mic = self._w_mic_indicator or self.query_one(MicIndicator)
+            mic.set_state("idle")
+        except Exception:
+            logger.debug("set_tts_idle: MicIndicator failed", exc_info=True)
+        try:
+            sb = self._w_status_bar or self.query_one(StatusBar)
+            icon = "🎙 " if _USE_UNICODE else ""
+            sb.set_hint(f"[{_DIM}]{icon}Listening[/]", clear_after=2.0)
+        except Exception:
+            logger.debug("set_tts_idle: StatusBar failed", exc_info=True)
+
+    def _stop_tts(self) -> None:
+        if self._tts is not None:
+            self._tts.interrupt()
 
     # ── Activity / idle ───────────────────────────────────────────────────────
 
@@ -1098,6 +1179,8 @@ class BuddyApp(App):
         self._state_lock = threading.Lock()
         self._interrupt_event = threading.Event()
         self._stt: Any = None
+        self._tts: Any = None
+        self._tts_active = threading.Event()  # set while TTS is speaking; suppresses STT on_text
         self._main_screen: MainScreen | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._bootstrap_state: Any = None  # set by _async_on_boot_done
@@ -1134,14 +1217,14 @@ class BuddyApp(App):
                 await boot_log.add_message("waking up...", "running")
             except Exception:
                 pass
-            recent = conversations.get_recent_conversations() if conversations else ""
+            recent = conversations.get_opener_context() if conversations else ""
             try:
                 opener_text = await asyncio.wait_for(
                     asyncio.to_thread(brain.generate_opener, recent),
-                    timeout=45.0,
+                    timeout=90.0,
                 )
             except asyncio.TimeoutError:
-                logger.warning("opener timed out after 45s, skipping")
+                logger.warning("opener timed out after 90s, skipping")
             except Exception:
                 logger.warning("opener generation failed", exc_info=True)
 
@@ -1157,6 +1240,7 @@ class BuddyApp(App):
         )
         await self.switch_screen(self._main_screen)
         self._track(self._start_stt(state))
+        self._track(self._start_tts(state))
 
     async def _start_stt(self, state: Any) -> None:
         try:
@@ -1185,6 +1269,9 @@ class BuddyApp(App):
             loop = self._loop or asyncio.get_running_loop()
 
             def on_text(text: str) -> None:
+                # Drop transcription while Buddy is speaking — prevents TTS audio feedback loop.
+                if self._tts_active.is_set():
+                    return
                 if self._main_screen and loop:
                     loop.call_soon_threadsafe(self._main_screen.handle_voice_text, text)
                 # mic idle is handled by on_segment_end, not here
@@ -1223,6 +1310,11 @@ class BuddyApp(App):
                 use_silero_vad=bool(voice_cfg.get("use_silero_vad", False)),
                 enable_beep=bool(voice_cfg.get("enable_beep", True)),
                 debug=bool(voice_cfg.get("debug", False)),
+                stt_backend=str(voice_cfg.get("stt_backend", "parakeet_onnx")),
+                parakeet_model=str(voice_cfg.get("parakeet_model", "nemo-parakeet-tdt-0.6b-v2")),
+                min_clip_snr=float(voice_cfg.get("min_clip_snr", 0.0)),
+                silero_thresh_start=float(voice_cfg.get("silero_thresh_start", 0.65)),
+                silero_onset_chunks=int(voice_cfg.get("silero_onset_chunks", 4)),
             )
             self._stt.start()
 
@@ -1240,7 +1332,61 @@ class BuddyApp(App):
                     f"[{_RED}]⚠ stt failed: {markup_escape(str(ex))}[/]"
                 )
 
+    async def _start_tts(self, state: Any) -> None:
+        try:
+            from buddy.ui.tts import TextToSpeech
+
+            cfg = getattr(state, "config", {}) or {}
+            buddy_cfg = cfg.get("buddy", {}) or {}
+            feat_cfg = buddy_cfg.get("features", {}) or {}
+            tts_cfg = buddy_cfg.get("tts", {}) or {}
+
+            if not feat_cfg.get("enable_audio_tts", False):
+                return
+
+            loop = self._loop or asyncio.get_running_loop()
+
+            def _on_tts_start() -> None:
+                self._tts_active.set()
+                if self._stt:
+                    try:
+                        self._stt.pause_audio()
+                    except Exception:
+                        pass
+                if self._main_screen and loop:
+                    loop.call_soon_threadsafe(self._main_screen.set_tts_speaking)
+
+            def _on_tts_idle() -> None:
+                self._tts_active.clear()
+                if self._stt:
+                    try:
+                        self._stt.resume_audio()
+                    except Exception:
+                        pass
+                if self._main_screen and loop:
+                    loop.call_soon_threadsafe(self._main_screen.set_tts_idle)
+
+            self._tts = TextToSpeech(
+                engine=str(tts_cfg.get("engine", "kokoro")),
+                voice=str(tts_cfg.get("voice", "af_heart")),
+                speed=float(tts_cfg.get("speed", 1.0)),
+                lang_code=str(tts_cfg.get("language", "a")),
+                on_speaking_start=_on_tts_start,
+                on_idle=_on_tts_idle,
+            )
+
+            if self._main_screen:
+                self._main_screen.set_tts_engine(self._tts)
+
+        except Exception as ex:
+            logger.exception("tts: failed to start: %r", ex)
+
     def on_unmount(self) -> None:
+        if self._tts is not None:
+            try:
+                self._tts.stop()
+            except Exception:
+                logger.debug("on_unmount: tts.stop() failed", exc_info=True)
         if self._stt is not None:
             try:
                 self._stt.stop()
@@ -1301,15 +1447,28 @@ def _prewarm_whisper_before_textual() -> None:
             return
 
         _voice_cfg = _buddy_cfg.get("voice", {}) if isinstance(_buddy_cfg, dict) else {}
-        _size = str(_voice_cfg.get("whisper_model_size", "base"))
-        _compute_type = str(_voice_cfg.get("compute_type", ""))
-        _whisper_dir = str(_root / "data" / "models" / "whisper")
+        _stt_backend = str(_voice_cfg.get("stt_backend", "parakeet_onnx"))
 
-        from buddy.ui.stt import _load_whisper  # noqa: PLC0415
+        from buddy.ui.stt import _resolve_backend  # noqa: PLC0415
 
-        logger.info("STT: pre-warming WhisperModel '%s' before Textual starts", _size)
-        _load_whisper(_size, _whisper_dir, _compute_type)
-        logger.info("STT: WhisperModel cached — Textual init will be a cache hit")
+        _resolved = _resolve_backend(_stt_backend)
+
+        if _resolved == "parakeet_onnx":
+            from buddy.ui.stt import _load_parakeet  # noqa: PLC0415
+
+            _pk_model = str(_voice_cfg.get("parakeet_model", "nemo-parakeet-tdt-0.6b-v2"))
+            logger.info("STT: pre-warming Parakeet '%s' before Textual starts", _pk_model)
+            _load_parakeet(_pk_model)
+            logger.info("STT: Parakeet cached — Textual init will be a cache hit")
+        else:
+            from buddy.ui.stt import _load_whisper  # noqa: PLC0415
+
+            _size = str(_voice_cfg.get("whisper_model_size", "base"))
+            _compute_type = str(_voice_cfg.get("compute_type", ""))
+            _whisper_dir = str(_root / "data" / "models" / "whisper")
+            logger.info("STT: pre-warming WhisperModel '%s' before Textual starts", _size)
+            _load_whisper(_size, _whisper_dir, _compute_type)
+            logger.info("STT: WhisperModel cached — Textual init will be a cache hit")
 
     except Exception as _ex:
         logger.warning("STT pre-warm skipped (non-fatal): %r", _ex)

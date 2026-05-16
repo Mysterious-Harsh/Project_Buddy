@@ -1,10 +1,10 @@
 MEMORY_SUMMARY_PROMPT = """
-<task>
+<your_current_job>
 §1. TASK
 Consolidate the memories below into a complete summary that preserves every fact,
 detail, and signal with forward value. Nothing worth knowing should be lost in consolidation.
 Output strict JSON only.
-</task>
+</your_current_job>
 
 <input_format>
 §2. INPUT FORMAT
@@ -150,7 +150,7 @@ confidence [0,1] — how certain you are the consolidation is accurate and compl
 
 MEMORY_SUMMARY_PROMPT_SCHEMA = """
 {{
-  "memory_summary": "string",
+  "memory_summary": "summarized memory preserving all important facts and details",
   "salience": 0.0,
   "confidence": 0.0
 }}

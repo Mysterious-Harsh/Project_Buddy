@@ -13,6 +13,7 @@ from buddy.brain.prompt_builder import (
     build_responder_prompt,
     build_reader_prompt,
     build_memory_summary_prompt,
+    build_compactor_prompt,
 )
 from buddy.prompts.base_system_prompts import (
     BUDDY_IDENTITY,
@@ -36,7 +37,6 @@ from buddy.prompts.memory_prompts import (
 from buddy.prompts.reader_prompts import (
     READER_PROMPT,
     READER_SCHEMA,
-    READER_TASK_TEMPLATE,
     READER_CONTEXT_EMPTY,
 )
 from buddy.prompts.vision_prompts import (
@@ -47,6 +47,7 @@ from buddy.prompts.browser_prompts import (
     BROWSER_ACTION_PROMPT,
     BROWSER_ACTION_SCHEMA,
 )
+from buddy.prompts.compactor_prompts import COMPACTOR_PROMPT
 
 import json
 import threading
@@ -178,6 +179,9 @@ class Brain:
         )
         self._interrupt_event: Optional[threading.Event] = None
         self._on_token: Optional[Callable[[str], None]] = None
+        from buddy.brain.text_reader import CHAR_THRESHOLD
+
+        self.char_threshold: int = CHAR_THRESHOLD
 
     def _build_system_prompt(self, skills: list = []):
         return self.system_prompt + "\n" + "\n".join(skills)
@@ -254,8 +258,8 @@ class Brain:
         recent_turns: str,
         temperature: float = 0.4,
         top_p: float = 0.94,
-        repeat_penalty: float = 1.06,
-        repeat_last_n: int = 64,
+        repeat_penalty: float = 1.08,
+        repeat_last_n: int = 128,
         stream: bool = True,
         llm_options: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
@@ -315,10 +319,11 @@ class Brain:
         active_task: str,
         recent_turns: str,
         memories: str,
+        budget=None,
         temperature: float = 0.4,
         top_p: float = 0.94,
-        repeat_penalty: float = 1.06,
-        repeat_last_n: int = 64,
+        repeat_penalty: float = 1.08,
+        repeat_last_n: int = 128,
         stream: bool = True,
         llm_options: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
@@ -338,6 +343,7 @@ class Brain:
             datetime_block=self._get_time_info(),
             current_message=active_task,
             memories=memories,
+            budget=budget,
         )
 
         think_block, raw = self._call_llm_generate(
@@ -380,10 +386,11 @@ class Brain:
         planner_instructions: str,
         memories: str,
         available_tools: str,
+        budget=None,
         temperature: float = 0.4,
         top_p: float = 0.94,
-        repeat_penalty: float = 1.06,
-        repeat_last_n: int = 64,
+        repeat_penalty: float = 1.08,
+        repeat_last_n: int = 128,
         stream: bool = True,
         llm_options: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
@@ -403,6 +410,7 @@ class Brain:
             planner_instructions=planner_instructions,
             memories=memories,
             followups=active_task,
+            budget=budget,
         )
 
         think_block, raw = self._call_llm_generate(
@@ -441,6 +449,7 @@ class Brain:
     def run_executor(
         self,
         *,
+        end_goal: str = "",
         instruction: str,
         prior_outputs: str,
         step_followups: Optional[str] = "",
@@ -448,8 +457,8 @@ class Brain:
         tool_prompt: str,
         temperature: float = 0.4,
         top_p: float = 0.94,
-        repeat_penalty: float = 1.06,
-        repeat_last_n: int = 64,
+        repeat_penalty: float = 1.08,
+        repeat_last_n: int = 128,
         stream: bool = True,
         llm_options: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
@@ -465,6 +474,7 @@ class Brain:
         prompt = build_executor_prompt(
             system=system_prompt,
             datetime_block=self._get_time_info(),
+            end_goal=end_goal or "",
             instruction=instruction,
             prior_outputs=prior_outputs or "",
             step_errors=step_errors or "",
@@ -511,8 +521,8 @@ class Brain:
         now: Optional[float] = None,
         temperature: float = 0.4,
         top_p: float = 0.94,
-        repeat_penalty: float = 1.06,
-        repeat_last_n: int = 64,
+        repeat_penalty: float = 1.08,
+        repeat_last_n: int = 128,
         stream: bool = True,
         llm_options: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
@@ -574,10 +584,11 @@ class Brain:
         active_task: str,
         memories: str,
         execution_results: str,
+        budget=None,
         temperature: float = 0.4,
         top_p: float = 0.94,
-        repeat_penalty: float = 1.06,
-        repeat_last_n: int = 64,
+        repeat_penalty: float = 1.08,
+        repeat_last_n: int = 128,
         stream: bool = True,
         llm_options: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
@@ -596,6 +607,7 @@ class Brain:
             memories=memories,
             execution_results=execution_results,
             responder_instruction=active_task,
+            budget=budget,
         )
 
         think_block, raw = self._call_llm_generate(
@@ -639,22 +651,19 @@ class Brain:
         rolling_context: str = "",
         temperature: float = 0.4,
         top_p: float = 0.94,
-        repeat_penalty: float = 1.06,
-        repeat_last_n: int = 64,
+        repeat_penalty: float = 1.08,
+        repeat_last_n: int = 128,
         stream: bool = True,
         llm_options: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
-        Runs one paragraph through the reader prompt.
-        Called in a loop by TextReader for large text processing.
+        Runs one batch (section) through the reader prompt.
+        Called in a loop by TextReader — each batch contains one or more
+        consecutive paragraphs grouped by _group_paragraphs().
 
         Returns dict with keys: relevant (bool), content (str).
         """
-
-        system_prompt = self._build_system_prompt([
-            READER_PROMPT,
-            BUDDY_OUTPUT.format(schema=READER_SCHEMA),
-        ])
+        system_prompt = READER_PROMPT + "\n" + BUDDY_OUTPUT.format(schema=READER_SCHEMA)
 
         prompt = build_reader_prompt(
             system=system_prompt,
@@ -662,10 +671,8 @@ class Brain:
             rolling_context=(
                 rolling_context if rolling_context else READER_CONTEXT_EMPTY
             ),
-            task=READER_TASK_TEMPLATE.format(
-                query=query,
-                paragraph=paragraph,
-            ),
+            query=query,
+            section=paragraph,
         )
 
         think_block, raw = self._call_llm_generate(
@@ -704,8 +711,8 @@ class Brain:
         query: str,
         temperature: float = 0.4,
         top_p: float = 0.94,
-        repeat_penalty: float = 1.06,
-        repeat_last_n: int = 64,
+        repeat_penalty: float = 1.08,
+        repeat_last_n: int = 128,
         stream: bool = True,
         llm_options: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
@@ -737,6 +744,17 @@ class Brain:
                 return {"error": "Empty image path or data URI"}
             if str(path).startswith("data:"):
                 data_uris.append(path)
+                continue
+            if str(path).startswith(("http://", "https://")):
+                try:
+                    from buddy.tools.vision.image_encoder import encode_url_to_data_uri
+
+                    data_uris.append(encode_url_to_data_uri(path))
+                except Exception as exc:
+                    logger.warning(
+                        "run_vision URL encode failed url=%r err=%r", path, exc
+                    )
+                    return {"error": str(exc)}
                 continue
             if not is_image_path(path):
                 return {"error": f"Not a recognized image file: {path}"}
@@ -811,8 +829,8 @@ class Brain:
         last_error: str = "",
         temperature: float = 0.4,
         top_p: float = 0.94,
-        repeat_penalty: float = 1.06,
-        repeat_last_n: int = 64,
+        repeat_penalty: float = 1.08,
+        repeat_last_n: int = 128,
         stream: bool = True,
         llm_options: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
@@ -930,6 +948,153 @@ class Brain:
 
         return {"function": "error", "arguments": {}, "summary": str(raw).strip()}
 
+    def run_compact(
+        self,
+        *,
+        output: str,
+        task: str,
+        temperature: float = 0.4,
+        top_p: float = 0.94,
+        repeat_penalty: float = 1.08,
+        repeat_last_n: int = 128,
+        llm_options: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        """
+        Compress a single tool output relative to the user task.
+        Returns the compact text, or the original output if compaction fails.
+        """
+
+        prompt = build_compactor_prompt(
+            system=COMPACTOR_PROMPT,
+            task=task,
+            output=output,
+        )
+        _, text = self._call_llm_generate(
+            prompt=prompt,
+            temperature=temperature,
+            top_p=top_p,
+            repeat_penalty=repeat_penalty,
+            repeat_last_n=repeat_last_n,
+            stream=True,
+            options=llm_options,
+            json_mode=False,
+        )
+        result = (text or "").strip()
+        return result if result else output
+
+    def compact_exec_results(
+        self,
+        *,
+        execution_results: Dict[str, Any],
+        task: str,
+        memories: str,
+        responder_instruction: str,
+        budget=None,
+    ) -> Dict[str, Any]:
+        """
+        Lazy compaction: builds the responder prompt shell (no exec results),
+        measures real leftover tokens, then compacts oversized step outputs
+        (largest first) until the full prompt fits.
+
+        Zero overhead if exec results already fit.
+        Falls back to truncate_proportional when budget is unavailable.
+        """
+        from buddy.context.token_calculator import count_tokens as _count_toks
+        from buddy.buddy_core.smart_truncator import truncate_proportional
+
+        if not execution_results:
+            return execution_results
+
+        if not budget or not getattr(budget, "max_prompt_tokens", 0):
+            max_chars = getattr(budget, "max_exec_chars", 16_000) if budget else 16_000
+            return truncate_proportional(execution_results, max_chars)
+
+        def _tok(text: str) -> int:
+            return _count_toks(text) if text else 0
+
+        # 1. Measure shell without exec results — gives accurate leftover
+        system_prompt = self._build_system_prompt([
+            BUDDY_MEMORY,
+            RESPOND_PROMPT,
+            BUDDY_OUTPUT.format(schema=RESPOND_PROMPT_SCHEMA),
+        ])
+        shell_prompt = build_responder_prompt(
+            system=system_prompt,
+            datetime_block=self._get_time_info(),
+            memories=memories,
+            execution_results="{}",
+            responder_instruction=responder_instruction,
+            budget=budget,
+        )
+        leftover = budget.max_prompt_tokens - _tok(shell_prompt)
+
+        exec_str = json.dumps(
+            execution_results, ensure_ascii=False, separators=(",", ":")
+        )
+        exec_tokens = _tok(exec_str)
+
+        if exec_tokens <= leftover:
+            logger.debug(
+                "compact_exec_results: fits exec=%d leftover=%d",
+                exec_tokens,
+                leftover,
+            )
+            return execution_results
+
+        logger.info(
+            "compact_exec_results: oversized exec=%d leftover=%d — compacting",
+            exec_tokens,
+            leftover,
+        )
+
+        # 2. Rank steps by serialized output_data size, largest first
+        steps_sized: list = []
+        for key, step in execution_results.items():
+            if not isinstance(step, dict) or step.get("output_data") is None:
+                continue
+            try:
+                od_str = json.dumps(step["output_data"], ensure_ascii=False)
+            except Exception:
+                od_str = str(step["output_data"])
+            steps_sized.append((key, _tok(od_str)))
+
+        if not steps_sized:
+            return execution_results
+
+        per_step_budget = max(64, leftover // len(steps_sized))
+        steps_sized.sort(key=lambda x: x[1], reverse=True)
+
+        compacted: Dict[str, Any] = dict(execution_results)
+
+        for key, step_tokens in steps_sized:
+            if step_tokens <= per_step_budget:
+                break
+
+            step = compacted[key]
+            try:
+                output_str = json.dumps(step["output_data"], ensure_ascii=False)
+            except Exception:
+                output_str = str(step["output_data"])
+
+            compact_text = self.run_compact(output=output_str, task=task)
+            if compact_text and compact_text != output_str:
+                new_step = dict(step)
+                new_step["output_data"] = compact_text
+                new_step["_output_compacted"] = True
+                compacted[key] = new_step
+
+            exec_str = json.dumps(compacted, ensure_ascii=False, separators=(",", ":"))
+            if _tok(exec_str) <= leftover:
+                logger.info("compact_exec_results: fits after step %s", key)
+                break
+
+        # 3. Final fallback — almost never reached
+        exec_str = json.dumps(compacted, ensure_ascii=False, separators=(",", ":"))
+        if _tok(exec_str) > leftover:
+            compacted = truncate_proportional(compacted, max(512, leftover * 4))
+
+        return compacted
+
     # ======================================================
     # Opener: proactive session start
     # ======================================================
@@ -937,7 +1102,7 @@ class Brain:
         from buddy.prompts.opener_prompts import OPENER_PROMPT
         from buddy.brain.prompt_builder import build_opener_prompt
 
-        system_prompt = self._build_system_prompt([BUDDY_BEHAVIOR, OPENER_PROMPT])
+        system_prompt = self._build_system_prompt([OPENER_PROMPT])
         prompt = build_opener_prompt(system=system_prompt, recent_turns=recent_turns)
 
         _, text = self._call_llm_generate(
@@ -947,7 +1112,13 @@ class Brain:
             json_mode=False,
             options={},
         )
-        return (text or "").strip()
+        result = (text or "").strip()
+        # Strip "OUTPUT:" prefix that Qwen3 sometimes emits after </think>.
+        for prefix in ("OUTPUT:\n", "OUTPUT: ", "output:\n", "output: "):
+            if result.startswith(prefix):
+                result = result[len(prefix) :].strip()
+                break
+        return result
 
     # ======================================================
     # Internal: LLM call (generate only)
@@ -960,11 +1131,12 @@ class Brain:
         stream: bool,
         json_mode: bool,
         top_p: float = 0.94,
-        repeat_penalty: float = 1.06,
-        repeat_last_n: int = 64,
+        repeat_penalty: float = 1.08,
+        repeat_last_n: int = 128,
         n_predict: Optional[int] = None,
         options: Optional[Dict[str, Any]],
         system: Optional[str] = None,
+        think: bool = True,
     ) -> Tuple[str, str]:
 
         # Normalize options for predictable downstream handling
@@ -999,7 +1171,7 @@ class Brain:
             json_max_chars=120_000,
             interrupt_event=self._interrupt_event,
             stop=["<|im_end|>", "<|endoftext|>"],
-            think=True,
+            think=think,
         )
 
         if text is None:
@@ -1036,7 +1208,7 @@ class Brain:
             )
 
         if self.debug:
-            logger.debug(f"LLM output: \nTHINKING:\n{think_block} OUTPUT:\n {text}")
+            logger.debug(f"LLM output: \nTHINKING:\n{think_block}\n\nOUTPUT:\n {text}")
 
         return think_block, text
 

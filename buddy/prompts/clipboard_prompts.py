@@ -9,7 +9,6 @@ TOOL_DESCRIPTION: Read from or write to the system clipboard. Works on macOS, Wi
     <parameters>
       (none)
     </parameters>
-    <returns>OK, TOOL, CONTENT, LENGTH</returns>
     <destructive>NO</destructive>
     <confirmation_required>NO</confirmation_required>
   </function>
@@ -20,7 +19,6 @@ TOOL_DESCRIPTION: Read from or write to the system clipboard. Works on macOS, Wi
     <parameters>
       - text (string, REQUIRED) — text to copy to the clipboard
     </parameters>
-    <returns>OK, TOOL, LENGTH</returns>
     <destructive>NO</destructive>
     <confirmation_required>NO</confirmation_required>
   </function>
@@ -33,24 +31,18 @@ TOOL_DESCRIPTION: Read from or write to the system clipboard. Works on macOS, Wi
    1.2 Use write to place a result on the clipboard so the user can paste it.
    1.3 Never read and write in the same step unless explicitly asked.
 
-2. PLATFORM
-   2.1 macOS — pbpaste and pbcopy are always available. No setup needed.
-   2.2 Windows — PowerShell must be available (it is on all modern Windows).
-   2.3 Linux (X11) — xclip or xsel must be installed.
-       If neither is present, return error; do not retry.
-   2.4 Linux (Wayland) — wl-clipboard (wl-paste / wl-copy) must be installed.
-       Wayland is tried last; X11 backends take priority.
-
-3. CONTENT
+2. CONTENT
    3.1 Only plain text is supported. Non-text clipboard data (images, files) returns CONTENT="".
    3.2 An empty clipboard returns CONTENT="" and OK=True — this is not an error.
 
-4. CHECKLIST
+3. CHECKLIST
    □ function is exactly "read" or "write"
    □ write: text parameter provided and is a non-empty string
 
 </tool_rules>
+"""
 
+CLIPBOARD_TOOL_ERROR_PROMPT = """
 <error_recovery>
 Read only when <errors> is present in context.
 
@@ -71,5 +63,4 @@ Read only when <errors> is present in context.
    □ One category matched — applying only that fix
    □ status="followup" with exact error and what the user must do
 
-</error_recovery>
-"""
+</error_recovery>"""

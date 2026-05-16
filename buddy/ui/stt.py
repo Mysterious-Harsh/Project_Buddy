@@ -15,15 +15,15 @@ Architecture
 ────────────
   stt-listen   Opens / closes the microphone, drives calibration,
                parks (zero CPU) while muted.
-  stt-tx       Whisper transcription worker; parks while muted.
+  stt-tx       ASR transcription worker (Parakeet or Whisper); parks while muted.
   stt-cb       User-callback dispatcher; one thread, no spam.
 
 Mute behaviour
 ──────────────
   mute()   → releases the microphone to the OS,
-             deletes the Whisper model from RAM/VRAM,
+             offloads the ASR model from RAM,
              parks stt-listen and stt-tx (zero wakeups / zero CPU).
-  unmute() → reloads Whisper, reclaims the microphone,
+  unmute() → reloads the ASR model, reclaims the microphone,
              runs a fresh calibration pass.
 
 Beep
@@ -77,7 +77,92 @@ try:
 except ImportError:
     pass
 
-# Common Whisper hallucinations on short/silent clips — strip these from output.
+# ── Optional Parakeet TDT (onnx-asr) ─────────────────────────────────────────
+_PARAKEET_AVAILABLE = False
+try:
+    import onnx_asr as _onnx_asr  # type: ignore
+
+    _PARAKEET_AVAILABLE = True
+except ImportError:
+    pass
+
+# ── Parakeet model registry (mirrors Whisper registry) ───────────────────────
+_PARAKEET_CACHE: dict = {}
+_PARAKEET_CACHE_LOCK = threading.Lock()
+_PARAKEET_LOAD_LOCKS: dict = {}
+_PARAKEET_LOAD_LOCKS_LOCK = threading.Lock()
+
+
+@functools.lru_cache(maxsize=1)
+def _parakeet_providers() -> list:
+    """
+    Return the best available ONNX Runtime provider list for Parakeet.
+
+    CoreML EP in onnxruntime ≤ 1.23.x crashes on Parakeet's ONNX graph due to
+    a model_path tracking bug in the CoreML graph partitioner.  Skip it and use
+    CPU until a fixed onnxruntime ships.  CUDA is used when available (NVIDIA).
+    """
+    try:
+        import onnxruntime as _ort
+
+        avail = set(_ort.get_available_providers())
+        if "CUDAExecutionProvider" in avail:
+            return ["CUDAExecutionProvider", "CPUExecutionProvider"]
+    except Exception:
+        pass
+    return ["CPUExecutionProvider"]
+
+
+def _load_parakeet(model_name: str):
+    """Load (or return cached) Parakeet model. Thread-safe; per-key lock prevents double-load."""
+    with _PARAKEET_CACHE_LOCK:
+        if model_name in _PARAKEET_CACHE:
+            return _PARAKEET_CACHE[model_name]
+
+    with _PARAKEET_LOAD_LOCKS_LOCK:
+        if model_name not in _PARAKEET_LOAD_LOCKS:
+            _PARAKEET_LOAD_LOCKS[model_name] = threading.Lock()
+        key_lock = _PARAKEET_LOAD_LOCKS[model_name]
+
+    with key_lock:
+        with _PARAKEET_CACHE_LOCK:
+            if model_name in _PARAKEET_CACHE:
+                return _PARAKEET_CACHE[model_name]
+        providers = _parakeet_providers()
+        logger.info(
+            "[STT] Loading Parakeet %s with providers=%s", model_name, providers
+        )
+        model = _onnx_asr.load_model(model_name, providers=providers)
+        with _PARAKEET_CACHE_LOCK:
+            _PARAKEET_CACHE[model_name] = model
+        logger.debug("[STT] Parakeet loaded: %s", model_name)
+        return model
+
+
+def _evict_parakeet(model_name: str) -> None:
+    with _PARAKEET_CACHE_LOCK:
+        _PARAKEET_CACHE.pop(model_name, None)
+
+
+def _resolve_backend(requested: str) -> str:
+    """
+    Resolve the requested backend name to a concrete, runnable backend.
+    Never returns 'auto'.  Falls back to 'faster_whisper' when Parakeet
+    is requested but onnx-asr is not installed.
+    """
+    # "auto" is a legacy alias — treat identically to "parakeet_onnx"
+    if requested in ("parakeet_onnx", "auto"):
+        if not _PARAKEET_AVAILABLE:
+            logger.warning(
+                "[STT] parakeet_onnx requested but onnx-asr not installed "
+                "— falling back to faster_whisper. pip install onnx-asr"
+            )
+            return "faster_whisper"
+        return "parakeet_onnx"
+    return "faster_whisper"
+
+
+# ── Common Whisper hallucinations on short/silent clips ──────────────────────
 # Lowercase; matched against the lowercased, stripped transcription result.
 _HALLUCINATIONS = frozenset({
     "thank you.",
@@ -92,14 +177,21 @@ _HALLUCINATIONS = frozenset({
     "goodbye",
     "bye.",
     "bye",
-    "you.",
-    "you",
     "...",
     "[ silence ]",
     "[silence]",
     "[ music ]",
     "[music]",
 })
+
+
+def _apply_hallucination_filter(text: str) -> str:
+    """Return '' if text is a known hallucination pattern, else return text unchanged."""
+    if text.strip().lower().rstrip(". ") in _HALLUCINATIONS:
+        logger.debug("[STT] Hallucination filtered: %r", text)
+        return ""
+    return text
+
 
 # =============================================================================
 # Tuning constants
@@ -277,15 +369,6 @@ ATTACK_CREST_MULT = 0.85
 # RAISE toward 1.0 → attacky frames need near-full crest to be flagged.
 # LOWER (0.70) → looser; more attacky frames get flagged as impulsive.
 
-# ── Custom VAD — ZCR (debug diagnostics only) ─────────────────────────────────
-
-ZCR_MIN = 0.036
-# Zero-crossing rate threshold. Frames with ZCR below this are vowel-like.
-# ⚠ NOTE: ZCR is computed only when debug=True and has NO effect on VAD behaviour.
-# It is logged to help diagnose false triggers and missed triggers.
-# Changing this value does nothing in production (debug=False).
-# Humming ZCR ≈ 0.010–0.028; consonants ≈ 0.040–0.120; vowels ≈ 0.010–0.025.
-
 # ── Custom VAD — onset flatness (hum / drone rejection) ──────────────────────
 
 ONSET_WIN_FRAMES = 8
@@ -319,7 +402,7 @@ CALIB_GATE = 12
 
 # ── Whisper ───────────────────────────────────────────────────────────────────
 
-DEFAULT_BEAM_SIZE = 5
+DEFAULT_BEAM_SIZE = 4
 # Whisper beam search width. Higher = more accurate but slower transcription.
 # 1 = greedy decoding — fastest, ~2–5 % WER penalty on clean speech vs beam=5.
 # RAISE to 3–5 → better accuracy on noisy / accented / fast speech.
@@ -356,9 +439,9 @@ BEEP_FADE_MS = 16
 # ⚠ DO NOT lower below 5 ms — shorter fades produce audible clicks.
 # RAISE (20) → smoother fade; slightly softer attack.
 
-# ─── Add dual-alpha EMA constants for faster noise recovery ─────────────
-NOISE_ALPHA_FAST = 0.15  # Attack: adapts quickly to noise spikes
-NOISE_ALPHA_SLOW = 0.02  # Decay: slowly stabilizes baseline
+# ── Dual-alpha EMA: fast attack, slow decay ──────────────────────────────
+NOISE_ALPHA_FAST = 0.15  # adapts quickly to noise spikes
+NOISE_ALPHA_SLOW = 0.02  # slowly stabilizes baseline
 # =============================================================================
 # Module-level helpers  (lru_cache'd — zero cost after first call)
 # =============================================================================
@@ -662,6 +745,12 @@ class SpeechToText:
     whisper_vad_filter   pass Whisper's built-in VAD filter over audio before decode
     use_silero_vad       True → Silero neural VAD (falls back to Custom if unavailable)
     enable_beep          True → play a short 880 Hz tone when speech is confirmed
+    min_clip_snr         clip energy must be ≥ this × noise baseline to be sent to STT.
+                         0.0 = disabled.  Raise to 4–8 to reject far-field / ambient speech.
+    silero_thresh_start  Silero speech probability needed to count a chunk as voiced.
+                         Raise to 0.75–0.85 for noisy rooms (default 0.65).
+    silero_onset_chunks  consecutive voiced Silero chunks (32 ms each) before recording
+                         starts.  Raise to 6–8 to filter brief far-field utterances.
     """
 
     __slots__ = (
@@ -684,8 +773,12 @@ class SpeechToText:
         "_whisper_download_root",
         "_compute_type",  # effective compute type chosen during load
         "_language_norm",  # normalised once; re-used every transcription
-        # ── model (None while muted / offloaded) ────────────────────────────
+        # ── backend selection ────────────────────────────────────────────────
+        "_stt_backend",  # "faster_whisper" | "parakeet_onnx"
+        "_parakeet_model_name",
+        # ── models (None while muted / offloaded or backend not active) ─────
         "_whisper",
+        "_parakeet",
         # ── audio pipeline ──────────────────────────────────────────────────
         "_audio_q",  # queue.Queue[bytes]
         "_frame_sec",  # seconds per audio frame (constant per stream)
@@ -705,7 +798,13 @@ class SpeechToText:
         "_beep_pcm",
         "_beep_q",
         "_beep_thread",
+        "_last_speech_t",  # monotonic time of last _on_speech_detected — debounce guard
         "on_segment_end",  # called after every segment (transcribed or rejected)
+        "_audio_paused",
+        # ── noise / proximity gates ──────────────────────────────────────────
+        "min_clip_snr",  # float: reject clips below this × noise baseline
+        "_silero_thresh_start",  # float: Silero onset probability threshold
+        "_silero_onset_chunks",  # int:   consecutive voiced chunks to start recording
     )
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -731,6 +830,11 @@ class SpeechToText:
         whisper_vad_filter: bool = DEFAULT_VAD_FILTER,
         use_silero_vad: bool = True,
         enable_beep: bool = True,
+        stt_backend: str = "parakeet_onnx",
+        parakeet_model: str = "nemo-parakeet-tdt-0.6b-v2",
+        min_clip_snr: float = 4.0,
+        silero_thresh_start: float = SILERO_THRESH_START,
+        silero_onset_chunks: int = SILERO_ONSET_CHUNKS,
     ) -> None:
         # ── public fields ────────────────────────────────────────────────────
         self.debug = bool(debug)
@@ -788,6 +892,9 @@ class SpeechToText:
         self._mic_off = False
         self._mic_on_event = threading.Event()
         self._mic_on_event.set()  # start with mic on
+        # When set, _audio_callback discards frames before they hit the queue.
+        # Used by TTS interlock — mic stays open, model stays loaded, zero VAD/ASR overhead.
+        self._audio_paused = threading.Event()
 
         # ── callbacks ────────────────────────────────────────────────────────
         self._cbw = _CallbackWorker()
@@ -799,10 +906,28 @@ class SpeechToText:
             target=self._beep_worker, daemon=True, name="stt-beep"
         )
         self._beep_thread.start()
+        self._last_speech_t: float = 0.0
 
-        # ── Whisper model ─────────────────────────────────────────────────────
+        # ── Noise / proximity gates ──────────────────────────────────────────
+        self.min_clip_snr: float = float(min_clip_snr)
+        self._silero_thresh_start: float = float(silero_thresh_start)
+        self._silero_onset_chunks: int = max(1, int(silero_onset_chunks))
+
+        # ── Backend resolution ────────────────────────────────────────────────
+        self._stt_backend: str = _resolve_backend(stt_backend)
+        self._parakeet_model_name: str = parakeet_model
+
+        # ── Models (only one is ever non-None at a time) ──────────────────────
         self._whisper: Optional[WhisperModel] = None
-        self._load_whisper_model()
+        self._parakeet = None
+        try:
+            self._load_asr_model()
+        except Exception:
+            logger.warning(
+                "[STT] ASR model load failed at init — STT will be silent until"
+                " mic_on().",
+                exc_info=True,
+            )
 
         # Silence noisy CTranslate2 / faster-whisper internal loggers
         for name in ("faster_whisper", "ctranslate2"):
@@ -817,28 +942,21 @@ class SpeechToText:
                 "falling back to Custom VAD.  pip install silero-vad torch"
             )
 
-        if self.debug:
-            backend = (
-                "silero" if (self.use_silero_vad and _SILERO_AVAILABLE) else "custom"
-            )
-            logger.info(
-                "[STT] init | sr=%s mic=%s calib=%.1fs silence=%.1fs "
-                "mult=%.1f model=%s beam=%d compute=%s vad=%s beep=%s",
-                self.sample_rate,
-                (
-                    self.microphone_index
-                    if self.microphone_index is not None
-                    else "default"
-                ),
-                self.calibration_sec,
-                self.silence_timeout,
-                self.speech_trigger_mult,
-                whisper_model_size,
-                self.beam_size,
-                self._compute_type,
-                backend,
-                self.enable_beep,
-            )
+        vad_backend = (
+            "silero" if (self.use_silero_vad and _SILERO_AVAILABLE) else "custom"
+        )
+        logger.info(
+            "[STT] init | backend=%s sr=%s mic=%s calib=%.1fs silence=%.1fs "
+            "mult=%.1f vad=%s beep=%s",
+            self._stt_backend,
+            self.sample_rate,
+            self.microphone_index if self.microphone_index is not None else "default",
+            self.calibration_sec,
+            self.silence_timeout,
+            self.speech_trigger_mult,
+            vad_backend,
+            self.enable_beep,
+        )
 
     # =========================================================================
     # Whisper load / offload
@@ -897,6 +1015,54 @@ class SpeechToText:
             pass
 
     # =========================================================================
+    # ASR dispatcher  (backend-agnostic load / offload)
+    # =========================================================================
+
+    def _load_asr_model(self) -> None:
+        """Load whichever backend is active."""
+        if self._stt_backend == "parakeet_onnx":
+            self._load_parakeet_model()
+        else:
+            self._load_whisper_model()
+
+    def _offload_asr_model(self) -> None:
+        """Offload whichever backend is active."""
+        if self._stt_backend == "parakeet_onnx":
+            self._offload_parakeet_model()
+        else:
+            self._offload_whisper_model()
+
+    # =========================================================================
+    # Parakeet load / offload
+    # =========================================================================
+
+    def _load_parakeet_model(self) -> None:
+        """Load Parakeet ONNX model into cache and warm it up."""
+        model = _load_parakeet(self._parakeet_model_name)
+        self._parakeet = model
+        self._warmup_parakeet()
+
+    def _offload_parakeet_model(self) -> None:
+        """Release instance reference and evict cache so GC can free RAM."""
+        if self._parakeet is None:
+            return
+        self._parakeet = None
+        _evict_parakeet(self._parakeet_model_name)
+        logger.info("[STT] Parakeet offloaded — RAM released.")
+
+    def _warmup_parakeet(self) -> None:
+        """One silent inference pass — triggers ONNX Runtime JIT compilation."""
+        model = self._parakeet
+        if model is None:
+            return
+        try:
+            silent = np.zeros(DEFAULT_SAMPLE_RATE // 2, dtype=np.float32)
+            model.recognize(silent)
+            logger.debug("[STT] Parakeet warm-up done.")
+        except Exception:
+            pass
+
+    # =========================================================================
     # Lifecycle
     # =========================================================================
 
@@ -931,13 +1097,13 @@ class SpeechToText:
 
         # Unblock and stop transcription worker
         self._tx_stop.set()
-        self._tx_queue_drain()
+        self._drain_queue(self._tx_q)
         try:
             self._tx_q.put_nowait(None)
         except queue.Full:
             pass
 
-        self._drain_audio_q()
+        self._drain_queue(self._audio_q)
 
         if self._listen_thread and self._listen_thread.is_alive():
             self._listen_thread.join(timeout=2.0)
@@ -945,7 +1111,7 @@ class SpeechToText:
             self._tx_thread.join(timeout=3.0)
 
         self._cbw.stop()
-        self._offload_whisper_model()
+        self._offload_asr_model()
         logger.info("[STT] Shutdown complete.")
 
     # =========================================================================
@@ -958,7 +1124,7 @@ class SpeechToText:
         return self._mic_off
 
     def mic_off(self) -> None:
-        """Release the mic, offload Whisper, park worker threads (zero CPU)."""
+        """Release the mic, offload the ASR model, park worker threads (zero CPU)."""
         if not self._running or self._mic_off:
             return
 
@@ -970,14 +1136,16 @@ class SpeechToText:
         except queue.Full:
             pass
 
-        self._drain_audio_q()
-        self._tx_queue_drain()
-        self._offload_whisper_model()
-        logger.info("[STT] Mic off — mic released, model offloaded, stale audio discarded.")
+        self._drain_queue(self._audio_q)
+        self._drain_queue(self._tx_q)
+        self._offload_asr_model()
+        logger.info(
+            "[STT] Mic off — mic released, model offloaded, stale audio discarded."
+        )
 
     def mic_on(self) -> None:
         """
-        • Reload the Whisper model.
+        • Reload the ASR model.
         • Reclaim the microphone.
         • Run a fresh calibration pass (uses the same calibration_sec as __init__).
 
@@ -987,12 +1155,27 @@ class SpeechToText:
             return
 
         # Reload model before unparking threads (warm-up happens inside)
-        self._load_whisper_model()
+        self._load_asr_model()
 
         self._mic_off = False
         self._mic_on_event.set()  # wake both worker threads
 
         logger.info("[STT] Mic on — model loaded, mic reclaimed, recalibrating…")
+
+    def pause_audio(self) -> None:
+        """
+        Gate audio at the callback level — mic stays open, model stays loaded.
+        Frames are discarded before VAD or ASR runs. Zero CPU overhead.
+        Used by TTS interlock so Buddy's voice is never transcribed.
+        """
+        if self._audio_paused.is_set():
+            return
+        self._audio_paused.set()
+        self._drain_queue(self._audio_q)  # flush any frames already queued
+
+    def resume_audio(self) -> None:
+        """Re-open the audio gate after TTS finishes speaking."""
+        self._audio_paused.clear()
 
     # =========================================================================
     # Beep
@@ -1005,7 +1188,7 @@ class SpeechToText:
             if pcm is None:  # Poison pill for shutdown
                 break
             try:
-                sd.play(pcm, DEFAULT_SAMPLE_RATE, blocking=False)
+                sd.play(pcm, DEFAULT_SAMPLE_RATE, blocking=True)
             except Exception:
                 pass
 
@@ -1032,6 +1215,15 @@ class SpeechToText:
         (vad_filter strips it; even without it, a brief sine tone produces
         no text output).
         """
+        # Debounce: if a stream drops and reopens mid-utterance the new VAD
+        # instance would fire again immediately.  Gate on COOLDOWN_SEC — any
+        # legitimate new speech event is always preceded by silence_timeout
+        # (2 s) + COOLDOWN_SEC (0.55 s), so this window never suppresses real
+        # successive speech.
+        now = time.monotonic()
+        if now - self._last_speech_t < COOLDOWN_SEC:
+            return
+        self._last_speech_t = now
         self._play_beep()
         self._cbw.submit(self.on_interrupt)
         self._cbw.submit(self.on_speech_start)
@@ -1043,6 +1235,9 @@ class SpeechToText:
     def _audio_callback(self, indata, frames: int, time_info, status) -> None:
         if status:
             logger.debug("[STT] sounddevice status: %s", status)
+
+        if self._audio_paused.is_set():
+            return  # TTS is speaking — discard before VAD/ASR sees it
 
         # sample_rate is always a positive int after __init__ — no guard needed
         if frames > 0:
@@ -1264,6 +1459,7 @@ class SpeechToText:
         cooldown_until = 0.0
         speech_prob = 0.0
         recent_probs: Deque[float] = deque(maxlen=3)  # Smoothing buffer
+        seg_max_prob = 0.0  # peak smooth_prob seen during the current segment
         voiced = False
         dbg_last = 0.0
 
@@ -1369,7 +1565,7 @@ class SpeechToText:
                 smooth_prob = sum(recent_probs) / len(recent_probs)  # 3-chunk smoothing
 
                 if not in_cooldown:
-                    thr = SILERO_THRESH_END if recording else SILERO_THRESH_START
+                    thr = SILERO_THRESH_END if recording else self._silero_thresh_start
                     if smooth_prob >= thr:
                         any_voiced = True
                     ran_inference = True
@@ -1416,7 +1612,7 @@ class SpeechToText:
                     else:
                         onset_chunks = max(0, onset_chunks - 1)
 
-                if onset_chunks >= SILERO_ONSET_CHUNKS:
+                if onset_chunks >= self._silero_onset_chunks:
                     # Onset flatness gate — mirrors Custom VAD to reject music/hum.
                     # Speech has a dynamic amplitude envelope (ratio ≥ 1.6).
                     # Music / sustained noise has flat energy (ratio < 1.6).
@@ -1462,6 +1658,10 @@ class SpeechToText:
             # ── 9. RECORDING ──────────────────────────────────────────────────
             audio_buf.append(pcm.copy())
             if ran_inference:
+                smooth_prob_now = (
+                    sum(recent_probs) / len(recent_probs) if recent_probs else 0.0
+                )
+                seg_max_prob = max(seg_max_prob, smooth_prob_now)
                 if voiced:
                     last_voiced = now
                     below_for = 0.0
@@ -1476,14 +1676,19 @@ class SpeechToText:
             ) or time_rec >= MAX_RECORD_SEC:
                 do_tx = time_rec >= MIN_SPEECH_SEC
                 if do_tx:
-                    self._enqueue(self._concat_i16(audio_buf), vad_sr)
+                    clip = self._concat_i16(audio_buf)
+                    do_tx = self._clip_passes_snr(clip, baseline)
+                    if do_tx:
+                        self._enqueue(clip, vad_sr)
+                    else:
+                        self._cbw.submit(self.on_segment_end)
                 else:
                     self._cbw.submit(self.on_segment_end)
                 if self.debug:
                     logger.info(
-                        "[STT/Silero] RECORD end | dur=%.2fs prob=%.3f → %s ",
+                        "[STT/Silero] RECORD end | dur=%.2fs max_prob=%.3f → %s ",
                         time_rec,
-                        smooth_prob,
+                        seg_max_prob,
                         "transcribe" if do_tx else "discard",
                     )
                 try:
@@ -1499,6 +1704,7 @@ class SpeechToText:
                 onset_chunks = 0
                 onset_e_win.clear()
                 below_for = 0.0
+                seg_max_prob = 0.0
                 cooldown_until = now + COOLDOWN_SEC
 
     # =========================================================================
@@ -1528,7 +1734,7 @@ class SpeechToText:
 
         NOTE: ZCR gate and Window gate were removed (v1.5). Both structurally
         blocked vowel-initial words (/a/, /i/, /o/) because peak energy always
-        lands on vowels (ZCR 0.010–0.025 < ZCR_MIN). ZCR is still computed for
+        lands on vowels (ZCR 0.010–0.025 ). ZCR is still computed for
         debug logging only and has no effect on triggering.
         """
         # ── Calibration ───────────────────────────────────────────────────────
@@ -1630,6 +1836,7 @@ class SpeechToText:
                 if blocking_calib:
                     if now >= calib_end:
                         baseline = self._finalize_baseline(baseline, calib_energies)
+                        prev_e = baseline  # prevents first post-calib frame looking like an attack
                         calibrated = True
                         logger.info(
                             "[STT/Custom] Calibration done. baseline=%.6f", baseline
@@ -1638,23 +1845,21 @@ class SpeechToText:
                 else:
                     if calib_frames >= CALIB_FRAMES:
                         baseline = self._finalize_baseline(baseline, calib_energies)
+                        prev_e = baseline  # prevents first post-calib frame looking like an attack
                         calibrated = True
                         logger.info(
                             "[STT/Custom] Background calibration done. baseline=%.6f",
                             baseline,
                         )
 
-            # ── 8. Cooldown gate ──────────────────────────────────────────────
-            if now < cooldown_until:
-                if e < baseline * CEILING_MULT:
-                    alpha = NOISE_ALPHA_FAST if e > baseline else NOISE_ALPHA_SLOW
-                    baseline = baseline * (1.0 - alpha) + e * alpha
-                continue
-
-            # ── 9. Baseline adaptation (idle + quiet) ─────────────────────────
+            # ── 8. Baseline adaptation (idle + quiet; runs during cooldown too) ──
             if not recording and e < baseline * CEILING_MULT:
                 alpha = NOISE_ALPHA_FAST if e > baseline else NOISE_ALPHA_SLOW
                 baseline = baseline * (1.0 - alpha) + e * alpha
+
+            # ── 9. Cooldown gate ──────────────────────────────────────────────
+            if now < cooldown_until:
+                continue
 
             adaptive_floor = max(ABS_FLOOR_ENERGY, baseline * FLOOR_MULT)
             start_thr = max(adaptive_floor, baseline * self.speech_trigger_mult)
@@ -1707,7 +1912,7 @@ class SpeechToText:
             if not recording:
                 # Sustain condition: energy above threshold.
                 # speech_like (ZCR) intentionally excluded — vowel-initial words
-                # have ZCR 0.010-0.025 (below ZCR_MIN=0.036) and would reset
+                # have ZCR 0.010-0.025 (below 0.036) and would reset
                 # above_for to 0 on every frame, so they never trigger.
                 # No per-frame ZCR gate — flat_ok handles hum rejection.
                 # above_for decays (not hard-resets) on sub-threshold frames so
@@ -1727,7 +1932,7 @@ class SpeechToText:
                 # has elapsed so we are definitely looking at continuous sound.
                 # NOTE: ZCR window gate (win_ok) was removed — it structurally
                 # fails for vowel-initial words because peak energy always lands
-                # on vowels (ZCR 0.010-0.025, below ZCR_MIN=0.036), causing win_ok
+                # on vowels (ZCR 0.010-0.025), causing win_ok
                 # to read 0% at trigger time for any vowel-heavy onset.
                 flat_ok = True
                 oe_len = len(onset_e_win)
@@ -1788,12 +1993,12 @@ class SpeechToText:
             total_frames += 1
             if impulsive:
                 impulsive_frames += 1
-            # speech_frames removed: ZCR_MIN misclassifies vowels as non-speech.
+            # speech_frames removed: ZCR misclassifies vowels as non-speech.
             # voiced_frames (energy-based) is used for debug instead.
 
             # During recording: voiced = energy above keep_thr and not impulsive.
             # speech_like (ZCR gate) is intentionally NOT checked here —
-            # ZCR_MIN=0.036 rejects pure vowels (ZCR 0.010–0.025) which are
+            # 0.036 ZCR threshold rejects pure vowels (ZCR 0.010–0.025) which are
             # obviously real speech. The ZCR gate is for onset detection only.
             if (e >= keep_thr) and not impulsive:
                 last_voiced = now
@@ -1813,7 +2018,7 @@ class SpeechToText:
 
                 # is_knock: reject clips that are dominated by impulsive frames
                 # (knocks, taps, pops). Uses only the impulsive ratio — NOT
-                # speech_r, because ZCR_MIN misclassifies vowels as non-speech
+                # speech_r, because ZCR misclassifies vowels as non-speech
                 # making legitimate short utterances look like knocks.
                 is_knock = (
                     (time_rec < 0.40 and imp_r >= 0.60)
@@ -1823,7 +2028,12 @@ class SpeechToText:
                 do_tx = time_rec >= MIN_SPEECH_SEC and not is_knock
 
                 if do_tx:
-                    self._enqueue(self._concat_i16(audio_buf), vad_sr)
+                    clip = self._concat_i16(audio_buf)
+                    do_tx = self._clip_passes_snr(clip, baseline)
+                    if do_tx:
+                        self._enqueue(clip, vad_sr)
+                    else:
+                        self._cbw.submit(self.on_segment_end)
                 else:
                     self._cbw.submit(self.on_segment_end)
 
@@ -1869,7 +2079,7 @@ class SpeechToText:
 
     def _transcribe_worker(self) -> None:
         """
-        Serial Whisper transcription worker.
+        Serial STT transcription worker (Whisper or Parakeet, per active backend).
 
         Parks on _mic_on_event while mic is off → zero CPU / GPU usage.
         Processes one clip at a time; the queue depth (8) prevents accumulation.
@@ -1888,7 +2098,7 @@ class SpeechToText:
             if item is None:
                 break
             clip, clip_sr = item
-            if not isinstance(clip, np.ndarray) or clip.size == 0:
+            if clip.size == 0:
                 self._cbw.submit(self.on_segment_end)
                 continue
 
@@ -1900,15 +2110,22 @@ class SpeechToText:
             self._cbw.submit(self.on_segment_end)
 
     def _transcribe(self, clip_i16: np.ndarray, sr: int) -> str:
+        """Dispatch transcription to the active STT backend."""
+        if self._stt_backend == "parakeet_onnx":
+            return self._transcribe_parakeet(clip_i16, sr)
+        return self._transcribe_whisper(clip_i16, sr)
+
+    def _transcribe_whisper(self, clip_i16: np.ndarray, sr: int) -> str:
         """Convert int16 PCM to float32, resample to 16kHz if needed, run Whisper.
         sr must be the sample rate at which the clip was recorded (snapshotted at
         VAD loop start), NOT self.sample_rate which may have changed on reconnect."""
-        if self._whisper is None:
+        model = self._whisper  # snapshot — mic_off() may set to None mid-inference
+        if model is None:
             return ""
 
         audio = _resample_to_16k(clip_i16, sr)
         try:
-            segs, _ = self._whisper.transcribe(
+            segs, _ = model.transcribe(
                 audio,
                 language=self._language_norm,
                 beam_size=self.beam_size,
@@ -1917,20 +2134,56 @@ class SpeechToText:
             text = " ".join(s.text.strip() for s in segs if s.text.strip())
             if not text:
                 return ""
-
-            # Fixed: normalize both sides to guarantee match
-            text_clean = text.strip().lower().rstrip(". ")
-            if text_clean in _HALLUCINATIONS:
-                logger.debug("[STT] Hallucination filtered: %r", text)
-                return ""
-            return text
+            return _apply_hallucination_filter(text)
         except Exception:
             logger.exception("[STT] Whisper transcription failed")
+            return ""
+
+    def _transcribe_parakeet(self, clip_i16: np.ndarray, sr: int) -> str:
+        """Resample int16 PCM to 16kHz float32, run Parakeet TDT ONNX inference."""
+        model = self._parakeet  # snapshot — mic_off() may set to None mid-inference
+        if model is None:
+            return ""
+
+        audio = _resample_to_16k(clip_i16, sr)
+        try:
+            text = model.recognize(audio).strip()
+            if not text:
+                return ""
+            return _apply_hallucination_filter(text)
+        except Exception:
+            logger.exception("[STT] Parakeet transcription failed")
             return ""
 
     # =========================================================================
     # Private helpers
     # =========================================================================
+
+    def _clip_passes_snr(self, clip: np.ndarray, baseline: float) -> bool:
+        """
+        Return False if the clip's mean energy is too close to the noise floor.
+
+        Rejects far-field / ambient speech that was not directed at the mic.
+        The SNR ratio is energy-based (same metric as the VAD baseline), so a
+        value of 5.0 means the clip must be 5× louder than ambient noise in
+        mean-squared energy.  Close speech is typically 50–200×; far-field
+        speech from the next table is typically 2–6×.
+
+        Disabled when min_clip_snr ≤ 0.
+        """
+        if self.min_clip_snr <= 0.0 or clip.size == 0:
+            return True
+        clip_f = clip.astype(np.float32)
+        clip_e = float(np.dot(clip_f, clip_f)) / clip.size / (32768.0**2)
+        ratio = clip_e / (baseline + 1e-12)
+        if ratio < self.min_clip_snr:
+            logger.debug(
+                "[STT] SNR gate rejected clip: ratio=%.1f < min=%.1f",
+                ratio,
+                self.min_clip_snr,
+            )
+            return False
+        return True
 
     @staticmethod
     def _finalize_baseline(baseline: float, energies: List[float]) -> float:
@@ -1953,17 +2206,10 @@ class SpeechToText:
             return chunks[0]
         return np.concatenate(chunks)
 
-    def _drain_audio_q(self) -> None:
+    def _drain_queue(self, q: "queue.Queue") -> None:
         while True:
             try:
-                self._audio_q.get_nowait()
-            except queue.Empty:
-                break
-
-    def _tx_queue_drain(self) -> None:
-        while True:
-            try:
-                self._tx_q.get_nowait()
+                q.get_nowait()
             except queue.Empty:
                 break
 
@@ -2144,35 +2390,124 @@ class SpeechToText:
 
 def live_test() -> None:
     """
-    Interactive CLI test.
-    Press Enter to toggle mute / unmute.
-    Press Ctrl+C to stop.
+    Interactive CLI test.  Reads settings from buddy.toml when available,
+    then falls back to built-in defaults.
+
+    Controls
+    ─────────
+      Enter      toggle mute / unmute
+      Ctrl+C     stop
+
+    Backend is printed at startup.  Override from buddy.toml:
+      [voice]
+      stt_backend = "faster_whisper"   # force Whisper
+      stt_backend = "parakeet_onnx"    # force Parakeet (default)
     """
-    print("\n🎧  STT v1.7 — live test")
-    print("Speak naturally.  Press Enter to mute/unmute.  Ctrl+C to stop.\n")
+    import sys
+
+    # ── Load config (best-effort) ─────────────────────────────────────────────
+    _cfg: dict = {}
+    try:
+        if sys.version_info >= (3, 11):
+            import tomllib as _toml
+        else:
+            import tomli as _toml  # type: ignore
+        _cfg_path = Path(__file__).resolve().parent.parent / "config" / "buddy.toml"
+        if _cfg_path.exists():
+            with open(_cfg_path, "rb") as _f:
+                _raw = _toml.load(_f)
+            _buddy = _raw.get("buddy", _raw) if isinstance(_raw, dict) else {}
+            _cfg = _buddy.get("voice", {}) if isinstance(_buddy, dict) else {}
+    except Exception:
+        pass
+
+    # ── Settings (config → fallback) ─────────────────────────────────────────
+    stt_backend = str(_cfg.get("stt_backend", "parakeet_onnx"))
+    parakeet_model = str(_cfg.get("parakeet_model", "nemo-parakeet-tdt-0.6b-v2"))
+    whisper_size = str(_cfg.get("whisper_model_size", "small"))
+    beam_size = int(_cfg.get("beam_size", 4))
+    silence_timeout = float(_cfg.get("silence_timeout", HANGOVER_SEC))
+    trigger_mult = float(_cfg.get("speech_trigger_mult", 3.0))
+    use_silero = bool(_cfg.get("use_silero_vad", True))
+    enable_beep = bool(_cfg.get("enable_beep", True))
+    calib_sec = float(_cfg.get("calibration_sec", 2.0))
+    mic_index = int(_cfg.get("microphone_index", -1))
+    min_clip_snr = float(_cfg.get("min_clip_snr", 4.0))
+    silero_thresh_start = float(_cfg.get("silero_thresh_start", SILERO_THRESH_START))
+    silero_onset_chunks = int(_cfg.get("silero_onset_chunks", SILERO_ONSET_CHUNKS))
+
+    resolved = _resolve_backend(stt_backend)
+
+    # ── Header ────────────────────────────────────────────────────────────────
+    backend_label = (
+        f"Parakeet TDT  [{parakeet_model}]"
+        if resolved == "parakeet_onnx"
+        else f"Whisper  [{whisper_size}]"
+    )
+    vad_label = "Silero" if (use_silero and _SILERO_AVAILABLE) else "Custom"
+    snr_label = f"{min_clip_snr:.1f}×" if min_clip_snr > 0 else "off"
+
+    print()
+    print("━" * 56)
+    print("  STT live test")
+    print(f"  backend  : {backend_label}")
+    print(
+        f"  vad      : {vad_label}  (thresh={silero_thresh_start:.2f}"
+        f" onset={silero_onset_chunks})"
+    )
+    print(f"  snr gate : {snr_label}")
+    print(f"  silence  : {silence_timeout}s  |  trigger × {trigger_mult}")
+    print("  controls : Enter = mute/unmute   Ctrl+C = stop")
+    print("━" * 56)
+    print()
+
+    # ── State for display ─────────────────────────────────────────────────────
+    _t0 = [0.0]  # mutable ref so inner callbacks can update it
+
+    def on_speech_start() -> None:
+        _t0[0] = time.perf_counter()
+        print("● recording…", end="  ", flush=True)
 
     def on_text(text: str) -> None:
-        print(f"🧠  {text}\n")
+        elapsed = time.perf_counter() - _t0[0]
+        print(f"\r▶  {text}  [{elapsed:.2f}s]\n", flush=True)
+
+    def on_segment_end() -> None:
+        # Only print idle if on_text didn't already print (i.e. empty result)
+        pass
 
     def on_interrupt() -> None:
-        print("🟢  Listening…")
+        pass  # speech_start already covers this
 
+    # ── Build SpeechToText ────────────────────────────────────────────────────
     stt = SpeechToText(
-        whisper_model_size="small",
-        calibration_sec=2.0,
+        stt_backend=stt_backend,
+        parakeet_model=parakeet_model,
+        whisper_model_size=whisper_size,
+        calibration_sec=calib_sec,
+        beam_size=beam_size,
+        whisper_vad_filter=bool(_cfg.get("whisper_vad_filter", True)),
+        speech_trigger_mult=trigger_mult,
+        silence_timeout=silence_timeout,
+        microphone_index=mic_index if mic_index >= 0 else None,
+        use_silero_vad=use_silero,
+        enable_beep=enable_beep,
+        min_clip_snr=min_clip_snr,
+        silero_thresh_start=silero_thresh_start,
+        silero_onset_chunks=silero_onset_chunks,
         on_text=on_text,
         on_interrupt=on_interrupt,
-        debug=True,
-        beam_size=5,
-        whisper_vad_filter=True,
-        speech_trigger_mult=3.0,
-        silence_timeout=HANGOVER_SEC,
-        microphone_index=-1,
-        use_silero_vad=False,  # set False to test Custom VAD
-        enable_beep=True,  # beep when speech is detected
+        on_speech_start=on_speech_start,
+        on_segment_end=on_segment_end,
+        debug=False,
     )
+
+    print(f"  active backend: {stt._stt_backend}")
+    print("  calibrating…\n")
+
     stt.start()
 
+    # ── Enter-key mute toggle ─────────────────────────────────────────────────
     def _toggle() -> None:
         while stt._running:
             try:
@@ -2181,10 +2516,10 @@ def live_test() -> None:
                 break
             if stt.is_mic_off:
                 stt.mic_on()
-                print("🎙️   Mic on — recalibrating…\n")
+                print("▶  mic on — recalibrating…\n")
             else:
                 stt.mic_off()
-                print("🔇  Mic off — released, model offloaded.\n")
+                print("■  mic off — model offloaded.\n")
 
     threading.Thread(target=_toggle, daemon=True, name="live-mic").start()
 
@@ -2192,8 +2527,9 @@ def live_test() -> None:
         while True:
             time.sleep(0.5)
     except KeyboardInterrupt:
-        print("\n🛑  Stopping…")
+        print("\n■  stopping…")
         stt.stop()
+        print("done.")
 
 
 if __name__ == "__main__":

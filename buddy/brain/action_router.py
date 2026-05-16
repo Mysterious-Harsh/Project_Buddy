@@ -77,8 +77,7 @@ def _project_success(tool_name: str, result: Dict[str, Any]) -> Dict[str, Any]:
             "RESULTS": result.get("RESULTS"),
         }
 
-    if tool_name == "filesystem":
-        # Set-based filtering replaces manual loop + repeated .get()
+    if tool_name in ("filesystem", "fs_browse", "fs_read", "fs_write", "fs_manage"):
         return {k: v for k, v in result.items() if k in _FS_FIELDS and v is not None}
 
     if tool_name == "browser":
@@ -126,6 +125,10 @@ def _project_success(tool_name: str, result: Dict[str, Any]) -> Dict[str, Any]:
 # Maps tool name → action verb shown in the spinner during executor + tool execution.
 _TOOL_VERB: Dict[str, str] = {
     "filesystem": "Tending to files...",
+    "fs_browse": "Browsing files...",
+    "fs_read": "Reading files...",
+    "fs_write": "Writing files...",
+    "fs_manage": "Managing files...",
     "terminal": "Setting things in motion...",
     "web_search": "Wandering the web...",
     "web_fetch": "Pulling it close...",
@@ -358,6 +361,7 @@ class ActionRouter:
         planner_instructions: str,
         user_message: str,
         memories: str,
+        budget=None,
         on_token: Optional[Callable[[str, bool], None]] = None,
         llm_options: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
@@ -400,6 +404,7 @@ class ActionRouter:
                     planner_instructions=planner_instructions,
                     available_tools=available_tools_str,
                     memories=memories,
+                    budget=budget,
                     stream=True,
                     llm_options=llm_options,
                 )
@@ -497,7 +502,7 @@ class ActionRouter:
         # ======================================================
         for step in steps:
             step_id = int(step.get("step_id") or 0)
-            tool_name = str(step.get("tool") or "").strip()
+            tool_name = str(step.get("tool") or "").strip().split(".")[0]
             goal = str(step.get("goal") or "").strip()
             instruction = str(step.get("instruction") or "").strip()
             hints = str(step.get("hints") or "").strip()
@@ -617,6 +622,7 @@ class ActionRouter:
                 try:
                     exec_payload = await asyncio.to_thread(
                         self.brain.run_executor,
+                        end_goal=planner_instructions,
                         instruction=instruction_json,
                         prior_outputs=prior_outputs_json,
                         step_followups=self.stack.appendix,

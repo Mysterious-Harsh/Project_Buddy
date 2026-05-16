@@ -11,7 +11,6 @@ TOOL_DESCRIPTION: Runs shell commands via subprocess.run(command, shell=True). P
       - cwd (string, REQUIRED) — absolute working directory path, never null or empty
       - timeout (integer, REQUIRED) — seconds before the command is killed
     </parameters>
-    <returns>OK, CWD, COMMAND, EXIT_CODE, STDOUT, STDERR, TIMEOUT, IS_DAEMON, PID</returns>
     <destructive>CONDITIONAL — any command that modifies system state</destructive>
     <confirmation_required>YES — each destructive action requires its own explicit confirmation in prior turns</confirmation_required>
   </function>
@@ -153,8 +152,8 @@ TOOL_DESCRIPTION: Runs shell commands via subprocess.run(command, shell=True). P
     □ No resource outside <step> touched
 
 </tool_rules>
-
-<error_recovery>
+"""
+TERMINAL_TOOL_ERROR_PROMPT = """<error_recovery>
 Read this section only when <errors> is present in context.
 
 1. ERROR CATEGORIES
@@ -239,5 +238,4 @@ Read this section only when <errors> is present in context.
    □ No silent elevation
    □ No resource outside <step> touched
 
-</error_recovery>
-"""
+</error_recovery>"""

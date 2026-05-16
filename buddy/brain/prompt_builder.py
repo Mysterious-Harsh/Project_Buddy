@@ -1,3 +1,57 @@
+from __future__ import annotations
+
+from buddy.context.token_calculator import count_tokens as _count_tokens
+
+
+def _tok(text: str) -> int:
+    return _count_tokens(text) if text else 0
+
+
+def _trim_memory_tail(memories: str) -> str:
+    """Remove the last memory entry (lowest-ranked) from the memories block."""
+    parts = [p for p in memories.split("\n\n") if p.strip()]
+    if len(parts) > 1:
+        return "\n\n".join(parts[:-1])
+    lines = [l for l in memories.split("\n") if l.strip()]
+    if len(lines) > 1:
+        return "\n".join(lines[:-1])
+    return ""
+
+
+def _trim_history_head(chat_history: str) -> str:
+    """Remove the oldest turn-pair (user + assistant) from ChatML history."""
+    blocks = [b for b in chat_history.split("<|im_start|>") if b.strip()]
+    if len(blocks) <= 2:
+        return ""
+    return "<|im_start|>" + "<|im_start|>".join(blocks[2:])
+
+
+def _fit_soft_context(
+    hard_tokens: int,
+    history: str,
+    memories: str,
+    max_prompt_tokens: int,
+) -> tuple[str, str]:
+    """
+    Trim memories (end-first) then history (start-first) until
+    hard + soft fits within max_prompt_tokens. Best-effort.
+    """
+    while True:
+        total = hard_tokens + _tok(history) + _tok(memories)
+        if total <= max_prompt_tokens:
+            break
+        new_mem = _trim_memory_tail(memories)
+        if new_mem != memories:
+            memories = new_mem
+            continue
+        new_hist = _trim_history_head(history)
+        if new_hist != history:
+            history = new_hist
+            continue
+        break
+    return history, memories
+
+
 def build_prompt(
     system: str,
     context: str,
@@ -71,11 +125,13 @@ def build_retrieval_prompt(
     )
 
     msg_block = (
-        f"<|im_start|>user\n{current_message}\n\nNow, think which informations or"
-        " memories do you need most to give best possible response or to fullfil the"
-        " request or task as the closest friend.\nTry to remember what do you know"
-        " about user and related information (preferences, habits, goals, context) or"
-        " any stuff regarding the message or query or task.\n<|im_end|>"
+        "<|im_start|>user\n"
+        "<incoming_message>\n"
+        f"{current_message}\n"
+        "</incoming_message>\n"
+        "What specific facts, preferences, habits, goals, or prior context from memory"
+        " would help you respond to this message?\n"
+        "<|im_end|>"
     )
 
     parts = [sys_block]
@@ -93,6 +149,7 @@ def build_brain_prompt(
     current_message: str,
     memories: str,
     think_tag: str = "<think>",
+    budget=None,
 ) -> str:
     """
     Assembles the Brain ChatML prompt.
@@ -102,6 +159,7 @@ def build_brain_prompt(
     datetime_block  → current time info
     current_message → raw user message for this turn (with timestamp)
     memories        → retrieved memory entries as formatted text
+    budget          → ContextBudget; when provided, trims soft context to fit
 
     Final token layout the model sees:
       [SYSTEM]    /think + system
@@ -121,6 +179,25 @@ def build_brain_prompt(
     )
 
     msg_block = f"<|im_start|>user\n{current_message}\n<|im_end|>"
+
+    # memory_block overhead (fixed text around the memories content)
+    _mem_overhead = (
+        "<|im_start|>assistant\n<memories>\n\n</memories>\n"
+        "I have everything I need. Generating the best possible response now.\n"
+        f"{think_tag}\n"
+    )
+
+    if budget is not None and budget.max_prompt_tokens > 0:
+        hard = (
+            _tok(sys_block)
+            + _tok(ctx_block)
+            + _tok(msg_block)
+            + _tok(_mem_overhead)
+            + 30
+        )
+        chat_history, memories = _fit_soft_context(
+            hard, chat_history or "", memories or "", budget.max_prompt_tokens
+        )
 
     memory_block = (
         "<|im_start|>assistant\n"
@@ -145,6 +222,7 @@ def build_planner_prompt(
     memories: str,
     followups: str = "",
     think_tag: str = "<think>",
+    budget=None,
 ) -> str:
     """
     Assembles the Planner ChatML prompt.
@@ -155,6 +233,7 @@ def build_planner_prompt(
     planner_instructions → self-contained task from Brain
     memories             → retrieved memory entries as formatted text
     followups            → ChatML-formatted Q&A turns from FollowupStack (optional)
+    budget               → ContextBudget; when provided, trims memories to fit
 
     Final token layout the model sees:
       [SYSTEM]   /think + system
@@ -177,13 +256,29 @@ def build_planner_prompt(
         "<|im_end|>"
     )
 
+    _mem_overhead = "<|im_start|>assistant\n<memories>\n\n</memories>\n<|im_end|>"
+    task_block = (
+        f"<|im_start|>user\n<task>\n{planner_instructions}\n</task>\n<|im_end|>"
+    )
+    prefill = f"<|im_start|>assistant\n{think_tag}\n"
+
+    if budget is not None and budget.max_prompt_tokens > 0:
+        hard = (
+            _tok(sys_block)
+            + _tok(ctx_block)
+            + _tok(_mem_overhead)
+            + _tok(task_block)
+            + _tok(prefill)
+            + _tok(followups)
+            + 30
+        )
+        _, memories = _fit_soft_context(
+            hard, "", memories or "", budget.max_prompt_tokens
+        )
+
     memory_block = (
         f"<|im_start|>assistant\n<memories>\n{memories}\n</memories>\n<|im_end|>"
     )
-
-    task_block = f"<|im_start|>user\n<task>\n{planner_instructions}\n</task>\n<|im_end|>"
-
-    prefill = f"<|im_start|>assistant\n{think_tag}\n"
 
     parts = [sys_block, ctx_block, memory_block, task_block]
     if followups and followups.strip():
@@ -200,6 +295,7 @@ def build_responder_prompt(
     execution_results: str,
     responder_instruction: str,
     think_tag: str = "<think>",
+    budget=None,
 ) -> str:
     """
     Assembles the Responder ChatML prompt.
@@ -209,13 +305,14 @@ def build_responder_prompt(
     memories              → retrieved memory entries (for tone + personalization)
     execution_results     → step_execution_map as JSON string
     responder_instruction → planner's briefing on what to synthesize
+    budget                → ContextBudget; when provided, trims memories to fit
 
     Final token layout the model sees:
       [SYSTEM]   /think + system
       [TOOL]     <context><datetime>...</datetime></context>
       [ASST]     <memories>...</memories>
-      [TOOL]     {execution_results JSON}
       [TOOL]     <task>{responder_instruction}</task>
+      [TOOL]     {execution_results JSON}
       [ASST]     <think>     ← open prefill, model continues from here
     """
     sys_block = f"<|im_start|>system\n/think\n{system}\n<|im_end|>"
@@ -228,20 +325,33 @@ def build_responder_prompt(
         "<|im_end|>"
     )
 
+    _mem_overhead = "<|im_start|>assistant\n<memories>\n\n</memories>\n<|im_end|>"
+    tool_block = f"<|im_start|>tool\n<execution_result_map>\n{execution_results}\n</execution_result_map>\n<|im_end|>"
+    task_block = (
+        f"<|im_start|>tool\n<task>\n{responder_instruction}\n</task>\n<|im_end|>"
+    )
+    prefill = f"<|im_start|>assistant\n{think_tag}\n"
+
+    if budget is not None and budget.max_prompt_tokens > 0:
+        hard = (
+            _tok(sys_block)
+            + _tok(ctx_block)
+            + _tok(_mem_overhead)
+            + _tok(tool_block)
+            + _tok(task_block)
+            + _tok(prefill)
+            + 30
+        )
+        _, memories = _fit_soft_context(
+            hard, "", memories or "", budget.max_prompt_tokens
+        )
+
     memory_block = (
         f"<|im_start|>assistant\n<memories>\n{memories}\n</memories>\n<|im_end|>"
     )
 
-    tool_block = f"<|im_start|>tool\n<execution_result_map>\n{execution_results}\n</execution_result_map>\n<|im_end|>"
-
-    task_block = (
-        f"<|im_start|>tool\n<task>\n{responder_instruction}\n</task>\n<|im_end|>"
-    )
-
-    prefill = f"<|im_start|>assistant\n{think_tag}\n"
-
     return "\n".join(
-        [sys_block, ctx_block, memory_block, tool_block, task_block, prefill]
+        [sys_block, ctx_block, memory_block, task_block, tool_block, prefill]
     )
 
 
@@ -249,27 +359,30 @@ def build_reader_prompt(
     system: str,
     datetime_block: str,
     rolling_context: str,
-    task: str,
+    query: str,
+    section: str,
     think_tag: str = "<think>",
 ) -> str:
     """
-    Assembles the Reader ChatML prompt (one paragraph per call).
+    Assembles the Reader ChatML prompt (one section per call).
 
     system          → BUDDY_IDENTITY + READER_PROMPT + schema
     datetime_block  → current time info
-    rolling_context → findings from previous paragraphs
-    task            → READER_TASK_TEMPLATE (query + paragraph)
+    rolling_context → findings from previous sections
+    query           → what the user is looking for (isolated as [USER])
+    section         → READER_SECTION_TEMPLATE (paragraph + instruction)
 
     Final token layout the model sees:
       [SYSTEM]   /think + system
-      [USER]     <context><datetime>...</datetime><prior_findings>...</prior_findings></context>
-      [USER]     <paragraph>{task}</paragraph>
-      [ASST]     <think>     ← open prefill
+      [TOOL]     <context><datetime>...</datetime><prior_findings>...</prior_findings></context>
+      [USER]     query                 ← isolated: what the user wants
+      [TOOL]     section + instruction ← document data to process
+      [ASST]     <think>              ← open prefill
     """
     sys_block = f"<|im_start|>system\n/think\n{system}\n<|im_end|>"
 
     ctx_block = (
-        "<|im_start|>user\n"
+        "<|im_start|>tool\n"
         "<context>\n"
         f"<datetime>\n{datetime_block}\n</datetime>\n"
         f"<prior_findings>\n{rolling_context}\n</prior_findings>\n"
@@ -277,11 +390,26 @@ def build_reader_prompt(
         "<|im_end|>"
     )
 
-    paragraph_block = f"<|im_start|>user\n{task}\n<|im_end|>"
+    query_block = f"<|im_start|>user\n<user_query>\n{query}\n</user_query>\n<|im_end|>"
+
+    section_block = f"""
+    <|im_start|>tool
+    <section>
+    {section}
+    </section>
+    <|im_end|>"""
+    user_block = (
+        f"<|im_start|>user\n>> Does any part or information of the <section> text"
+        f" relate to the <user_query> ? If yes, write it in findings while keeping"
+        f" every single relevant details, if unsure write it. If no, mark as not"
+        f" relevant.\n<|im_end|>"
+    )
 
     prefill = f"<|im_start|>assistant\n{think_tag}\n"
 
-    return "\n".join([sys_block, ctx_block, paragraph_block, prefill])
+    return "\n".join(
+        [sys_block, ctx_block, query_block, section_block, user_block, prefill]
+    )
 
 
 def build_memory_summary_prompt(
@@ -341,7 +469,7 @@ def build_opener_prompt(
         "<|im_start|>user\n"
         "<context>\n"
         f"<current_time>{time_str}</current_time>\n"
-        f"<recent_conversations>\n{history}\n</recent_conversations>\n"
+        f"<conversation_history>\n{history}\n</conversation_history>\n"
         "</context>\n"
         "<|im_end|>"
     )
@@ -351,10 +479,42 @@ def build_opener_prompt(
     return "\n".join([sys_block, ctx_block, prefill])
 
 
+def build_compactor_prompt(
+    system: str,
+    task: str,
+    output: str,
+    think_tag: str = "<think>",
+) -> str:
+    """
+    Assembles the Compactor ChatML prompt (single tool output → compressed text).
+
+    system  → COMPACTOR_PROMPT + output schema
+    task    → user's original task (preserves task-relevant facts)
+    output  → single tool result to compress
+
+    Final token layout:
+      [SYSTEM]   /think + system
+      [USER]     <task>...</task>  <tool_result>...</tool_result>  >> instruction
+      [ASST]     <think>   ← open prefill
+    """
+    sys_block = f"<|im_start|>system\n/think\n{system}\n<|im_end|>"
+    user_block = (
+        "<|im_start|>user\n"
+        f"<task>\n{task}\n</task>\n"
+        f"<tool_result>\n{output}\n</tool_result>\n"
+        ">> Compress the tool result. Preserve every fact needed for the task."
+        " Remove only noise.\n"
+        "<|im_end|>"
+    )
+    prefill = f"<|im_start|>assistant\n{think_tag}\n"
+    return "\n".join([sys_block, user_block, prefill])
+
+
 def build_executor_prompt(
     system: str,
     datetime_block: str,
     instruction: str,
+    end_goal: str = "",
     prior_outputs: str = "",
     step_errors: str = "",
     followups: str = "",
@@ -365,7 +525,8 @@ def build_executor_prompt(
 
     system          → BUDDY_IDENTITY + EXECUTOR_PROMPT + schema (tool_call_format injected)
     datetime_block  → current time info
-    tool_prompt       → tool prompt + exact call format for this step's tool
+    end_goal        → the overall task planner is trying to achieve (orientation only —
+                      executor must NOT attempt to execute it; only the current step)
     instruction     → single step instruction from planner
     prior_outputs   → outputs from previous steps (optional)
     step_errors     → errors from previous attempts at this step (optional)
@@ -375,6 +536,7 @@ def build_executor_prompt(
       [SYSTEM]   /think + system
       [TOOL]     <context> datetime + prior_outputs </context>
       [TOOL]     {step_errors}          ← failed tool results as ground truth
+      [TOOL]     <end_goal>             ← overall goal for orientation, NOT to execute
       [TOOL]     <current_step>{instruction}</current_step>
       [ASST]     {followup question}    ← real ChatML turns if followup happened
       [USER]     {user answer}          ← actual user input, stays [USER]
@@ -404,6 +566,14 @@ def build_executor_prompt(
     if step_errors and step_errors.strip():
         parts.append(
             f"<|im_start|>tool\n<errors>\n{step_errors}\n</errors>\n<|im_end|>"
+        )
+    if end_goal and end_goal.strip():
+        parts.append(
+            '<|im_start|>tool\n<end_goal READ_ONLY="true">\nREAD ONLY — do not execute'
+            " this. This is the overall task being accomplished\nacross all steps."
+            " Your job is ONLY the current step below. Use this purely\nto understand"
+            " the intent and context behind what you are"
+            f" doing.\n\n{end_goal}\n</end_goal>\n<|im_end|>"
         )
     parts.append(step_block)
     if followups and followups.strip():

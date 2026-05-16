@@ -15,11 +15,6 @@ from buddy.brain.intent_interceptor import (
     interceptor as _interceptor,
     normalize as _normalize,
 )
-from buddy.buddy_core.smart_truncator import (
-    truncate_history,
-    truncate_memory,
-    truncate_proportional,
-)
 
 logger = get_logger("pipeline")
 
@@ -333,10 +328,10 @@ async def handle_turn(
         _adjusted = None
 
     _top_k = _adjusted.top_k_memories if _adjusted else top_k_memories
-    _max_history_chars = _adjusted.max_history_chars if _adjusted else 14_000
-    _max_memory_chars = _adjusted.max_memory_chars if _adjusted else 8_000
     _max_exec_results_chars = _adjusted.max_exec_chars if _adjusted else 16_000
-    _max_tool_output_chars = _adjusted.max_tool_chars if _adjusted else 10_000
+    # Per-step ceiling: a single tool output shouldn't exceed half the exec budget
+    _max_tool_output_chars = _max_exec_results_chars // 2
+    brain.char_threshold = _max_tool_output_chars
 
     session_id = _ensure_session_id(state)
     turn_id = new_turn_id()
@@ -441,9 +436,6 @@ async def handle_turn(
         len(mem_text or ""),
     )
 
-    recent_conversations = truncate_history(recent_conversations, _max_history_chars)
-    mem_text = truncate_memory(mem_text or " ", _max_memory_chars)
-
     # FIX: Set lookup is O(1) and faster than tuple
     if not mem_text or mem_text.strip().lower() in _NULL_MEM_TEXT:
         mem_text = (
@@ -458,6 +450,7 @@ async def handle_turn(
         active_task=user_message,
         recent_turns=recent_conversations,
         memories=mem_text,
+        budget=_adjusted,
         stream=True,
     )
     dt_llm = time.perf_counter() - t0
@@ -577,6 +570,7 @@ async def handle_turn(
             user_message=user_message,
             on_token=progress_cb,
             memories=mem_text,
+            budget=_adjusted,
             llm_options={},
         )
         progress_cb("Putting it into words...", False)
@@ -585,20 +579,23 @@ async def handle_turn(
         ).strip()
         execution_results = action_result.get("step_execution_map")
 
-        execution_results = truncate_proportional(
-            execution_results or {},
-            _max_exec_results_chars,
-            max_per_step_chars=_max_tool_output_chars,
+        execution_results = await asyncio.to_thread(
+            brain.compact_exec_results,
+            execution_results=execution_results or {},
+            task=user_message,
+            memories=mem_text,
+            responder_instruction=responder_instruction,
+            budget=_adjusted,
         )
 
         payload = await asyncio.to_thread(
             brain.run_respond,
             active_task=responder_instruction,
             memories=mem_text,
-            # FIX: Compact JSON saves CPU & network overhead
             execution_results=json.dumps(
                 execution_results, ensure_ascii=False, separators=(",", ":")
             ),
+            budget=_adjusted,
             stream=True,
         )
         parsed_respond = (payload.get("parsed") or {}) if payload else {}
