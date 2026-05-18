@@ -7,9 +7,6 @@ from buddy.prompts.pdf_prompts import PDF_TOOL_PROMPT
 from buddy.tools.document.document_utils import (
     apply_edits,
     extract_pdf_to_html,
-    html_source_path,
-    load_html_source,
-    save_html_source,
     search_html,
     stamp_ids,
 )
@@ -19,8 +16,10 @@ _TOOL = "pdf"
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 
+
 def _resolve(raw: str) -> str:
     import os
+
     p = os.path.expanduser(os.path.expandvars(raw.strip()))
     if not os.path.isabs(p):
         p = os.path.join(os.path.expanduser("~"), p)
@@ -37,7 +36,8 @@ def _err(msg: str, **kw: Any) -> Dict[str, Any]:
 
 def _needs_confirm(preview: str, **kw: Any) -> Dict[str, Any]:
     return {
-        "STATUS": "failed", "TOOL": _TOOL,
+        "STATUS": "failed",
+        "TOOL": _TOOL,
         "NEEDS_CONFIRMATION": True,
         "PREVIEW": preview,
         "NOTE": "Call again with confirmed=true after user approves.",
@@ -61,12 +61,14 @@ def _html_to_pdf(html: str, target: str) -> Optional[str]:
 def _page_count(path: str) -> int:
     try:
         from pypdf import PdfReader
+
         return len(PdfReader(path).pages)
     except Exception:
         return 0
 
 
 # ── tool ──────────────────────────────────────────────────────────────────────
+
 
 class PdfTool:
     tool_name = _TOOL
@@ -77,15 +79,20 @@ class PdfTool:
             "name": self.tool_name,
             "version": self.version,
             "description": (
-                "WHEN: creating, editing, or merging .pdf files.\n\n"
-                "FUNCTIONS:\n"
-                "  create(path, content)        — HTML+CSS string → .pdf; saves .html source alongside for future edits\n"
-                "  read(path, search?)          — returns full HTML source with section IDs stamped (id='s1','s2',...); search= returns only matching sections\n"
-                "  edit(path, edits[])          — patch HTML and re-render: {section_id+new} replace, {old+new} text patch, {op:add_after/add_before/add_end+new} insert, {op:remove+section_id} delete\n"
-                "  merge(sources[], target)     — merge multiple .pdf files into one in order\n\n"
-                "CHAIN: always call read before edit to get current section IDs — IDs change after every edit. "
-                "merge requires all source paths confirmed to exist first (use fs_browse.find if unsure).\n"
-                "NOT: .xlsx → excel | .docx → word | plain file reads → fs_read | plain file writes → fs_write | convert → converter"
+                "WHEN: creating, editing, or merging .pdf files.\n\nFUNCTIONS:\n "
+                " create(path, content)        — HTML+CSS string → .pdf; saves .html"
+                " source alongside for future edits\n  read(path, search?)          —"
+                " returns full HTML source with section IDs stamped (id='s1','s2',...);"
+                " search= returns only matching sections\n  edit(path, edits[])        "
+                "  — patch HTML and re-render: {section_id+new} replace, {old+new} text"
+                " patch, {op:add_after/add_before/add_end+new} insert,"
+                " {op:remove+section_id} delete\n  merge(sources[], target)     — merge"
+                " multiple .pdf files into one in order\n\nCHAIN: always call read"
+                " before edit to get current section IDs — IDs change after every edit."
+                " merge requires all source paths confirmed to exist first (use"
+                " fs_browse.find if unsure).\nNOT: .xlsx → excel | .docx → word | plain"
+                " file reads → fs_read | plain file writes → fs_write | convert →"
+                " converter"
             ),
             "prompt": PDF_TOOL_PROMPT,
         }
@@ -108,14 +115,18 @@ class PdfTool:
             return self._edit(arguments)
         if fn == "merge":
             return self._merge(arguments)
-        return _err(f"Unknown function: {function!r}. Must be: create, read, edit, merge")
+        return _err(
+            f"Unknown function: {function!r}. Must be: create, read, edit, merge"
+        )
 
     # ── create ────────────────────────────────────────────────────────────────
 
     def _create(self, args: Dict[str, Any]) -> Dict[str, Any]:
         raw = str(args.get("path") or "").strip()
         if not raw:
-            return _err("pdf.create: 'path' is required — provide an absolute .pdf path")
+            return _err(
+                "pdf.create: 'path' is required — provide an absolute .pdf path"
+            )
         if not raw.lower().endswith(".pdf"):
             return _err("pdf.create: path must end in .pdf")
 
@@ -127,7 +138,10 @@ class PdfTool:
         p = Path(path)
 
         if p.exists() and not args.get("confirmed"):
-            return _needs_confirm(f"File already exists: {path}\nSetting confirmed=true will overwrite it.")
+            return _needs_confirm(
+                f"File already exists: {path}\nSetting confirmed=true will"
+                " overwrite it."
+            )
 
         try:
             p.parent.mkdir(parents=True, exist_ok=True)
@@ -155,7 +169,9 @@ class PdfTool:
         path = _resolve(raw)
         p = Path(path)
         if not p.exists():
-            return _err(f"pdf.read: file not found: {path} — use fs_browse.find to locate it")
+            return _err(
+                f"pdf.read: file not found: {path} — use fs_browse.find to locate it"
+            )
 
         search = str(args.get("search") or "").strip() or None
 
@@ -169,7 +185,12 @@ class PdfTool:
         if search:
             html = search_html(html, search)
             if not html:
-                return _ok(PATH=str(p), SEARCH=search, HTML="", NOTE="No sections matched the search query.")
+                return _ok(
+                    PATH=str(p),
+                    SEARCH=search,
+                    HTML="",
+                    NOTE="No sections matched the search query.",
+                )
 
         return _ok(PATH=str(p), HTML=html)
 
@@ -187,7 +208,9 @@ class PdfTool:
         path = _resolve(raw)
         p = Path(path)
         if not p.exists():
-            return _err(f"pdf.edit: file not found: {path} — use fs_browse.find to locate it")
+            return _err(
+                f"pdf.edit: file not found: {path} — use fs_browse.find to locate it"
+            )
 
         try:
             html = extract_pdf_to_html(path)
@@ -200,7 +223,11 @@ class PdfTool:
 
         err = _html_to_pdf(html, path)
         if err:
-            return _err(f"Edits applied but re-render failed: {err}", EDITS_APPLIED=applied, EDITS_FAILED=failed)
+            return _err(
+                f"Edits applied but re-render failed: {err}",
+                EDITS_APPLIED=applied,
+                EDITS_FAILED=failed,
+            )
 
         out: Dict[str, Any] = {
             "STATUS": "success" if not failed else "failed",
@@ -212,7 +239,10 @@ class PdfTool:
             "HTML": html,
         }
         if failed:
-            out["ERROR"] = f"{len(failed)} edit(s) could not be applied — check FAILED for details."
+            out["ERROR"] = (
+                f"{len(failed)} edit(s) could not be applied — check FAILED for"
+                " details."
+            )
         return out
 
     # ── merge ─────────────────────────────────────────────────────────────────
@@ -220,11 +250,16 @@ class PdfTool:
     def _merge(self, args: Dict[str, Any]) -> Dict[str, Any]:
         sources = args.get("sources")
         if not sources or not isinstance(sources, list):
-            return _err("pdf.merge: 'sources' is required and must be a non-empty list of .pdf paths")
+            return _err(
+                "pdf.merge: 'sources' is required and must be a non-empty list of .pdf"
+                " paths"
+            )
 
         raw_tgt = str(args.get("target") or "").strip()
         if not raw_tgt:
-            return _err("pdf.merge: 'target' is required — provide an absolute .pdf output path")
+            return _err(
+                "pdf.merge: 'target' is required — provide an absolute .pdf output path"
+            )
         if not raw_tgt.lower().endswith(".pdf"):
             return _err("pdf.merge: target must end in .pdf")
 
@@ -232,7 +267,10 @@ class PdfTool:
         tgt_p = Path(target)
 
         if tgt_p.exists() and not args.get("confirmed"):
-            return _needs_confirm(f"Target already exists: {target}\nSetting confirmed=true will overwrite it.")
+            return _needs_confirm(
+                f"Target already exists: {target}\nSetting confirmed=true will"
+                " overwrite it."
+            )
 
         resolved_sources = [_resolve(str(s)) for s in sources]
         missing = [s for s in resolved_sources if not Path(s).exists()]

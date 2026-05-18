@@ -123,6 +123,8 @@ class ExcelTool:
         try:
             wb = openpyxl.Workbook()
             default_ws = wb.active
+            if default_ws is None:
+                default_ws = wb.create_sheet("Sheet1")
             total_rows = 0
 
             for i, sheet in enumerate(sheets_data):

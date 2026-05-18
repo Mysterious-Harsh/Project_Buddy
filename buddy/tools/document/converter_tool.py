@@ -337,6 +337,9 @@ class ConverterTool:
             else:
                 ws = wb.active
 
+            if ws is None:
+                return _err("No worksheet found in workbook")
+
             out = output_dir / f"{src.stem}.csv"
             with open(str(out), "w", newline="", encoding="utf-8") as f:
                 writer = csv.writer(f)
