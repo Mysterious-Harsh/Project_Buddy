@@ -373,7 +373,7 @@ def _walk_atomacos(element: Any, depth: int, max_depth: int,
 def get_running_apps_pyobjc(include_helpers: bool = False) -> list[tuple[str, int]]:
     """Returns list of (app_name, pid) for running GUI apps.
     Filters out helper subprocesses unless include_helpers is True."""
-    workspace = AppKit.NSWorkspace.sharedWorkspace()
+    workspace = AppKit.NSWorkspace.sharedWorkspace()  # type: ignore[attr-defined]
     apps = workspace.runningApplications()
     result = []
     for app in apps:
@@ -389,7 +389,7 @@ def get_running_apps_pyobjc(include_helpers: bool = False) -> list[tuple[str, in
 
 def get_running_apps_atomacos(include_helpers: bool = False) -> list[tuple[str, int]]:
     import AppKit  # type: ignore
-    workspace = AppKit.NSWorkspace.sharedWorkspace()
+    workspace = AppKit.NSWorkspace.sharedWorkspace()  # type: ignore[attr-defined]
     apps = workspace.runningApplications()
     result = []
     for app in apps:

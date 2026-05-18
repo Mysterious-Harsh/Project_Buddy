@@ -367,9 +367,24 @@ class ExcelTool:
                 if row is None or not isinstance(row, list):
                     return {"op": op_type, "STATUS": "failed", "ERROR": "row must be a list of values"}
                 ws.append(row)
+                new_row_idx = ws.max_row
+                
+                # Inherit formatting from the row above
+                if new_row_idx > 1:
+                    from copy import copy
+                    for col_idx in range(1, len(row) + 1):
+                        new_cell = ws.cell(row=new_row_idx, column=col_idx)
+                        prev_cell = ws.cell(row=new_row_idx - 1, column=col_idx)
+                        if prev_cell.has_style:
+                            new_cell.font = copy(prev_cell.font)
+                            new_cell.border = copy(prev_cell.border)
+                            new_cell.fill = copy(prev_cell.fill)
+                            new_cell.number_format = copy(prev_cell.number_format)
+                            new_cell.alignment = copy(prev_cell.alignment)
+
                 return {
                     "op": op_type, "STATUS": "success",
-                    "ROW_INDEX": ws.max_row, "COLUMNS_WRITTEN": len(row),
+                    "ROW_INDEX": new_row_idx, "COLUMNS_WRITTEN": len(row),
                 }
 
             elif op_type == "insert_row":
@@ -381,8 +396,21 @@ class ExcelTool:
                     return {"op": op_type, "STATUS": "failed", "ERROR": "at_index must be >= 1"}
                 row = op.get("row") or []
                 ws.insert_rows(at_index)
+                
+                from copy import copy
                 for col_idx, val in enumerate(row, 1):
-                    ws.cell(row=at_index, column=col_idx, value=val)
+                    new_cell = ws.cell(row=at_index, column=col_idx, value=val)
+                    # Inherit formatting from the row above (if exists) or the row that was pushed down
+                    reference_row_idx = at_index - 1 if at_index > 1 else at_index + 1
+                    ref_cell = ws.cell(row=reference_row_idx, column=col_idx)
+                    
+                    if ref_cell.has_style:
+                        new_cell.font = copy(ref_cell.font)
+                        new_cell.border = copy(ref_cell.border)
+                        new_cell.fill = copy(ref_cell.fill)
+                        new_cell.number_format = copy(ref_cell.number_format)
+                        new_cell.alignment = copy(ref_cell.alignment)
+
                 return {
                     "op": op_type, "STATUS": "success",
                     "INSERTED_AT": at_index, "COLUMNS_WRITTEN": len(row),

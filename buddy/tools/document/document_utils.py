@@ -27,24 +27,7 @@ def stamp_ids(html: str) -> str:
     return _BLOCK_RE.sub(_replace, html)
 
 
-# ── HTML source path ──────────────────────────────────────────────────────────
-
-def html_source_path(doc_path: str) -> Path:
-    """Return the .html source path alongside a document file."""
-    return Path(doc_path).with_suffix(".html")
-
-
-def load_html_source(doc_path: str) -> Optional[str]:
-    """Return HTML source content if it exists alongside the document."""
-    src = html_source_path(doc_path)
-    if src.exists():
-        return src.read_text(encoding="utf-8")
-    return None
-
-
-def save_html_source(doc_path: str, html: str) -> None:
-    """Save HTML source alongside the document."""
-    html_source_path(doc_path).write_text(html, encoding="utf-8")
+# ── HTML source path (REMOVED) ────────────────────────────────────────────────
 
 
 # ── edit ops ──────────────────────────────────────────────────────────────────
@@ -175,7 +158,9 @@ def search_html(html: str, query: str) -> str:
 # ── extraction: .docx → HTML ──────────────────────────────────────────────────
 
 def extract_docx_to_html(path: str) -> str:
-    """Extract content from an existing .docx and reconstruct as HTML."""
+    """Extract content from an existing .docx and reconstruct as indexed HTML for editing."""
+    import hashlib
+    import os
     try:
         from docx import Document
         from docx.oxml.ns import qn
@@ -185,25 +170,59 @@ def extract_docx_to_html(path: str) -> str:
     doc = Document(path)
     parts: List[str] = ["<html><body>"]
 
+    media_dir = Path("~/.buddy/word_media").expanduser()
+    media_dir.mkdir(parents=True, exist_ok=True)
+
+    p_idx = 0
+    t_idx = 0
+
     for block in doc.element.body:
         tag = block.tag.split("}")[-1] if "}" in block.tag else block.tag
 
         if tag == "p":
             from docx.text.paragraph import Paragraph
             para = Paragraph(block, doc)
+            
+            # Extract images in this paragraph
+            images_html = ""
+            for run in para.runs:
+                for drawing in run.element.findall('.//w:drawing', namespaces=run.element.nsmap):
+                    for blip in drawing.findall('.//a:blip', namespaces=run.element.nsmap):
+                        embed = blip.get(f'{{{run.element.nsmap["r"]}}}embed')
+                        if embed and embed in doc.part.related_parts:
+                            image_part = doc.part.related_parts[embed]
+                            blob = image_part.blob
+                            ext = image_part.content_type.split("/")[-1]
+                            if ext == "jpeg": ext = "jpg"
+                            
+                            file_hash = hashlib.md5(blob).hexdigest()[:10]
+                            img_path = media_dir / f"img_{file_hash}.{ext}"
+                            if not img_path.exists():
+                                with open(img_path, "wb") as f:
+                                    f.write(blob)
+                            images_html += f'<img src="{img_path}">'
+            
             style_name = (para.style.name or "").lower()
             text = _runs_to_html(para.runs)
-            if not text.strip():
+            
+            # Skip if truly empty
+            if not text.strip() and not images_html:
+                p_idx += 1
                 continue
+                
+            content = text + images_html
+
             if style_name.startswith("heading"):
                 try:
                     level = int(style_name.replace("heading", "").strip())
                     level = max(1, min(6, level))
                 except ValueError:
                     level = 2
-                parts.append(f"<h{level}>{text}</h{level}>")
+                parts.append(f"<h{level} id=\"p{p_idx}\">{content}</h{level}>")
             else:
-                parts.append(f"<p>{text}</p>")
+                parts.append(f"<p id=\"p{p_idx}\">{content}</p>")
+            
+            p_idx += 1
 
         elif tag == "tbl":
             from docx.table import Table
@@ -215,10 +234,11 @@ def extract_docx_to_html(path: str) -> str:
                     for c in row.cells
                 )
                 rows_html.append(f"<tr>{cells}</tr>")
-            parts.append(f"<table>{''.join(rows_html)}</table>")
+            parts.append(f"<table id=\"t{t_idx}\">{''.join(rows_html)}</table>")
+            t_idx += 1
 
     parts.append("</body></html>")
-    return stamp_ids("\n".join(parts))
+    return "\n".join(parts)
 
 
 def _runs_to_html(runs: Any) -> str:
@@ -227,6 +247,8 @@ def _runs_to_html(runs: Any) -> str:
         text = run.text or ""
         if not text:
             continue
+        # simple html escape
+        text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
         if run.bold and run.italic:
             text = f"<strong><em>{text}</em></strong>"
         elif run.bold:
@@ -242,48 +264,20 @@ def _runs_to_html(runs: Any) -> str:
 # ── extraction: .pdf → HTML ───────────────────────────────────────────────────
 
 def extract_pdf_to_html(path: str) -> str:
-    """Extract content from an existing .pdf and reconstruct as HTML (best-effort)."""
+    """Extract content from an existing .pdf and reconstruct as structured HTML using pymupdf4llm."""
     try:
-        import pdfplumber
+        import pymupdf4llm
+        import markdown
     except ImportError:
-        raise ImportError("pdfplumber not installed. Run: pip install pdfplumber")
+        raise ImportError("pymupdf4llm or Markdown not installed. Run: pip install pymupdf4llm Markdown")
 
-    parts: List[str] = ["<html><body>"]
-
-    with pdfplumber.open(path) as pdf:
-        for page in pdf.pages:
-            words = page.extract_words(extra_attrs=["size"]) or []
-            if not words:
-                text = page.extract_text() or ""
-                for line in text.splitlines():
-                    line = line.strip()
-                    if line:
-                        parts.append(f"<p>{line}</p>")
-                continue
-
-            # guess headings by font size relative to median
-            sizes = [float(w.get("size", 12) or 12) for w in words]
-            if sizes:
-                median_size = sorted(sizes)[len(sizes) // 2]
-            else:
-                median_size = 12.0
-
-            # group words into lines by top position
-            lines: Dict[float, List[Any]] = {}
-            for w in words:
-                top = round(float(w.get("top", 0)), 1)
-                lines.setdefault(top, []).append(w)
-
-            for top in sorted(lines):
-                line_words = sorted(lines[top], key=lambda w: float(w.get("x0", 0)))
-                text = " ".join(w["text"] for w in line_words).strip()
-                if not text:
-                    continue
-                avg_size = sum(float(w.get("size", 12) or 12) for w in line_words) / len(line_words)
-                if avg_size >= median_size * 1.3:
-                    parts.append(f"<h2>{text}</h2>")
-                else:
-                    parts.append(f"<p>{text}</p>")
-
-    parts.append("</body></html>")
-    return stamp_ids("\n".join(parts))
+    # Extract PDF to Markdown (preserves tables, lists, and reading order perfectly)
+    md_text = pymupdf4llm.to_markdown(path)
+    
+    # Convert the structured Markdown back to semantic HTML for the LLM to read and patch
+    html_content = markdown.markdown(md_text, extensions=['tables', 'fenced_code'])
+    
+    full_html = f"<html><body>\n{html_content}\n</body></html>"
+    
+    # Stamp standard s1, s2 section IDs for the LLM to target
+    return stamp_ids(full_html)

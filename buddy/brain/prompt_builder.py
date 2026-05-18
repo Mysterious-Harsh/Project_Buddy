@@ -549,6 +549,7 @@ def build_executor_prompt(
         "<context>",
         f"<datetime>\n{datetime_block}\n</datetime>",
     ]
+    
     if prior_outputs and prior_outputs.strip():
         ctx_parts.append(
             f"<prior_step_outputs>\n{prior_outputs}\n</prior_step_outputs>"
@@ -557,7 +558,7 @@ def build_executor_prompt(
     ctx_block = "\n".join(ctx_parts)
 
     step_block = (
-        f"<|im_start|>tool\n<current_step>\n{instruction}\n</current_step>\n<|im_end|>"
+        f"<|im_start|>tool\n<current_step_instructions>\n{instruction}\n</current_step_instructions>\n<|im_end|>"
     )
 
     prefill = f"<|im_start|>assistant\n{think_tag}\n"

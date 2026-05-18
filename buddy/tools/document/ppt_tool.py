@@ -430,33 +430,91 @@ def _clear_slide_content(slide: Any) -> None:
 
 
 def _extract_slide_info(slide: Any, idx: int) -> Dict[str, Any]:
-    texts: List[str] = []
-    for shape in slide.shapes:
-        if shape.has_text_frame:
-            for para in shape.text_frame.paragraphs:
-                t = para.text.strip()
-                if t:
-                    texts.append(t)
+    from pptx.enum.shapes import MSO_SHAPE_TYPE
+    import os
+    import hashlib
 
-    notes = ""
-    try:
-        notes = slide.notes_slide.notes_text_frame.text.strip()
-    except Exception:
-        pass
+    spec: Dict[str, Any] = {"slide_number": idx + 1}
+    content: List[Dict[str, Any]] = []
+    texts: List[List[str]] = []
 
-    layout_name = "unknown"
     try:
         layout_name = slide.slide_layout.name
+        spec["layout"] = layout_name
+    except Exception:
+        spec["layout"] = "unknown"
+
+    try:
+        notes = slide.notes_slide.notes_text_frame.text.strip()
+        if notes:
+            spec["notes"] = notes
     except Exception:
         pass
 
-    return {
-        "slide_number": idx + 1,
-        "layout": layout_name,
-        "title": texts[0] if texts else None,
-        "texts": texts,
-        "notes": notes or None,
-    }
+    for shape in slide.shapes:
+        try:
+            if getattr(shape, "shape_type", None) == MSO_SHAPE_TYPE.PICTURE:
+                image_bytes = shape.image.blob
+                ext = shape.image.ext
+                h = hashlib.md5(image_bytes).hexdigest()
+                img_dir = os.path.expanduser("~/.buddy/ppt_media")
+                os.makedirs(img_dir, exist_ok=True)
+                img_path = os.path.join(img_dir, f"{h}.{ext}")
+                
+                if not os.path.exists(img_path):
+                    with open(img_path, "wb") as f:
+                        f.write(image_bytes)
+                
+                content.append({
+                    "type": "image",
+                    "path": img_path,
+                    "position": "center",
+                    "size": "large"
+                })
+            
+            elif getattr(shape, "has_table", False):
+                table = shape.table
+                rows = []
+                for row in table.rows:
+                    row_data = []
+                    for cell in row.cells:
+                        row_data.append(cell.text_frame.text.strip())
+                    rows.append(row_data)
+                
+                if rows:
+                    if len(rows) > 1:
+                        content.append({"type": "table", "headers": rows[0], "rows": rows[1:]})
+                    else:
+                        content.append({"type": "table", "headers": [], "rows": rows})
+                        
+            elif getattr(shape, "has_text_frame", False):
+                para_texts = []
+                for para in shape.text_frame.paragraphs:
+                    t = para.text.strip()
+                    if t:
+                        para_texts.append(t)
+                
+                if para_texts:
+                    texts.append(para_texts)
+                    
+        except Exception:
+            # Safely ignore shapes we cannot extract
+            pass
+
+    if texts:
+        spec["title"] = " ".join(texts[0])
+        for para_texts in texts[1:]:
+            if len(para_texts) > 1:
+                content.append({"type": "bullets", "items": para_texts})
+            else:
+                content.append({"type": "text", "value": " ".join(para_texts)})
+                
+    if content:
+        spec["content"] = content
+    else:
+        spec["content"] = []
+
+    return spec
 
 
 # ── edit op handlers ──────────────────────────────────────────────────────────
@@ -505,8 +563,18 @@ def _op_update_slide(
                 "ERROR": f"slide_number {slide_number} out of range — presentation has {total} slides"}
 
     slide = prs.slides[idx]
+    
+    # Deep extract existing slide into a perfect JSON spec
+    existing_spec = _extract_slide_info(slide, idx)
+    merged_spec = dict(existing_spec)
+    
+    # Perform a smart union: overwrite old elements with explicitly provided new elements
+    for k, v in spec.items():
+        if v is not None:
+            merged_spec[k] = v
+
     _clear_slide_content(slide)
-    err = _populate_slide(slide, spec, theme, slide_w, slide_h)
+    err = _populate_slide(slide, merged_spec, theme, slide_w, slide_h)
     if err:
         return {"op": "update_slide", **err}
 

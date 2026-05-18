@@ -8,7 +8,7 @@ TOOL_DESCRIPTION: Fetch full readable text from URLs, or download binary files t
     <description>Download and extract plain text from one or more URLs. Optionally extracts and analyses images found on the page.</description>
     <parameters>
       - urls            (array,   REQUIRED) — 1 to 4 URL strings; must start with http:// or https://
-      - max_chars       (integer, OPTIONAL, default: 8000, max: 20000) — per-URL text content cap
+      - max_chars       (integer, OPTIONAL, default: 8000, max: 20000) — per-URL text content cap. Understand the query intent: if it requires "deep research" or in-depth information on a specific area, increase this up to the max. Otherwise, keep it between 8000 and 12000.
       - visual_analysis (boolean, OPTIONAL, default: false) — extract and analyse images found on the page; set true when charts, graphs, diagrams, or visual data are relevant
       - max_images      (integer, OPTIONAL, default: 3, max: 8) — max images to analyse per URL; raise only when the user explicitly needs comprehensive visual coverage
     </parameters>

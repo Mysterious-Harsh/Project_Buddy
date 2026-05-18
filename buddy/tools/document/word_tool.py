@@ -5,13 +5,8 @@ from typing import Any, Callable, Dict, List, Optional
 
 from buddy.prompts.word_prompts import WORD_TOOL_PROMPT
 from buddy.tools.document.document_utils import (
-    apply_edits,
     extract_docx_to_html,
-    html_source_path,
-    load_html_source,
-    save_html_source,
     search_html,
-    stamp_ids,
 )
 
 _TOOL = "word"
@@ -114,13 +109,10 @@ class WordTool:
 
         try:
             p.parent.mkdir(parents=True, exist_ok=True)
-            stamped = stamp_ids(content)
             converter = HtmlToDocx()
-            converter.parse_html_file_and_save(None, str(p), html_content=stamped)
-            save_html_source(path, stamped)
+            converter.parse_html_file_and_save(None, str(p), html_content=content)
             return _ok(
                 PATH=str(p),
-                HTML_SOURCE=str(html_source_path(path)),
                 SIZE_BYTES=p.stat().st_size,
             )
         except PermissionError:
@@ -142,15 +134,12 @@ class WordTool:
 
         search = str(args.get("search") or "").strip() or None
 
-        html = load_html_source(path)
-        if html is None:
-            try:
-                html = extract_docx_to_html(path)
-                save_html_source(path, html)
-            except ImportError as e:
-                return _err(str(e))
-            except Exception as e:
-                return _err(f"Failed to extract document content: {e}")
+        try:
+            html = extract_docx_to_html(path)
+        except ImportError as e:
+            return _err(str(e))
+        except Exception as e:
+            return _err(f"Failed to extract document content: {e}")
 
         if search:
             html = search_html(html, search)
@@ -175,30 +164,180 @@ class WordTool:
         if not p.exists():
             return _err(f"word.edit: file not found: {path} — use fs_browse.find to locate it")
 
-        html = load_html_source(path)
-        if html is None:
-            try:
-                html = extract_docx_to_html(path)
-            except ImportError as e:
-                return _err(str(e))
-            except Exception as e:
-                return _err(f"Failed to extract document content: {e}")
-
-        html, applied, failed = apply_edits(html, edits)
-
         try:
-            from htmldocx import HtmlToDocx
+            from docx import Document
+            from docx.shared import Inches
+            from docx.enum.text import WD_BREAK
+            from docx.enum.section import WD_ORIENT
+            from lxml.etree import Element
+            import html.parser
+            import base64
+            import io
+            import os
         except ImportError:
-            return _err("htmldocx not installed. Run: pip install htmldocx")
+            return _err("python-docx not installed. Run: pip install python-docx")
 
         try:
-            save_html_source(path, html)
-            converter = HtmlToDocx()
-            converter.parse_html_file_and_save(None, str(p), html_content=html)
+            doc = Document(path)
+        except Exception as e:
+            return _err(f"Failed to open document: {e}")
+
+        applied = []
+        failed = []
+
+        class HTMLInterceptor(html.parser.HTMLParser):
+            def __init__(self, target_para):
+                super().__init__()
+                self.target_para = target_para
+                self.bold = False
+                self.italic = False
+                self.underline = False
+                
+            def handle_starttag(self, tag, attrs):
+                if tag in ('b', 'strong'): self.bold = True
+                elif tag in ('i', 'em'): self.italic = True
+                elif tag == 'u': self.underline = True
+                elif tag == 'img':
+                    src = dict(attrs).get('src', '')
+                    if src:
+                        try:
+                            run = self.target_para.add_run()
+                            if src.startswith('data:image'):
+                                header, b64 = src.split(',', 1)
+                                run.add_picture(io.BytesIO(base64.b64decode(b64)))
+                            else:
+                                if src.startswith('~'): src = os.path.expanduser(src)
+                                run.add_picture(src)
+                        except Exception as e:
+                            pass
+                            
+            def handle_endtag(self, tag):
+                if tag in ('b', 'strong'): self.bold = False
+                elif tag in ('i', 'em'): self.italic = False
+                elif tag == 'u': self.underline = False
+                
+            def handle_data(self, data):
+                if not data: return
+                run = self.target_para.add_run(data)
+                run.bold = self.bold
+                run.italic = self.italic
+                run.underline = self.underline
+
+        def parse_and_apply(html_str: str, para: Any) -> None:
+            para.clear()
+            html_str = html_str.strip()
+            import re
+            if html_str.startswith('<p') and html_str.endswith('</p>'):
+                html_str = re.sub(r'^<p[^>]*>|</p>$', '', html_str)
+            HTMLInterceptor(para).feed(html_str)
+
+        for edit in edits:
+            op = edit.get("op")
+            section_id = str(edit.get("section_id") or "")
+            
+            try:
+                if op == "set_page_setup":
+                    margin = edit.get("margin")
+                    orient = edit.get("orientation")
+                    for section in doc.sections:
+                        if margin == "narrow":
+                            section.top_margin = Inches(0.5)
+                            section.bottom_margin = Inches(0.5)
+                            section.left_margin = Inches(0.5)
+                            section.right_margin = Inches(0.5)
+                        elif margin == "wide":
+                            section.top_margin = Inches(1)
+                            section.bottom_margin = Inches(1)
+                            section.left_margin = Inches(2)
+                            section.right_margin = Inches(2)
+                        elif margin == "normal":
+                            section.top_margin = Inches(1)
+                            section.bottom_margin = Inches(1)
+                            section.left_margin = Inches(1)
+                            section.right_margin = Inches(1)
+                            
+                        if orient == "landscape":
+                            section.orientation = WD_ORIENT.LANDSCAPE
+                            section.page_width, section.page_height = section.page_height, section.page_width
+                        elif orient == "portrait":
+                            section.orientation = WD_ORIENT.PORTRAIT
+                            section.page_width, section.page_height = min(section.page_width, section.page_height), max(section.page_width, section.page_height)
+                    applied.append({"op": op})
+                    continue
+
+                if op == "add_end":
+                    new_p = doc.add_paragraph()
+                    parse_and_apply(edit.get("new", ""), new_p)
+                    applied.append({"op": op})
+                    continue
+
+                if not section_id:
+                    failed.append({"edit": op, "error": "section_id is required"})
+                    continue
+
+                t_type = section_id[0]
+                try:
+                    idx = int(section_id[1:])
+                except ValueError:
+                    failed.append({"section_id": section_id, "error": "Invalid section_id format"})
+                    continue
+                
+                target = None
+                if t_type == "p" and 0 <= idx < len(doc.paragraphs):
+                    target = doc.paragraphs[idx]
+                elif t_type == "t" and 0 <= idx < len(doc.tables):
+                    target = doc.tables[idx]
+                
+                if not target:
+                    failed.append({"section_id": section_id, "error": "Index out of bounds"})
+                    continue
+
+                if op == "replace":
+                    if t_type == "p":
+                        parse_and_apply(edit.get("new", ""), target)
+                        applied.append({"op": op, "section_id": section_id})
+                    else:
+                        failed.append({"section_id": section_id, "error": "Replacing entire tables is not yet supported."})
+
+                elif op == "remove":
+                    element = target._element
+                    element.getparent().remove(element)
+                    target._element = None
+                    applied.append({"op": op, "section_id": section_id})
+
+                elif op in ("add_after", "add_before"):
+                    style = edit.get("style")
+                    element = target._element
+                    new_element = Element(element.tag)
+                    if op == "add_after":
+                        element.addnext(new_element)
+                    else:
+                        element.addprevious(new_element)
+                    
+                    if t_type == "p":
+                        from docx.text.paragraph import Paragraph
+                        new_p = Paragraph(new_element, target._parent)
+                        if style: new_p.style = style
+                        parse_and_apply(edit.get("new", ""), new_p)
+                    applied.append({"op": op, "section_id": section_id})
+
+                elif op == "add_page_break":
+                    if t_type == "p":
+                        target.add_run().add_break(WD_BREAK.PAGE)
+                        applied.append({"op": op, "section_id": section_id})
+                    else:
+                        failed.append({"section_id": section_id, "error": "Can only add page break to paragraphs"})
+                else:
+                    failed.append({"edit": op, "error": "Unknown op"})
+            except Exception as e:
+                failed.append({"edit": edit, "error": str(e)})
+
+        try:
+            doc.save(path)
         except PermissionError:
             return _err(f"Permission denied when saving: {path}")
         except Exception as e:
-            return _err(f"Edits applied but re-render failed: {e}", EDITS_APPLIED=applied, EDITS_FAILED=failed)
+            return _err(f"Edits applied but save failed: {e}")
 
         out: Dict[str, Any] = {
             "STATUS": "success" if not failed else "failed",
@@ -207,7 +346,6 @@ class WordTool:
             "EDITS_FAILED": len(failed),
             "APPLIED": applied,
             "FAILED": failed,
-            "HTML": html,
         }
         if failed:
             out["ERROR"] = f"{len(failed)} edit(s) could not be applied — check FAILED for details."

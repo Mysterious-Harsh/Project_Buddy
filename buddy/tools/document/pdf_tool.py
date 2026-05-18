@@ -135,10 +135,8 @@ class PdfTool:
             err = _html_to_pdf(stamped, path)
             if err:
                 return _err(err)
-            save_html_source(path, stamped)
             return _ok(
                 PATH=str(p),
-                HTML_SOURCE=str(html_source_path(path)),
                 PAGES=_page_count(path),
                 SIZE_BYTES=p.stat().st_size,
             )
@@ -161,15 +159,12 @@ class PdfTool:
 
         search = str(args.get("search") or "").strip() or None
 
-        html = load_html_source(path)
-        if html is None:
-            try:
-                html = extract_pdf_to_html(path)
-                save_html_source(path, html)
-            except ImportError as e:
-                return _err(str(e))
-            except Exception as e:
-                return _err(f"Failed to extract PDF content: {e}")
+        try:
+            html = extract_pdf_to_html(path)
+        except ImportError as e:
+            return _err(str(e))
+        except Exception as e:
+            return _err(f"Failed to extract PDF content: {e}")
 
         if search:
             html = search_html(html, search)
@@ -194,18 +189,15 @@ class PdfTool:
         if not p.exists():
             return _err(f"pdf.edit: file not found: {path} — use fs_browse.find to locate it")
 
-        html = load_html_source(path)
-        if html is None:
-            try:
-                html = extract_pdf_to_html(path)
-            except ImportError as e:
-                return _err(str(e))
-            except Exception as e:
-                return _err(f"Failed to extract PDF content: {e}")
+        try:
+            html = extract_pdf_to_html(path)
+        except ImportError as e:
+            return _err(str(e))
+        except Exception as e:
+            return _err(f"Failed to extract PDF content: {e}")
 
         html, applied, failed = apply_edits(html, edits)
 
-        save_html_source(path, html)
         err = _html_to_pdf(html, path)
         if err:
             return _err(f"Edits applied but re-render failed: {err}", EDITS_APPLIED=applied, EDITS_FAILED=failed)

@@ -105,7 +105,27 @@ def _route(src_ext: str, dest_fmt: str) -> Optional[str]:
 
 
 def _lo_binary() -> Optional[str]:
+    # On macOS, LibreOffice is often not in PATH, so check default install location
+    import sys
+    import os
+    if sys.platform == "darwin":
+        mac_path = "/Applications/LibreOffice.app/Contents/MacOS/soffice"
+        if os.path.exists(mac_path):
+            return mac_path
     return shutil.which("soffice") or shutil.which("libreoffice")
+
+def _lo_missing_error() -> Dict[str, Any]:
+    import sys
+    if sys.platform == "darwin":
+        install_cmd = "brew install --cask libreoffice"
+    elif sys.platform.startswith("linux"):
+        install_cmd = "sudo apt-get update && sudo apt-get install libreoffice"
+    else:
+        install_cmd = "Download from https://www.libreoffice.org/"
+    return _err(
+        "LIBREOFFICE_MISSING: LibreOffice is required for this conversion but is not installed or not in PATH.\n"
+        f"Action required: {install_cmd}"
+    )
 
 
 def _run_lo(
@@ -270,10 +290,7 @@ class ConverterTool:
     ) -> Dict[str, Any]:
         lo = _lo_binary()
         if not lo:
-            return _err(
-                "LIBREOFFICE_MISSING: LibreOffice not found. "
-                "Install LibreOffice and ensure 'soffice' or 'libreoffice' is in PATH."
-            )
+            return _lo_missing_error()
 
         result = _run_lo(lo, src, dest_fmt, output_dir)
         if result["STATUS"] == "failed":
@@ -422,10 +439,7 @@ class ConverterTool:
     ) -> Dict[str, Any]:
         lo = _lo_binary()
         if not lo:
-            return _err(
-                "LIBREOFFICE_MISSING: LibreOffice not found. "
-                "Install LibreOffice and ensure 'soffice' or 'libreoffice' is in PATH."
-            )
+            return _lo_missing_error()
 
         try:
             import markdown as md_lib

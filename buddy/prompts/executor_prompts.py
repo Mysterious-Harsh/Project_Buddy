@@ -16,7 +16,7 @@ READ ALL FIELDS CAREFULLY BEFORE CONSTRUCTING ANYTHING.
 
 1.1 <current_step> — your only execution authority
   a) Instruction — the exact action and its boundary. Execute what is written. Never infer beyond it.
-  b) Goal — orientation only. Never use it to expand the Instruction.
+  b) Goal — read purpose only. Never use anything from it directly to execute actions or expand the Instruction. You must ONLY follow the exact step instructions.
      If Instruction seems insufficient → status="followup". Never silently bridge the gap.
   c) Hints — fallback guidance. Dormant until needed. Activate only when the primary path fails.
 

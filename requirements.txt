@@ -1,5 +1,5 @@
 absl-py==2.3.1
-openpyxl==3.1.5
+addict==2.4.0
 aiohappyeyeballs==2.6.1
 aiohttp==3.13.2
 aiosignal==1.4.0
@@ -27,8 +27,10 @@ coloredlogs==15.0.1
 confection==0.1.5
 contourpy==1.3.3
 coqpit-config==0.2.2
-kokoro
+coqui-tts==0.27.3
+coqui-tts-trainer==0.3.2
 cryptography==46.0.5
+csvw==4.0.0
 ctranslate2==4.6.2
 curated-tokenizers==0.0.9
 curated-transformers==0.1.1
@@ -41,6 +43,7 @@ decorator==5.2.1
 defusedxml==0.7.1
 deptry==0.25.1
 dill==0.4.0
+dlinfo==2.0.0
 docopt==0.6.2
 dotenv==0.9.9
 duckduckgo_search==8.1.1
@@ -49,6 +52,8 @@ en_core_web_lg @ https://github.com/explosion/spacy-models/releases/download/en_
 en_core_web_sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl#sha256=1932429db727d4bff3deed6b34cfc05df17794f4a52eeb26cf8928f7c1a0fb85
 en_core_web_trf @ https://github.com/explosion/spacy-models/releases/download/en_core_web_trf-3.8.0/en_core_web_trf-3.8.0-py3-none-any.whl#sha256=272a31e9d8530d1e075351d30a462d7e80e31da23574f1b274e200f3fff35bf5
 encodec==0.1.1
+espeakng-loader==0.2.4
+et_xmlfile==2.0.0
 executing==2.2.1
 fastcoref==2.1.6
 faster-whisper==1.2.1
@@ -56,11 +61,18 @@ fastjsonschema==2.21.2
 filelock==3.20.1
 flatbuffers==25.12.19
 fonttools==4.61.1
+fpdf==1.7.2
 frozenlist==1.8.0
 fsspec==2025.10.0
 gguf==0.17.1
 greenlet==3.4.0
 grpcio==1.76.0
+gruut==2.4.0
+gruut-ipa==0.13.0
+gruut_lang_de==2.0.1
+gruut_lang_en==2.0.1
+gruut_lang_es==2.0.1
+gruut_lang_fr==2.0.2
 h11==0.16.0
 h2==4.3.0
 hf-xet==1.2.0
@@ -74,6 +86,7 @@ idna==3.11
 inflect==7.5.0
 iniconfig==2.3.0
 ipython==8.12.3
+isodate==0.7.2
 jedi==0.19.2
 Jinja2==3.1.6
 joblib==1.5.3
@@ -85,10 +98,13 @@ jupyter_core==5.9.1
 jupyterlab_pygments==0.3.0
 kiwisolver==1.4.9
 ko-speech-tools==0.1.0
+kokoro==0.9.4
+language-tags==1.3.1
 lazy_loader==0.4
 librosa==0.11.0
 linkify-it-py==2.1.0
 llvmlite==0.46.0
+loguru==0.7.3
 lxml==6.0.2
 Markdown==3.10
 markdown-it-py==4.0.0
@@ -97,6 +113,7 @@ matplotlib==3.10.8
 matplotlib-inline==0.2.1
 mdit-py-plugins==0.5.0
 mdurl==0.1.2
+misaki==0.9.4
 mistune==3.2.0
 monotonic-alignment-search==0.2.1
 more-itertools==10.8.0
@@ -114,12 +131,9 @@ noisereduce==3.0.3
 num2words==0.5.14
 numba==0.63.1
 numpy==2.3.5
+onnx-asr==0.11.0
 onnxruntime==1.23.2
-# Parakeet TDT STT backend (auto-installed at boot when stt_backend != "faster_whisper"):
-#   onnx-asr              — required for Parakeet TDT on any hardware
-#   onnxruntime-gpu       — replaces onnxruntime above for NVIDIA CUDA acceleration
-#   onnxruntime-rocm      — replaces onnxruntime above for AMD GPU acceleration
-# macOS (Apple Silicon): stock onnxruntime above already includes CoreML EP — no extra install needed.
+openpyxl==3.1.5
 orjson==3.11.5
 packaging @ file:///home/conda/feedstock_root/build_artifacts/bld/rattler-build_packaging_1777103621/work
 pandas==2.3.3
@@ -128,6 +142,7 @@ parso==0.8.6
 pdfminer.six==20251230
 pdfplumber==0.11.9
 pexpect==4.9.0
+phonemizer-fork==3.3.2
 pickleshare==0.7.5
 pillow==12.0.0
 pip-tools==7.5.3
@@ -152,6 +167,9 @@ pydantic==2.12.5
 pydantic_core==2.41.5
 pyee==13.0.1
 Pygments==2.19.2
+PyMuPDF==1.27.2.3
+pymupdf-layout==1.27.2.3
+pymupdf4llm==1.27.2.3
 pyobjc==12.1
 pyobjc-core==12.1
 pyobjc-framework-Accessibility==12.1
@@ -323,22 +341,25 @@ pytest==9.0.2
 python-crfsuite==0.9.11
 python-dateutil==2.9.0.post0
 python-docx==1.2.0
-python-pptx==1.0.2
 python-dotenv==1.2.1
+python-pptx==1.0.2
 pyttsx3==2.99
 pytz==2025.2
 PyYAML==6.0.3
 pyzmq==27.1.0
 qdrant-client==1.16.2
+rdflib==7.6.0
 referencing==0.37.0
 regex==2025.11.3
 requests==2.32.5
 requirements-parser==0.13.0
+rfc3986==1.5.0
 rich==15.0.0
 rpds-py==0.30.0
 safetensors==0.7.0
 scikit-learn==1.8.0
 scipy==1.16.3
+segments==2.4.0
 sentence-transformers==5.2.0
 shellingham==1.5.4
 silero-vad==6.2.0
@@ -355,8 +376,10 @@ spacy-loggers==1.0.5
 srsly==2.5.2
 stack-data==0.6.3
 sympy==1.14.0
+tabulate==0.10.0
 tensorboard==2.20.0
 tensorboard-data-server==0.7.2
+termcolor==3.3.0
 textual==8.2.3
 thinc==8.3.10
 threadpoolctl==3.6.0
@@ -376,6 +399,7 @@ typing_extensions==4.15.0
 tzdata==2025.3
 tzlocal==5.3.1
 uc-micro-py==2.0.0
+uritemplate==4.2.0
 urllib3==2.6.2
 wasabi==1.1.3
 wcwidth==0.2.14
@@ -383,6 +407,7 @@ weasel==0.4.3
 webencodings==0.5.1
 Werkzeug==3.1.4
 wrapt==2.0.1
+xlsxwriter==3.2.9
 xxhash==3.6.0
 yarg==0.1.9
 yarl==1.22.0

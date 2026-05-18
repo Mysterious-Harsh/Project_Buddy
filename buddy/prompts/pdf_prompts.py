@@ -60,17 +60,19 @@ TOOL_DESCRIPTION: Create, read, edit, and merge PDF files using HTML+CSS as the 
 <tool_rules>
 
 1. HTML SOURCE IS THE EDIT TARGET
-   1.1 All edits operate on the stored .html source, not the .pdf binary.
-   1.2 If no .html source exists, the tool extracts content from the PDF first (best-effort — layout may not be perfect).
-   1.3 After every edit, the .html source is saved and the .pdf is re-rendered from it.
-   1.4 Section IDs (s1, s2, ...) are auto-assigned by the tool — never invent or guess IDs.
+   1.1 All edits operate on the HTML representation extracted from the .pdf file.
+   1.2 When you call edit, the tool extracts content from the PDF, applies the HTML patches, and re-renders the PDF. (best-effort — layout may not be perfect).
+   1.3 Section IDs (p1, p2, ...) are auto-assigned by the tool — never invent or guess IDs.
        Always call read first to see the current IDs before editing.
 
-2. AUTHORING FORMAT
+2. AUTHORING FORMAT & PAGE CONFIGURATION
    2.1 content in create must be a valid HTML string with optional CSS in a <style> block.
    2.2 weasyprint supports most CSS 2.1 + select CSS 3: font-family, color, margins, padding, borders, flexbox (partial).
-   2.3 Use @page in CSS to control page size and margins:
-       @page { size: A4; margin: 2cm; }
+   2.3 You control PDF configuration (page size, orientation, margins, fonts) ENTIRELY via CSS. No extra parameters are needed!
+       - Page Size & Orientation: @page { size: A4 landscape; } or @page { size: letter; }
+       - Margins: @page { margin: 1in; } or @page { margin: 2cm 1.5cm; }
+       - Fonts & Spacing: body { font-family: "Arial", sans-serif; font-size: 12pt; line-height: 1.5; }
+       - Page Numbers: @page { @bottom-center { content: counter(page); } }
    2.4 Use page-break-before: always on headings or divs to force new pages.
    2.5 Images: use absolute file:// paths or base64 data URIs — relative paths will not resolve.
 

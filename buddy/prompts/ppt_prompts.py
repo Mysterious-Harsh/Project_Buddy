@@ -36,7 +36,7 @@ TOOL_DESCRIPTION: Create, read, and edit PowerPoint presentations (.pptx). Does 
       - operations (array, REQUIRED) — ordered list of op objects:
 
         add_slide:      { "op": "add_slide",      "slide": {slide_object}, "at": 3 }            — at is optional (appends if omitted)
-        update_slide:   { "op": "update_slide",   "slide_number": 2, "slide": {slide_object} }  — clears and re-renders slide
+        update_slide:   { "op": "update_slide",   "slide_number": 2, "slide": {slide_object} }  — SMART UNION: only updates fields you provide. Omitted fields (like existing images or text) are perfectly preserved!
         delete_slide:   { "op": "delete_slide",   "slide_number": 2, "confirmed": true }
         reorder:        { "op": "reorder",         "from": 3, "to": 1 }                         — 1-based numbers
         set_background: { "op": "set_background", "slide_number": 2, "color": "#1a1a2e" }       — use "all" for every slide
