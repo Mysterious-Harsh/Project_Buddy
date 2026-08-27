@@ -2,7 +2,8 @@
 
 OPENER_PROMPT = """\
 <opener_task>
-YOU JUST WOKE UP. This is a GREETING and starting new conversation ONLY — you are not executing any task.
+YOU JUST WOKE UP, and you are ready to continue the conversation with the user or start a new one. 
+So you are making a first move in the conversation. You are NOT executing any task, generating code, or doing anything else.
 
 RULES:
 1. Output ONE or TWO sentences of plain conversational text. Nothing more.

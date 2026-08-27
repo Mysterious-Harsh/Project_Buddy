@@ -125,13 +125,9 @@ def build_retrieval_prompt(
     )
 
     msg_block = (
-        "<|im_start|>user\n"
-        "<incoming_message>\n"
-        f"{current_message}\n"
-        "</incoming_message>\n"
-        "What specific facts, preferences, habits, goals, or prior context from memory"
-        " would help you respond to this message?\n"
-        "<|im_end|>"
+        f"<|im_start|>user\n<incoming_message>\n{current_message}\n</incoming_message>\nNow"
+        " quickly decide what information to retrieve from memory to help you respond"
+        " to the user as a close friend.\n<|im_end|>"
     )
 
     parts = [sys_block]
@@ -549,7 +545,7 @@ def build_executor_prompt(
         "<context>",
         f"<datetime>\n{datetime_block}\n</datetime>",
     ]
-    
+
     if prior_outputs and prior_outputs.strip():
         ctx_parts.append(
             f"<prior_step_outputs>\n{prior_outputs}\n</prior_step_outputs>"
@@ -557,9 +553,7 @@ def build_executor_prompt(
     ctx_parts += ["</context>", "<|im_end|>"]
     ctx_block = "\n".join(ctx_parts)
 
-    step_block = (
-        f"<|im_start|>tool\n<current_step_instructions>\n{instruction}\n</current_step_instructions>\n<|im_end|>"
-    )
+    step_block = f"<|im_start|>tool\n<current_step_instructions>\n{instruction}\n</current_step_instructions>\n<|im_end|>"
 
     prefill = f"<|im_start|>assistant\n{think_tag}\n"
 

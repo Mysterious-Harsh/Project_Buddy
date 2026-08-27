@@ -48,7 +48,7 @@ from pathlib import Path
 import threading
 import time
 import uuid
-from typing import Any
+from typing import Any, Literal, cast
 
 from rich.markup import escape as markup_escape
 from textual.app import App, ComposeResult
@@ -601,6 +601,7 @@ class MainScreen(Screen):
             return
         try:
             from buddy.tools.os.clipboard import _set as _clip_set
+
             _clip_set(text)
             if self._w_status_bar:
                 self._w_status_bar.set_hint(f"[{_GREEN}]copied to clipboard[/]", 2.0)
@@ -1038,10 +1039,18 @@ class MainScreen(Screen):
             return
         if muted:
             self._tts.mute()
-            hint = f"[{_DIM}]🔇 Voice Out Off[/]" if _USE_UNICODE else f"[{_DIM}]Voice Out Off[/]"
+            hint = (
+                f"[{_DIM}]🔇 Voice Out Off[/]"
+                if _USE_UNICODE
+                else f"[{_DIM}]Voice Out Off[/]"
+            )
         else:
             self._tts.unmute()
-            hint = f"[{_GREEN}]🔊 Voice Out On[/]" if _USE_UNICODE else f"[{_GREEN}]Voice Out On[/]"
+            hint = (
+                f"[{_GREEN}]🔊 Voice Out On[/]"
+                if _USE_UNICODE
+                else f"[{_GREEN}]Voice Out On[/]"
+            )
         try:
             sb = self._w_status_bar or self.query_one(StatusBar)
             sb.set_hint(hint)
@@ -1180,7 +1189,9 @@ class BuddyApp(App):
         self._interrupt_event = threading.Event()
         self._stt: Any = None
         self._tts: Any = None
-        self._tts_active = threading.Event()  # set while TTS is speaking; suppresses STT on_text
+        self._tts_active = (
+            threading.Event()
+        )  # set while TTS is speaking; suppresses STT on_text
         self._main_screen: MainScreen | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._bootstrap_state: Any = None  # set by _async_on_boot_done
@@ -1293,30 +1304,43 @@ class BuddyApp(App):
                 if self._main_screen and loop:
                     loop.call_soon_threadsafe(self._main_screen.set_mic_idle)
 
-            self._stt = SpeechToText(
-                whisper_model_size=str(voice_cfg.get("whisper_model_size", "base")),
-                whisper_download_root=str(whisper_dir),
-                calibration_sec=float(voice_cfg.get("calibration_sec", 0.0)),
-                language=str(voice_cfg.get("language", "en")),
-                microphone_index=mic_idx if mic_idx >= 0 else None,
-                silence_timeout=float(voice_cfg.get("silence_timeout", 1.4)),
-                on_text=on_text,
-                on_interrupt=on_interrupt,
-                on_speech_start=on_speech_start,
-                on_segment_end=on_segment_end,
-                beam_size=int(voice_cfg.get("beam_size", 5)),
-                whisper_vad_filter=bool(voice_cfg.get("whisper_vad_filter", True)),
-                speech_trigger_mult=float(voice_cfg.get("speech_trigger_mult", 3.0)),
-                use_silero_vad=bool(voice_cfg.get("use_silero_vad", False)),
-                enable_beep=bool(voice_cfg.get("enable_beep", True)),
-                debug=bool(voice_cfg.get("debug", False)),
-                stt_backend=str(voice_cfg.get("stt_backend", "parakeet_onnx")),
-                parakeet_model=str(voice_cfg.get("parakeet_model", "nemo-parakeet-tdt-0.6b-v2")),
-                min_clip_snr=float(voice_cfg.get("min_clip_snr", 0.0)),
-                silero_thresh_start=float(voice_cfg.get("silero_thresh_start", 0.65)),
-                silero_onset_chunks=int(voice_cfg.get("silero_onset_chunks", 4)),
-            )
-            self._stt.start()
+            def _build_stt() -> SpeechToText:
+                # Constructs SpeechToText (model load + JIT warmup — blocking,
+                # even on a prewarm cache hit) and starts it. Must run off the
+                # event loop thread or it freezes the entire Textual UI.
+                _stt = SpeechToText(
+                    whisper_model_size=str(voice_cfg.get("whisper_model_size", "base")),
+                    whisper_download_root=str(whisper_dir),
+                    calibration_sec=float(voice_cfg.get("calibration_sec", 0.0)),
+                    language=str(voice_cfg.get("language", "en")),
+                    microphone_index=mic_idx if mic_idx >= 0 else None,
+                    silence_timeout=float(voice_cfg.get("silence_timeout", 1.4)),
+                    on_text=on_text,
+                    on_interrupt=on_interrupt,
+                    on_speech_start=on_speech_start,
+                    on_segment_end=on_segment_end,
+                    beam_size=int(voice_cfg.get("beam_size", 5)),
+                    whisper_vad_filter=bool(voice_cfg.get("whisper_vad_filter", True)),
+                    speech_trigger_mult=float(
+                        voice_cfg.get("speech_trigger_mult", 3.0)
+                    ),
+                    use_silero_vad=bool(voice_cfg.get("use_silero_vad", False)),
+                    enable_beep=bool(voice_cfg.get("enable_beep", True)),
+                    debug=bool(voice_cfg.get("debug", False)),
+                    stt_backend=str(voice_cfg.get("stt_backend", "parakeet_onnx")),
+                    parakeet_model=str(
+                        voice_cfg.get("parakeet_model", "nemo-parakeet-tdt-0.6b-v2")
+                    ),
+                    min_clip_snr=float(voice_cfg.get("min_clip_snr", 0.0)),
+                    silero_thresh_start=float(
+                        voice_cfg.get("silero_thresh_start", 0.65)
+                    ),
+                    silero_onset_chunks=int(voice_cfg.get("silero_onset_chunks", 4)),
+                )
+                _stt.start()
+                return _stt
+
+            self._stt = await asyncio.to_thread(_build_stt)
 
             if self._main_screen:
                 self._main_screen.set_stt_engine(self._stt)
@@ -1366,14 +1390,23 @@ class BuddyApp(App):
                 if self._main_screen and loop:
                     loop.call_soon_threadsafe(self._main_screen.set_tts_idle)
 
-            self._tts = TextToSpeech(
-                engine=str(tts_cfg.get("engine", "kokoro")),
-                voice=str(tts_cfg.get("voice", "af_heart")),
-                speed=float(tts_cfg.get("speed", 1.0)),
-                lang_code=str(tts_cfg.get("language", "a")),
-                on_speaking_start=_on_tts_start,
-                on_idle=_on_tts_idle,
-            )
+            def _build_tts() -> TextToSpeech:
+                # KPipeline(...) inside TextToSpeech.__init__ loads the real
+                # Kokoro model — blocking, no cache/prewarm exists for TTS at
+                # all. Must run off the event loop thread or it freezes the UI.
+                return TextToSpeech(
+                    engine=cast(
+                        Literal["kokoro", "pyttsx3"],
+                        str(tts_cfg.get("engine", "kokoro")),
+                    ),
+                    voice=str(tts_cfg.get("voice", "af_heart")),
+                    speed=float(tts_cfg.get("speed", 1.0)),
+                    lang_code=str(tts_cfg.get("language", "a")),
+                    on_speaking_start=_on_tts_start,
+                    on_idle=_on_tts_idle,
+                )
+
+            self._tts = await asyncio.to_thread(_build_tts)
 
             if self._main_screen:
                 self._main_screen.set_tts_engine(self._tts)
@@ -1456,8 +1489,12 @@ def _prewarm_whisper_before_textual() -> None:
         if _resolved == "parakeet_onnx":
             from buddy.ui.stt import _load_parakeet  # noqa: PLC0415
 
-            _pk_model = str(_voice_cfg.get("parakeet_model", "nemo-parakeet-tdt-0.6b-v2"))
-            logger.info("STT: pre-warming Parakeet '%s' before Textual starts", _pk_model)
+            _pk_model = str(
+                _voice_cfg.get("parakeet_model", "nemo-parakeet-tdt-0.6b-v2")
+            )
+            logger.info(
+                "STT: pre-warming Parakeet '%s' before Textual starts", _pk_model
+            )
             _load_parakeet(_pk_model)
             logger.info("STT: Parakeet cached — Textual init will be a cache hit")
         else:
@@ -1466,7 +1503,9 @@ def _prewarm_whisper_before_textual() -> None:
             _size = str(_voice_cfg.get("whisper_model_size", "base"))
             _compute_type = str(_voice_cfg.get("compute_type", ""))
             _whisper_dir = str(_root / "data" / "models" / "whisper")
-            logger.info("STT: pre-warming WhisperModel '%s' before Textual starts", _size)
+            logger.info(
+                "STT: pre-warming WhisperModel '%s' before Textual starts", _size
+            )
             _load_whisper(_size, _whisper_dir, _compute_type)
             logger.info("STT: WhisperModel cached — Textual init will be a cache hit")
 

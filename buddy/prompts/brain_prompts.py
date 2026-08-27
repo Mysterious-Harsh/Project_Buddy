@@ -9,11 +9,11 @@
 RETRIEVAL_GATE_PROMPT = """
 <your_current_job>
 §1. STANCE — MEMORY LOOKUP ONLY
-Your ONLY job right now is to decide what to look up in memory.
+Your ONLY job right now is to quickly and accurately decide what to look up in memory.
 You are NOT responding to the message. You are NOT generating code, text, answers, or plans.
 You are NOT helping the user yet. That comes later.
 
-Right now you are doing ONE thing: scanning the incoming message and deciding which memories
+Right now you are doing ONE thing: scanning the incoming message and quickly deciding which memories
 to retrieve so the response layer has what it needs.
 
 Output: a list of search queries and a deep_recall flag. Nothing else.

@@ -461,7 +461,7 @@ def _extract_image_candidates(
             or img.get("data-lazy-src")
             or ""
         )
-        if not src or src.startswith("data:"):
+        if not src or not isinstance(src, str) or src.startswith("data:"):
             continue
 
         src = urljoin(base_url, src)
@@ -475,8 +475,10 @@ def _extract_image_candidates(
 
         # Size filter — skip images explicitly declared tiny
         try:
-            w = int(img.get("width") or 0)
-            h = int(img.get("height") or 0)
+            width = img.get("width")
+            height = img.get("height")
+            w = int(str(width)) if width else 0
+            h = int(str(height)) if height else 0
             if (w and w < 100) or (h and h < 100):
                 continue
         except (ValueError, TypeError):
@@ -488,8 +490,10 @@ def _extract_image_candidates(
             continue
 
         # Build context string from the richest available signal
-        alt        = (img.get("alt") or "").strip()
-        title_attr = (img.get("title") or "").strip()
+        alt_value = img.get("alt")
+        alt = alt_value.strip() if isinstance(alt_value, str) else ""
+        title_value = img.get("title")
+        title_attr = title_value.strip() if isinstance(title_value, str) else ""
 
         figcaption = ""
         parent_fig = img.find_parent("figure")
